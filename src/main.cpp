@@ -1,6 +1,8 @@
 #include <Arduino.h>
+#include <Wire.h>
 #include <TFT_eSPI.h>
 #include <TM1638plus.h>
+#include <M5ROTATE8.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
@@ -32,8 +34,8 @@
 #define TM1638_2_DIO 27
 
 // Rotary Encoder (5 pins)
-#define ENCODER_CLK 21
-#define ENCODER_DT  22
+#define ENCODER_CLK 15
+#define ENCODER_DT  12
 #define ENCODER_SW  13
 
 // 3 BUTTON PANEL - SMART OPEN ANALOG BUTTONS (3 pins: GND, VCC, SIG)
@@ -54,11 +56,16 @@
 // Volume Toggle Button (pin 14)
 #define VOLUME_TOGGLE_BTN 14
 
+// I2C Pins for M5 8ENCODER
+#define I2C_SDA 21
+#define I2C_SCL 22
+#define M5_8ENCODER_ADDR 0x41  // Dirección por defecto del M5 8ENCODER
+
 // ============================================
 // CONSTANTS
 // ============================================
 #define MAX_STEPS 16
-#define MAX_TRACKS 16  // 16 instrumentos: 8 por página
+#define MAX_TRACKS 8  // 8 tracks/instrumentos (simplificado)
 #define MAX_PATTERNS 16
 #define MAX_KITS 3
 #define MIN_BPM 40
@@ -66,7 +73,7 @@
 #define DEFAULT_BPM 120
 #define DEFAULT_VOLUME 75
 #define MAX_VOLUME 150  // Volumen máximo ampliado para mayor potencia
-#define MAX_SAMPLES 16  // Total de instrumentos disponibles
+#define MAX_SAMPLES 8  // 8 LIVE PADS (simplificado)
 
 // ============================================
 // SISTEMA DE TEMAS VISUALES
@@ -226,6 +233,7 @@ struct DiagnosticInfo {
     bool tm1638_1_Ok;
     bool tm1638_2_Ok;
     bool encoderOk;
+    bool m5encoderOk;
     bool udpConnected;
     String lastError;
     
@@ -234,6 +242,7 @@ struct DiagnosticInfo {
         tm1638_1_Ok(false), 
         tm1638_2_Ok(false), 
         encoderOk(false), 
+        m5encoderOk(false),
         udpConnected(false),
         lastError("") {}
 };
@@ -245,6 +254,7 @@ TFT_eSPI tft = TFT_eSPI();
 TM1638plus tm1(TM1638_1_STB, TM1638_1_CLK, TM1638_1_DIO, true);
 TM1638plus tm2(TM1638_2_STB, TM1638_2_CLK, TM1638_2_DIO, true);
 HardwareSerial dfplayerSerial(1);  // UART1 para DFPlayer (pines configurables)
+M5ROTATE8 m5encoder(M5_8ENCODER_ADDR);  // M5 8ENCODER module
 // RotaryEncoder encoder(ENCODER_CLK, ENCODER_DT, RotaryEncoder::LatchMode::TWO03);
 
 // GLOBAL VARIABLES
@@ -253,12 +263,30 @@ Pattern patterns[MAX_PATTERNS];
 DrumKit kits[MAX_KITS];
 DiagnosticInfo diagnostic;
 
+// M5 8ENCODER Variables
+int32_t encoderValues[8] = {0};        // Valores actuales de cada encoder
+int32_t lastEncoderValues[8] = {0};    // Últimos valores leídos
+uint8_t encoderLEDColors[8][3];        // RGB para cada LED (canal 0-7)
+bool m5encoderConnected = false;       // Estado de conexión del M5 8ENCODER
+unsigned long lastEncoderRead = 0;     // Control de lectura
+const unsigned long ENCODER_READ_INTERVAL = 50; // 50ms = 20Hz
+
+// Parámetros controlables por encoder (por cada track)
+enum EncoderMode {
+    ENC_MODE_VOLUME,      // Volumen individual del track
+    ENC_MODE_PITCH,       // Pitch/velocidad
+    ENC_MODE_PAN,         // Paneo (futuro)
+    ENC_MODE_EFFECT       // Efecto (futuro)
+};
+EncoderMode encoderMode = ENC_MODE_VOLUME;  // Modo actual
+int trackVolumes[8] = {100, 100, 100, 100, 100, 100, 100, 100};  // Volumen individual por track (0-150)
+
 Screen currentScreen = SCREEN_BOOT;
 
 int currentPattern = 0;
 int currentKit = 0;
 int currentStep = 0;
-int sequencerPage = 0;  // 0 = instrumentos 1-8, 1 = instrumentos 9-16
+// sequencerPage REMOVIDO - solo 1 página con 8 tracks
 int tempo = DEFAULT_BPM;
 int volume = DEFAULT_VOLUME;
 unsigned long lastStepTime = 0;
@@ -320,12 +348,12 @@ int lastSequencerVolume = DEFAULT_VOLUME;
 int lastLivePadsVolume = 100;
 unsigned long lastVolumeRead = 0;
 
-unsigned long ledOffTime[16] = {0};
-bool ledActive[16] = {false};
+unsigned long ledOffTime[8] = {0};  // 8 LEDs (simplificado)
+bool ledActive[8] = {false};         // 8 LEDs (simplificado)
 
 int audioLevels[8] = {0};
-bool padPressed[16] = {false};  // Estado de pads presionados para efecto neón
-unsigned long padPressTime[16] = {0};  // Tiempo de presión para tremolo
+bool padPressed[8] = {false};  // 8 pads presionados (simplificado)
+unsigned long padPressTime[8] = {0};  // Tiempo de presión para tremolo (8 pads)
 unsigned long lastVizUpdate = 0;
 
 DisplayMode currentDisplayMode = DISPLAY_BPM;
@@ -342,10 +370,10 @@ bool udpConnected = false;
 unsigned long lastUdpCheck = 0;
 const unsigned long UDP_CHECK_INTERVAL = 30000;  // 30 segundos entre intentos de reconexión
 
-// Variables para manejo de botones
+// Variables para manejo de botones (8 botones)
 uint16_t lastButtonState = 0;
-unsigned long buttonPressTime[16] = {0};
-unsigned long lastRepeatTime[16] = {0};
+unsigned long buttonPressTime[8] = {0};
+unsigned long lastRepeatTime[8] = {0};
 
 // ============================================
 // DATA
@@ -358,9 +386,7 @@ const char* kitNames[MAX_KITS] = {
 
 const char* trackNames[MAX_TRACKS] = {
     "BD", "SD", "CH", "OH",
-    "CL", "T1", "T2", "CY",
-    "PC", "CB", "MA", "WH",
-    "CR", "RD", "CP", "RS"
+    "CL", "T1", "T2", "CY"
 };
 
 const char* instrumentNames[MAX_TRACKS] = {
@@ -371,15 +397,7 @@ const char* instrumentNames[MAX_TRACKS] = {
     "CLAP    ",
     "TOM-LO  ",
     "TOM-HI  ",
-    "CYMBAL  ",
-    "PERCUSS ",
-    "COWBELL ",
-    "MARACAS ",
-    "WHISTLE ",
-    "CRASH   ",
-    "RIDE    ",
-    "CLAVES  ",
-    "RIMSHOT "
+    "CYMBAL  "
 };
 
 const char* menuItems[] = {
@@ -399,15 +417,7 @@ const uint16_t instrumentColors[MAX_TRACKS] = {
     COLOR_INST_CLAP,   // CL (Clap = CLAP)
     COLOR_INST_TOMLO,  // T1 (Tom Low = TOM-LO)
     COLOR_INST_TOMHI,  // T2 (Tom High = TOM-HI)
-    COLOR_INST_CYMBAL, // CY (Cymbal = CYMBAL)
-    0xFD20,            // PC (Percussion = Naranja)
-    0xFFE0,            // CB (Cowbell = Amarillo)
-    0x07FF,            // MA (Maracas = Cyan)
-    0xF81F,            // WH (Whistle = Magenta)
-    0xA817,            // CR (Crash = Púrpura)
-    0x2E86,            // RD (Ride = Verde claro)
-    0x3D8F,            // CP (Claves = Azul claro)
-    0xFBE0             // RS (Rimshot = Rosa)
+    COLOR_INST_CYMBAL  // CY (Cymbal = CYMBAL)
 };
 
 // ============================================
@@ -423,6 +433,8 @@ void handleBackButton();
 void handlePlayStopButton();
 void handleMuteButton();
 void handleVolume();
+void handleM5Encoders();
+void updateEncoderLEDs();
 void debugAnalogButtons();
 void triggerDrum(int track);
 void testButtonsOnBoot();
@@ -1384,7 +1396,7 @@ void testButtonsOnBoot() {
             }
             Serial.println(")");
             
-            for (int i = 0; i < 16; i++) {
+            for (int i = 0; i < 8; i++) {  // Solo 8 botones
                 if (buttons & (1 << i)) {
                     Serial.printf("  ✓ Button S%d pressed\n", i + 1);
                     setLED(i, true);
@@ -1502,6 +1514,90 @@ void setup() {
     analogSetAttenuation(ADC_11db);
     Serial.println("OK");
     
+    // I2C Init para M5 8ENCODER
+    Serial.print("► I2C Init (SDA:21, SCL:22)... ");
+    Wire.begin(I2C_SDA, I2C_SCL);
+    Serial.println("OK");
+    
+    // M5 8ENCODER Init
+    Serial.print("► M5 8ENCODER Init... ");
+    if (m5encoder.begin()) {
+        m5encoderConnected = true;
+        Serial.println("OK");
+        Serial.printf("   Firmware version: %d\n", m5encoder.getVersion());
+        
+        // ===== ANIMACIÓN DE BOOT CON LEDS =====
+        Serial.println("   Running LED boot sequence...");
+        
+        // 1. Apagar todos los LEDs
+        m5encoder.allOff();
+        delay(200);
+        
+        // 2. Todos en ROJO brillante
+        for (int i = 0; i < 9; i++) {
+            m5encoder.writeRGB(i, 255, 0, 0);  // Rojo brillante
+        }
+        delay(500);
+        
+        // 3. Secuencia de onda (chase) en rojo
+        for (int loop = 0; loop < 2; loop++) {
+            for (int i = 0; i < 8; i++) {
+                // Apagar todos
+                m5encoder.allOff();
+                // Encender actual en rojo brillante
+                m5encoder.writeRGB(i, 255, 0, 0);
+                delay(80);
+            }
+        }
+        
+        // 4. Efecto de respiración (fade in/out) todos en rojo
+        for (int brightness = 0; brightness <= 255; brightness += 15) {
+            for (int i = 0; i < 9; i++) {
+                m5encoder.writeRGB(i, brightness, 0, 0);
+            }
+            delay(30);
+        }
+        for (int brightness = 255; brightness >= 0; brightness -= 15) {
+            for (int i = 0; i < 9; i++) {
+                m5encoder.writeRGB(i, brightness, 0, 0);
+            }
+            delay(30);
+        }
+        
+        // 5. Encender todos en rojo nuevamente
+        for (int i = 0; i < 9; i++) {
+            m5encoder.writeRGB(i, 255, 0, 0);
+        }
+        delay(300);
+        
+        // 6. Transición a colores de instrumentos uno por uno
+        for (int i = 0; i < 8; i++) {
+            uint16_t color = instrumentColors[i];
+            // Convertir color RGB565 a RGB888
+            uint8_t r = ((color >> 11) & 0x1F) << 3;
+            uint8_t g = ((color >> 5) & 0x3F) << 2;
+            uint8_t b = (color & 0x1F) << 3;
+            m5encoder.writeRGB(i, r, g, b);
+            encoderLEDColors[i][0] = r;
+            encoderLEDColors[i][1] = g;
+            encoderLEDColors[i][2] = b;
+            // Inicializar valores de encoder
+            m5encoder.setAbsCounter(i, 100);  // Empezar en volumen 100
+            encoderValues[i] = 100;
+            lastEncoderValues[i] = 100;
+            delay(100);
+        }
+        
+        // LED 9 (extra) apagado
+        m5encoder.writeRGB(8, 0, 0, 0);
+        diagnostic.m5encoderOk = true;
+        Serial.println("   LED boot sequence complete!");
+    } else {
+        m5encoderConnected = false;
+        diagnostic.m5encoderOk = false;
+        Serial.println("NOT FOUND (optional)");
+    }
+    
     // Boot estilo consola UNIX
     drawConsoleBootScreen();
     
@@ -1534,8 +1630,8 @@ void setup() {
     setupPatterns();
     calculateStepInterval();
     
-    // LED test rápido
-    for (int i = 0; i < 16; i++) {
+    // LED test rápido (8 LEDs)
+    for (int i = 0; i < 8; i++) {
         setLED(i, true);
         delay(30);
     }
@@ -1578,6 +1674,9 @@ void loop() {
     
     handleButtons();
     handleEncoder();
+    
+    // M5 8ENCODER: Leer encoders rotativos para control de tracks
+    handleM5Encoders();
     
     // DEBUG: Mostrar valores ADC de botones analógicos
     debugAnalogButtons();
@@ -1750,14 +1849,14 @@ void handleButtons() {
     // Detectar nuevas presiones (flanco de subida)
     uint16_t newPress = buttons & ~lastButtonState;
     
-    // Procesar nuevas presiones
-    for (int i = 0; i < 16; i++) {
+    // Procesar nuevas presiones (solo 8 botones)
+    for (int i = 0; i < 8; i++) {
         if (newPress & (1 << i)) {
             buttonPressTime[i] = currentTime;
             lastRepeatTime[i] = currentTime;
             
             if (currentScreen == SCREEN_LIVE) {
-                // S1-S16: Enviar trigger al MASTER
+                // S1-S8: Enviar trigger al MASTER
                 triggerDrum(i);
                 setLED(i, true);
                 ledActive[i] = true;
@@ -1927,22 +2026,12 @@ void handleEncoder() {
                     }
                     
                 } else if (currentScreen == SCREEN_SEQUENCER) {
-                    // En sequencer: navegación libre entre 16 tracks
-                    // La página cambia automáticamente según el track seleccionado
+                    // En sequencer: navegación entre 8 tracks (sin páginas)
                     int delta = rawDelta / 2;
                     if (delta != 0) {
                         selectedTrack += delta;
                         if (selectedTrack < 0) selectedTrack = MAX_TRACKS - 1;
                         if (selectedTrack >= MAX_TRACKS) selectedTrack = 0;
-                        
-                        // Actualizar página automáticamente según el track
-                        int newPage = selectedTrack / 8;  // 0-7 = página 0, 8-15 = página 1
-                        if (newPage != sequencerPage) {
-                            sequencerPage = newPage;
-                            needsFullRedraw = true;
-                            Serial.printf("► Page changed to: %d/2 (Tracks %d-%d)\n", 
-                                         sequencerPage + 1, sequencerPage * 8 + 1, sequencerPage * 8 + 8);
-                        }
                         
                         // Mostrar instrumento en TM1638
                         showInstrumentOnTM1638(selectedTrack);
@@ -2304,6 +2393,99 @@ void handleVolume() {
 }
 
 // ============================================
+// M5 8ENCODER HANDLING
+// ============================================
+void handleM5Encoders() {
+    if (!m5encoderConnected) return;
+    
+    unsigned long currentTime = millis();
+    if (currentTime - lastEncoderRead < ENCODER_READ_INTERVAL) return;
+    lastEncoderRead = currentTime;
+    
+    bool anyChange = false;
+    
+    // Leer los 8 encoders
+    for (int i = 0; i < 8; i++) {
+        // Leer contador relativo (cambio desde última lectura)
+        int32_t delta = m5encoder.getRelCounter(i);
+        
+        if (delta != 0) {
+            anyChange = true;
+            
+            // Actualizar según el modo actual
+            switch (encoderMode) {
+                case ENC_MODE_VOLUME: {
+                    // Control de volumen individual del track (0-150)
+                    trackVolumes[i] += (delta * 5);  // Pasos de 5%
+                    if (trackVolumes[i] < 0) trackVolumes[i] = 0;
+                    if (trackVolumes[i] > MAX_VOLUME) trackVolumes[i] = MAX_VOLUME;
+                    
+                    // Enviar comando al MASTER
+                    JsonDocument doc;
+                    doc["cmd"] = "track_volume";
+                    doc["track"] = i;
+                    doc["volume"] = trackVolumes[i];
+                    sendUDPCommand(doc);
+                    
+                    Serial.printf("► Track %d (%s) Volume: %d%%\n", 
+                                 i + 1, trackNames[i], trackVolumes[i]);
+                    
+                    // Actualizar brillo del LED según volumen
+                    uint8_t brightness = map(trackVolumes[i], 0, MAX_VOLUME, 10, 255);
+                    uint8_t r = (encoderLEDColors[i][0] * brightness) / 255;
+                    uint8_t g = (encoderLEDColors[i][1] * brightness) / 255;
+                    uint8_t b = (encoderLEDColors[i][2] * brightness) / 255;
+                    m5encoder.writeRGB(i, r, g, b);
+                    break;
+                }
+                    
+                // Modos futuros: PITCH, PAN, EFFECT
+                case ENC_MODE_PITCH:
+                case ENC_MODE_PAN:
+                case ENC_MODE_EFFECT:
+                default:
+                    // TODO: Implementar otros modos
+                    break;
+            }
+            
+            // Mostrar en TM1638
+            if (currentScreen == SCREEN_SEQUENCER) {
+                tm1.displayText(trackNames[i]);
+                char volStr[9];
+                snprintf(volStr, sizeof(volStr), "VOL %3d", trackVolumes[i]);
+                tm2.displayText(volStr);
+            }
+        }
+        
+        // Leer botones de los encoders (para cambiar modo futuro)
+        if (m5encoder.getKeyPressed(i)) {
+            Serial.printf("► Encoder %d button pressed\n", i + 1);
+            // TODO: Usar para cambiar modo (VOLUME/PITCH/PAN/EFFECT)
+        }
+    }
+    
+    // Leer switch toggle del módulo
+    uint8_t switchState = m5encoder.inputSwitch();
+    if (switchState) {
+        Serial.println("► M5 Toggle Switch activated");
+        // TODO: Usar para reset general o cambio de modo global
+    }
+}
+
+void updateEncoderLEDs() {
+    if (!m5encoderConnected) return;
+    
+    // Actualizar LEDs según el estado actual (puede llamarse desde display)
+    for (int i = 0; i < 8; i++) {
+        uint8_t brightness = map(trackVolumes[i], 0, MAX_VOLUME, 10, 255);
+        uint8_t r = (encoderLEDColors[i][0] * brightness) / 255;
+        uint8_t g = (encoderLEDColors[i][1] * brightness) / 255;
+        uint8_t b = (encoderLEDColors[i][2] * brightness) / 255;
+        m5encoder.writeRGB(i, r, g, b);
+    }
+}
+
+// ============================================
 // TM1638 DISPLAYS
 // ============================================
 void showInstrumentOnTM1638(int track) {
@@ -2400,7 +2582,7 @@ void updateTM1638Displays() {
 void updateLEDFeedback() {
     unsigned long currentTime = millis();
     
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 8; i++) {  // Solo 8 LEDs
         if (ledActive[i]) {
             if (currentTime >= ledOffTime[i]) {
                 setLED(i, false);
@@ -2426,7 +2608,7 @@ void updateAudioVisualization() {
         // Manejar tremolo y efecto neón en Live Pads
         if (currentScreen == SCREEN_LIVE) {
             uint16_t buttons = readAllButtons();
-            for (int i = 0; i < 16; i++) {
+            for (int i = 0; i < 8; i++) {  // Solo 8 pads
                 bool isPressed = buttons & (1 << i);
                 
                 if (isPressed && padPressed[i]) {
@@ -2790,60 +2972,84 @@ void drawLiveScreen() {
     tft.fillScreen(COLOR_BG);
     drawHeader();
     
-    // ========== 16 PADS EN FORMATO 4x4 CON DISEÑO PROFESIONAL ==========
-    const int padW = 110;
-    const int padH = 54;
-    const int startX = 14;
-    const int startY = 60;  // Más arriba sin el título
-    const int spacingX = 7;
-    const int spacingY = 6;
+    // ========== 8 PADS GRANDES ESTILO AKAI APC MINI ==========
+    // Maximizar tamaño de pads para llenar pantalla 480x320
+    const int padW = 115;  // Más anchos
+    const int padH = 110;  // Más altos
+    const int startX = 8;
+    const int startY = 65;  
+    const int spacingX = 5;
+    const int spacingY = 8;
     
-    // Dibujar los 16 pads con diseño minimalista
-    for (int i = 0; i < 16; i++) {
+    // Colores vibrantes estilo AKAI APC (RGB saturados)
+    const uint16_t padColors[8] = {
+        tft.color565(255, 20, 20),    // KICK - Rojo intenso
+        tft.color565(255, 240, 0),    // SNARE - Amarillo brillante
+        tft.color565(0, 255, 255),    // CL-HAT - Cyan eléctrico
+        tft.color565(255, 160, 0),    // OP-HAT - Naranja vibrante
+        tft.color565(255, 0, 200),    // CLAP - Magenta
+        tft.color565(150, 255, 0),    // TOM-LO - Verde lima brillante
+        tft.color565(0, 180, 255),    // TOM-HI - Azul brillante
+        tft.color565(255, 80, 150)    // CYMBAL - Rosa neón
+    };
+    
+    // Dibujar los 8 pads con diseño mejorado (4 columnas x 2 filas)
+    for (int i = 0; i < 8; i++) {
         int col = i % 4;
         int row = i / 4;
         int x = startX + col * (padW + spacingX);
         int y = startY + row * (padH + spacingY);
         
-        // Color del instrumento (oscurecido para look profesional)
-        uint16_t baseColor = getInstrumentColor(i);
+        uint16_t baseColor = padColors[i];
         
-        // Oscurecer el color para fondo más sutil (reducir brillo 60%)
-        uint8_t r = ((baseColor >> 11) & 0x1F) * 5; // Reducir a 40%
-        uint8_t g = ((baseColor >> 5) & 0x3F) * 2;  // Reducir a 40%
-        uint8_t b = (baseColor & 0x1F) * 5;         // Reducir a 40%
-        uint16_t darkColor = tft.color565(r, g, b);
+        // Color atenuado para estado OFF (más oscuro)
+        uint8_t r = ((baseColor >> 11) & 0x1F) * 3;
+        uint8_t g = ((baseColor >> 5) & 0x3F) * 1.5;
+        uint8_t b = (baseColor & 0x1F) * 3;
+        uint16_t dimColor = tft.color565(r, g, b);
         
-        // Fondo del pad oscuro con borde sutil
-        tft.fillRoundRect(x, y, padW, padH, 5, darkColor);
-        tft.drawRoundRect(x, y, padW, padH, 5, baseColor);
+        // Fondo con gradiente simulado (3 capas)
+        tft.fillRoundRect(x, y, padW, padH, 10, COLOR_BG);
+        tft.fillRoundRect(x+1, y+1, padW-2, padH-2, 9, dimColor);
         
-        // Borde izquierdo con color del instrumento (acento)
-        tft.fillRect(x + 1, y + 1, 3, padH - 2, baseColor);
+        // Borde doble para efecto 3D
+        tft.drawRoundRect(x, y, padW, padH, 10, baseColor);
+        tft.drawRoundRect(x+1, y+1, padW-2, padH-2, 9, baseColor);
         
-        // Número del pad (pequeño, arriba izquierda)
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_TEXT_DIM);
-        tft.setCursor(x + 8, y + 5);
+        // Barra superior LED estilo AKAI (más grande)
+        tft.fillRoundRect(x + 4, y + 4, padW - 8, 12, 4, baseColor);
+        
+        // Efecto glow en la barra
+        uint8_t rg = ((baseColor >> 11) & 0x1F) * 6;
+        uint8_t gg = ((baseColor >> 5) & 0x3F) * 3;
+        uint8_t bg = (baseColor & 0x1F) * 6;
+        uint16_t glowColor = tft.color565(rg, gg, bg);
+        tft.drawRoundRect(x + 3, y + 3, padW - 6, 14, 5, glowColor);
+        
+        // Número del pad (más grande y con fondo)
+        tft.fillCircle(x + 15, y + 26, 9, COLOR_BG);
+        tft.drawCircle(x + 15, y + 26, 10, baseColor);
+        tft.setTextSize(2);
+        tft.setTextColor(baseColor);
+        tft.setCursor(x + (i < 9 ? 11 : 8), y + 19);
         tft.printf("%d", i + 1);
         
-        // Nombre del instrumento (centro, bold)
+        // Nombre del instrumento (más grande, centrado)
         tft.setTextSize(2);
         tft.setTextColor(COLOR_TEXT);
         String instName = String(instrumentNames[i]);
         instName.trim();
-        if (instName.length() > 6) {
-            instName = instName.substring(0, 6);
+        if (instName.length() > 7) {
+            instName = instName.substring(0, 7);
         }
-        // Centrar texto
         int textWidth = instName.length() * 12;
-        tft.setCursor(x + (padW - textWidth) / 2, y + 18);
+        tft.setCursor(x + (padW - textWidth) / 2, y + 50);
         tft.print(instName);
         
-        // Track name abreviado (abajo, pequeño)
-        tft.setTextSize(1);
+        // Track name grande abajo
+        tft.setTextSize(2);
         tft.setTextColor(baseColor);
-        tft.setCursor(x + padW - 18, y + padH - 12);
+        tft.setCursor(x + padW - 32, y + padH - 22);
         tft.print(trackNames[i]);
     }
     
@@ -2852,7 +3058,7 @@ void drawLiveScreen() {
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT);
     tft.setCursor(30, 307);
-    tft.print("S1-S16: PLAY INSTRUMENTS");
+    tft.print("S1-S8: PLAY INSTRUMENTS");
     tft.setTextColor(COLOR_WARNING);
     tft.setCursor(230, 307);
     tft.print("VOLUME: KNOB");
@@ -2868,11 +3074,7 @@ void drawSequencerScreen() {
         tft.fillScreen(COLOR_BG);
         drawHeader();
         
-        // Mostrar solo número de página pequeño en la esquina superior derecha
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_TEXT_DIM);
-        tft.setCursor(10, 58);
-        tft.printf("Page %d/2", sequencerPage + 1);
+        // Sin indicador de página (solo hay una página con 8 tracks)
     }
     
     const int gridX = 8;
@@ -2883,9 +3085,9 @@ void drawSequencerScreen() {
     
     Pattern& pattern = patterns[currentPattern];
     
-    // Calcular rango de tracks según página (0-7 o 8-15)
-    int trackStart = sequencerPage * 8;
-    int trackEnd = trackStart + 8;
+    // Mostrar todos los 8 tracks (sin páginas)
+    int trackStart = 0;
+    int trackEnd = MAX_TRACKS;
     
     if (needsFullRedraw) {
         tft.fillRoundRect(gridX - 2, gridY - 2, 468, 210, 8, COLOR_NAVY);
@@ -2948,9 +3150,9 @@ void drawSequencerScreen() {
         }
     }
     
-    // Dibujar celdas del grid solo para tracks visibles (8 tracks por página)
+    // Dibujar celdas del grid (8 tracks, sin páginas)
     for (int i = 0; i < 8; i++) {
-        int t = trackStart + i;  // Track real (0-7 o 8-15)
+        int t = trackStart + i;  // Track real (0-7)
         for (int s = 0; s < MAX_STEPS; s++) {
             if (needsFullRedraw || needsGridUpdate || (s == currentStep || s == lastStep)) {
                 int x = gridX + labelW + s * (cellW + 1);
@@ -3002,7 +3204,7 @@ void drawSequencerScreen() {
         tft.setTextSize(1);
         tft.setTextColor(COLOR_TEXT_DIM);
         tft.setCursor(5, 305);
-        tft.print("S1-16:TOGGLE | ENC:TRACK | HOLD:BPM | ");
+        tft.print("S1-8:TOGGLE | ENC:TRACK | HOLD:BPM | ");
         tft.setTextColor(COLOR_ACCENT);
         tft.print("VOL-HOLD:PATTERN");
         tft.setTextColor(COLOR_TEXT_DIM);
@@ -3178,6 +3380,7 @@ void drawDiagnosticsScreen() {
         "TM1638 #1 (S1-8)", 
         "TM1638 #2 (S9-16)", 
         "ROTARY ENCODER",
+        "M5 8ENCODER I2C",
         "WiFi CONNECTION",
         "UDP -> MASTER"
     };
@@ -3186,11 +3389,12 @@ void drawDiagnosticsScreen() {
         diagnostic.tm1638_1_Ok,
         diagnostic.tm1638_2_Ok,
         diagnostic.encoderOk,
+        diagnostic.m5encoderOk,
         WiFi.status() == WL_CONNECTED,
         diagnostic.udpConnected
     };
     
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 7; i++) {
         tft.fillRoundRect(32, y + 2, 416, 28, 6, COLOR_NAVY);
         tft.fillRoundRect(30, y, 416, 28, 6, COLOR_NAVY_LIGHT);
         
@@ -3310,69 +3514,104 @@ void drawHeader() {
 }
 
 void drawLivePad(int padIndex, bool highlight) {
-    const int padW = 110;  // Igual que drawLiveScreen
-    const int padH = 54;   // Igual que drawLiveScreen
-    const int startX = 14; // Igual que drawLiveScreen
-    const int startY = 60; // Igual que drawLiveScreen
-    const int spacingX = 7; // Igual que drawLiveScreen
-    const int spacingY = 6; // Igual que drawLiveScreen
+    // COORDENADAS IDÉNTICAS A drawLiveScreen
+    const int padW = 115;  // Mismo que drawLiveScreen
+    const int padH = 110;  // Mismo que drawLiveScreen
+    const int startX = 8;
+    const int startY = 65; // Mismo que drawLiveScreen
+    const int spacingX = 5;
+    const int spacingY = 8; // Mismo que drawLiveScreen
     
     int col = padIndex % 4;
     int row = padIndex / 4;
     int x = startX + col * (padW + spacingX);
     int y = startY + row * (padH + spacingY);
     
-    // Color del instrumento
-    uint16_t baseColor = getInstrumentColor(padIndex);
+    // Colores vibrantes estilo AKAI (mismos que drawLiveScreen)
+    const uint16_t padColors[8] = {
+        tft.color565(255, 20, 20),    // KICK - Rojo intenso
+        tft.color565(255, 240, 0),    // SNARE - Amarillo brillante
+        tft.color565(0, 255, 255),    // CL-HAT - Cyan eléctrico
+        tft.color565(255, 160, 0),    // OP-HAT - Naranja vibrante
+        tft.color565(255, 0, 200),    // CLAP - Magenta
+        tft.color565(150, 255, 0),    // TOM-LO - Verde lima brillante
+        tft.color565(0, 180, 255),    // TOM-HI - Azul brillante
+        tft.color565(255, 80, 150)    // CYMBAL - Rosa neón
+    };
+    
+    uint16_t baseColor = padColors[padIndex];
     
     if (highlight) {
-        // Efecto de press: iluminar el pad completo
-        // Fondo más brillante pero no blanco
-        uint8_t r = min(255, ((baseColor >> 11) & 0x1F) * 8 + 100);
-        uint8_t g = min(255, ((baseColor >> 5) & 0x3F) * 4 + 50);
-        uint8_t b = min(255, (baseColor & 0x1F) * 8 + 100);
-        uint16_t brightColor = tft.color565(r, g, b);
+        // Efecto PRESS: pad completamente iluminado
+        tft.fillRoundRect(x, y, padW, padH, 10, COLOR_BG);
+        tft.fillRoundRect(x+1, y+1, padW-2, padH-2, 9, baseColor);
         
-        // Pad iluminado
-        tft.fillRoundRect(x, y, padW, padH, 5, brightColor);
-        tft.drawRoundRect(x, y, padW, padH, 5, TFT_WHITE);
+        // Bordes brillantes
+        tft.drawRoundRect(x, y, padW, padH, 10, TFT_WHITE);
+        tft.drawRoundRect(x+1, y+1, padW-2, padH-2, 9, TFT_WHITE);
+        tft.drawRoundRect(x+2, y+2, padW-4, padH-4, 8, baseColor);
         
-        // Borde izquierdo brillante
-        tft.fillRect(x + 1, y + 1, 3, padH - 2, TFT_WHITE);
+        // Barra superior blanca brillante
+        tft.fillRoundRect(x + 4, y + 4, padW - 8, 12, 4, TFT_WHITE);
+        tft.drawRoundRect(x + 3, y + 3, padW - 6, 14, 5, TFT_WHITE);
+        
+        // Número con fondo blanco
+        tft.fillCircle(x + 15, y + 26, 9, TFT_WHITE);
+        tft.drawCircle(x + 15, y + 26, 10, TFT_WHITE);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_BG);
+        tft.setCursor(x + (padIndex < 9 ? 11 : 8), y + 19);
+        tft.printf("%d", padIndex + 1);
+        
     } else {
-        // Estado normal: oscurecido
-        uint8_t r = ((baseColor >> 11) & 0x1F) * 5;
-        uint8_t g = ((baseColor >> 5) & 0x3F) * 2;
-        uint8_t b = (baseColor & 0x1F) * 5;
-        uint16_t darkColor = tft.color565(r, g, b);
+        // Estado NORMAL: color atenuado
+        uint8_t r = ((baseColor >> 11) & 0x1F) * 3;
+        uint8_t g = ((baseColor >> 5) & 0x3F) * 1.5;
+        uint8_t b = (baseColor & 0x1F) * 3;
+        uint16_t dimColor = tft.color565(r, g, b);
         
-        tft.fillRoundRect(x, y, padW, padH, 5, darkColor);
-        tft.drawRoundRect(x, y, padW, padH, 5, baseColor);
-        tft.fillRect(x + 1, y + 1, 3, padH - 2, baseColor);
+        tft.fillRoundRect(x, y, padW, padH, 10, COLOR_BG);
+        tft.fillRoundRect(x+1, y+1, padW-2, padH-2, 9, dimColor);
+        
+        // Borde doble
+        tft.drawRoundRect(x, y, padW, padH, 10, baseColor);
+        tft.drawRoundRect(x+1, y+1, padW-2, padH-2, 9, baseColor);
+        
+        // Barra superior LED
+        tft.fillRoundRect(x + 4, y + 4, padW - 8, 12, 4, baseColor);
+        
+        // Efecto glow
+        uint8_t rg = ((baseColor >> 11) & 0x1F) * 6;
+        uint8_t gg = ((baseColor >> 5) & 0x3F) * 3;
+        uint8_t bg = (baseColor & 0x1F) * 6;
+        uint16_t glowColor = tft.color565(rg, gg, bg);
+        tft.drawRoundRect(x + 3, y + 3, padW - 6, 14, 5, glowColor);
+        
+        // Número con fondo
+        tft.fillCircle(x + 15, y + 26, 9, COLOR_BG);
+        tft.drawCircle(x + 15, y + 26, 10, baseColor);
+        tft.setTextSize(2);
+        tft.setTextColor(baseColor);
+        tft.setCursor(x + (padIndex < 9 ? 11 : 8), y + 19);
+        tft.printf("%d", padIndex + 1);
     }
-    
-    // Número del pad
-    tft.setTextSize(1);
-    tft.setTextColor(highlight ? COLOR_BG : COLOR_TEXT_DIM);
-    tft.setCursor(x + 8, y + 5);
-    tft.printf("%d", padIndex + 1);
     
     // Nombre del instrumento
     tft.setTextSize(2);
     tft.setTextColor(highlight ? COLOR_BG : COLOR_TEXT);
     String instName = String(instrumentNames[padIndex]);
     instName.trim();
-    if (instName.length() > 6) {
-        instName = instName.substring(0, 6);
+    if (instName.length() > 7) {
+        instName = instName.substring(0, 7);
     }
     int textWidth = instName.length() * 12;
-    tft.setCursor(x + (padW - textWidth) / 2, y + 18);
+    tft.setCursor(x + (padW - textWidth) / 2, y + 50);
     tft.print(instName);
     
     // Track name
-    tft.setTextSize(1);
-    tft.setTextColor(highlight ? TFT_WHITE : baseColor);
-    tft.setCursor(x + padW - 18, y + padH - 12);
+    tft.setTextSize(2);
+    tft.setTextColor(highlight ? COLOR_BG : baseColor);
+    tft.setCursor(x + padW - 32, y + padH - 22);
     tft.print(trackNames[padIndex]);
 }
 
