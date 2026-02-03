@@ -6,9 +6,6 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
-// #include <ESPAsyncWebServer.h>  // DESHABILITADO - No se usa en SLAVE
-// #include <LittleFS.h>  // DESHABILITADO - No se usa en SLAVE
-// #include <FS.h>  // DESHABILITADO - No se usa en SLAVE
 
 // ============================================
 // PIN DEFINITIONS
@@ -35,7 +32,7 @@
 
 // Rotary Encoder (5 pins)
 #define ENCODER_CLK 15
-#define ENCODER_DT  12
+#define ENCODER_DT  16  // Cambiado de 12 a 16 (el 12 da problemas en upload)
 #define ENCODER_SW  13
 
 // 3 BUTTON PANEL - SMART OPEN ANALOG BUTTONS (3 pins: GND, VCC, SIG)
@@ -202,7 +199,8 @@ enum Screen {
     SCREEN_SEQUENCER,
     SCREEN_SETTINGS,
     SCREEN_DIAGNOSTICS,
-    SCREEN_PATTERNS
+    SCREEN_PATTERNS,
+    SCREEN_VOLUMES
 };
 
 enum DisplayMode {
@@ -280,6 +278,7 @@ enum EncoderMode {
 };
 EncoderMode encoderMode = ENC_MODE_VOLUME;  // Modo actual
 int trackVolumes[8] = {100, 100, 100, 100, 100, 100, 100, 100};  // Volumen individual por track (0-150)
+bool trackMuted[8] = {false, false, false, false, false, false, false, false};  // Estado mute por track
 
 Screen currentScreen = SCREEN_BOOT;
 
@@ -315,12 +314,11 @@ IPAddress subnet(255, 255, 255, 0);
 */
 
 WiFiUDP udp;
-// AsyncWebServer server(80);  // DESHABILITADO - No usado en SLAVE
-bool webServerEnabled = false;  // Siempre false en SLAVE
 
 int selectedTrack = 0;
 int selectedStep = 0;
 int menuSelection = 0;
+const int menuItemCount = 5;  // LIVE, SEQUENCER, VOLUMES, SETTINGS, DIAGNOSTICS
 
 bool needsFullRedraw = true;
 bool needsHeaderUpdate = false;
@@ -347,6 +345,15 @@ int livePadsVolume = 100;  // 100% - más fuerte para tocar en vivo
 int lastSequencerVolume = DEFAULT_VOLUME;
 int lastLivePadsVolume = 100;
 unsigned long lastVolumeRead = 0;
+
+// Variables para optimizar pantalla VOLUMES (evitar parpadeo)
+int lastSeqVolDisplay = -1;
+int lastLiveVolDisplay = -1;
+int lastTrackVolDisplay[8] = {-1,-1,-1,-1,-1,-1,-1,-1};
+bool lastTrackMuteDisplay[8] = {false,false,false,false,false,false,false,false};
+VolumeMode lastVolModeDisplay = VOL_SEQUENCER;
+bool volumesScreenInitialized = false;  // Flag para saber si ya se dibujó todo
+unsigned long lastVolumesUpdate = 0;    // Throttling temporal
 
 unsigned long ledOffTime[8] = {0};  // 8 LEDs (simplificado)
 bool ledActive[8] = {false};         // 8 LEDs (simplificado)
@@ -403,10 +410,10 @@ const char* instrumentNames[MAX_TRACKS] = {
 const char* menuItems[] = {
     "LIVE PAD",
     "SEQUENCER",
+    "VOLUMENES",
     "SETTINGS",
     "DIAGNOSTICS"
 };
-const int menuItemCount = 4;
 
 // Colores por instrumento (BD=KICK, SD=SNARE, CH=CL-HAT, OH=OP-HAT, CL=CLAP, T1=TOM-LO, T2=TOM-HI, CY=CYMBAL)
 const uint16_t instrumentColors[MAX_TRACKS] = {
@@ -452,6 +459,7 @@ void drawSequencerScreen();
 void drawSettingsScreen();
 void drawDiagnosticsScreen();
 void drawPatternsScreen();
+void drawVolumesScreen();  // Nueva pantalla de volúmenes
 void drawSinglePattern(int patternIndex, bool isSelected);
 void drawSyncingScreen();
 void drawHeader();
@@ -695,7 +703,7 @@ void receiveUDPData() {
             
             Serial.printf("\n◄ UDP RECEIVED (%d bytes): %s\n", len, incomingPacket);
             
-            // Parsear JSON
+            // Parsear JSON - CORRECCIÓN: Buffer de 4KB
             JsonDocument doc;
             DeserializationError error = deserializeJson(doc, incomingPacket);
             
@@ -711,6 +719,12 @@ void receiveUDPData() {
                 // Sincronizar patrón
                 if (strcmp(cmd, "pattern_sync") == 0) {
                     int patternNum = doc["pattern"] | currentPattern;
+                    
+                    // CORRECCIÓN: Validar índice de patrón
+                    if (patternNum < 0 || patternNum >= MAX_PATTERNS) {
+                        Serial.printf("✗ Invalid pattern index: %d (valid: 0-%d)\n", patternNum, MAX_PATTERNS-1);
+                        return;
+                    }
                     
                     Serial.println("\n═══════════════════════════════════════");
                     Serial.printf("► PATTERN SYNC RECEIVED: Pattern %d\n", patternNum + 1);
@@ -866,6 +880,12 @@ void requestPatternFromMaster() {
             tft.setCursor(10, 295);
             tft.print("ERROR: Not connected to MASTER");
         }
+        return;
+    }
+    
+    // CORRECCIÓN: Validar patrón actual
+    if (currentPattern < 0 || currentPattern >= MAX_PATTERNS) {
+        Serial.printf("✗ Invalid pattern: %d\n", currentPattern);
         return;
     }
     
@@ -1734,6 +1754,9 @@ void loop() {
             case SCREEN_PATTERNS:
                 drawPatternsScreen();
                 break;
+            case SCREEN_VOLUMES:
+                drawVolumesScreen();  // Dibujar solo una vez
+                break;
             default:
                 break;
         }
@@ -1743,6 +1766,12 @@ void loop() {
         needsGridUpdate = false;
         
     } else {
+        // Actualización parcial cuando NO es full redraw
+        // VOLUMES se actualiza automáticamente dentro de su propia función
+        if (currentScreen == SCREEN_VOLUMES) {
+            drawVolumesScreen();
+        }
+        
         if (needsHeaderUpdate && currentScreen != SCREEN_MENU) {
             drawHeader();
             needsHeaderUpdate = false;
@@ -2067,8 +2096,9 @@ void handleEncoder() {
                 switch (menuSelection) {
                     case 0: changeScreen(SCREEN_LIVE); break;
                     case 1: changeScreen(SCREEN_SEQUENCER); break;
-                    case 2: changeScreen(SCREEN_SETTINGS); break;
-                    case 3: changeScreen(SCREEN_DIAGNOSTICS); break;
+                    case 2: changeScreen(SCREEN_VOLUMES); break;
+                    case 3: changeScreen(SCREEN_SETTINGS); break;
+                    case 4: changeScreen(SCREEN_DIAGNOSTICS); break;
                 }
                 
             } else if (currentScreen == SCREEN_PATTERNS) {
@@ -2354,6 +2384,37 @@ void handleVolume() {
     
     // Solo actualizar volumen si el pot se movió después del cambio de modo
     if (potMoved) {
+        // CORRECCIÓN: Validar conexión UDP antes de enviar
+        if (!udpConnected) {
+            // No imprimir error constantemente, solo actualizar local
+            if (volumeMode == VOL_SEQUENCER) {
+                if (abs(newVol - lastSequencerVolume) > 2) {
+                    sequencerVolume = newVol;
+                    lastSequencerVolume = newVol;
+                    showVolumeOnTM1638();
+                    lastDisplayChange = millis();
+                    needsHeaderUpdate = true;
+                }
+            } else {
+                if (abs(newVol - lastLivePadsVolume) > 2) {
+                    livePadsVolume = newVol;
+                    lastLivePadsVolume = newVol;
+                    showVolumeOnTM1638();
+                    lastDisplayChange = millis();
+                    needsHeaderUpdate = true;
+                }
+            }
+            return;
+        }
+        
+        // CORRECCIÓN: Limitar frecuencia de envío (max 10 msg/seg)
+        unsigned long now = millis();
+        static unsigned long lastVolumeSent = 0;
+        if (now - lastVolumeSent < 100) {  // Mínimo 100ms entre envíos
+            return;
+        }
+        lastVolumeSent = now;
+        
         if (volumeMode == VOL_SEQUENCER) {
             if (abs(newVol - lastSequencerVolume) > 2) {  // Hysteresis de 2%
                 sequencerVolume = newVol;
@@ -2422,7 +2483,7 @@ void handleM5Encoders() {
                     
                     // Enviar comando al MASTER
                     JsonDocument doc;
-                    doc["cmd"] = "track_volume";
+                    doc["cmd"] = "setTrackVolume";
                     doc["track"] = i;
                     doc["volume"] = trackVolumes[i];
                     sendUDPCommand(doc);
@@ -2457,10 +2518,42 @@ void handleM5Encoders() {
             }
         }
         
-        // Leer botones de los encoders (para cambiar modo futuro)
+        // Leer botones de los encoders como MUTE de track
         if (m5encoder.getKeyPressed(i)) {
-            Serial.printf("► Encoder %d button pressed\n", i + 1);
-            // TODO: Usar para cambiar modo (VOLUME/PITCH/PAN/EFFECT)
+            Serial.printf("► Encoder %d button pressed - Toggle MUTE Track %d\n", i + 1, i + 1);
+            
+            // Toggle mute del track
+            trackMuted[i] = !trackMuted[i];
+            
+            // Enviar comando al MASTER
+            JsonDocument doc;
+            doc["cmd"] = "mute";
+            doc["track"] = i;
+            doc["value"] = trackMuted[i];
+            sendUDPCommand(doc);
+            
+            // Actualizar LED: apagar si está muteado, color normal si no
+            if (trackMuted[i]) {
+                m5encoder.writeRGB(i, 30, 0, 0);  // Rojo tenue = muteado
+            } else {
+                uint8_t brightness = map(trackVolumes[i], 0, MAX_VOLUME, 10, 255);
+                uint8_t r = (encoderLEDColors[i][0] * brightness) / 255;
+                uint8_t g = (encoderLEDColors[i][1] * brightness) / 255;
+                uint8_t b = (encoderLEDColors[i][2] * brightness) / 255;
+                m5encoder.writeRGB(i, r, g, b);
+            }
+            
+            // Mostrar en TM1638
+            if (currentScreen == SCREEN_SEQUENCER) {
+                tm1.displayText(trackNames[i]);
+                char muteStr[9];
+                snprintf(muteStr, sizeof(muteStr), trackMuted[i] ? "  MUTED" : "UNMUTED");
+                tm2.displayText(muteStr);
+                lastDisplayChange = millis();
+            }
+            
+            Serial.printf("   Track %d (%s) is now %s\n", 
+                         i + 1, trackNames[i], trackMuted[i] ? "MUTED" : "UNMUTED");
         }
     }
     
@@ -2541,7 +2634,7 @@ void updateTM1638Displays() {
         tm2.displayText("  MENU  ");
         
     } else if (currentScreen == SCREEN_LIVE) {
-        if (currentTime - lastDisplayChange > 3000) {
+        if (currentTime - lastDisplayChange > 5000) {  // Aumentado de 3000ms a 5000ms
             lastDisplayChange = currentTime;
             if (currentDisplayMode == DISPLAY_BPM) {
                 showVolumeOnTM1638();
@@ -3053,18 +3146,30 @@ void drawLiveScreen() {
         tft.print(trackNames[i]);
     }
     
-    // Footer con instrucciones
-    tft.fillRect(0, 302, 480, 18, COLOR_PRIMARY);
+    // Footer estilo profesional con gradiente simulado
+    tft.fillRect(0, 295, 480, 25, COLOR_PRIMARY);
+    tft.fillRect(0, 295, 480, 2, COLOR_ACCENT);  // Línea superior brillante
+    
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(30, 307);
-    tft.print("S1-S8: PLAY INSTRUMENTS");
-    tft.setTextColor(COLOR_WARNING);
-    tft.setCursor(230, 307);
-    tft.print("VOLUME: KNOB");
+    tft.setCursor(15, 304);
+    tft.print("S1-S8:");
+    tft.setTextColor(COLOR_ACCENT);
+    tft.print(" PLAY");
+    
+    tft.setTextColor(COLOR_TEXT_DIM);
+    tft.print("  |  ");
+    
     tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(360, 307);
-    tft.print("BACK: MENU");
+    tft.print("VOL:");
+    tft.setTextColor(COLOR_WARNING);
+    tft.printf(" %d%%", livePadsVolume);
+    
+    tft.setTextColor(COLOR_TEXT_DIM);
+    tft.print("  |  ");
+    
+    tft.setTextColor(COLOR_ACCENT2);
+    tft.print("BACK: Menu");
 }
 
 void drawSequencerScreen() {
@@ -3336,15 +3441,15 @@ void drawSettingsScreen() {
         tft.print(label);
     }
     
-    // ========== WIFI STATUS ==========
+    // ========== WIFI STATUS (solo mostrar info) ==========
     const int wifiY = sectionY + 165;
     
-    tft.fillRoundRect(rightX, wifiY, 200, 32, 6, webServerEnabled ? COLOR_SUCCESS : COLOR_ERROR);
+    tft.fillRoundRect(rightX, wifiY, 200, 32, 6, udpConnected ? COLOR_SUCCESS : COLOR_ERROR);
     tft.setTextSize(2);
     tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(rightX + 40, wifiY + 8);
-    tft.print("WiFi: ");
-    tft.print(webServerEnabled ? "ON" : "OFF");
+    tft.setCursor(rightX + 30, wifiY + 8);
+    tft.print("UDP: ");
+    tft.print(udpConnected ? "CONNECTED" : "OFFLINE");
     
     // Footer con instrucciones
     tft.fillRect(0, 295, 480, 25, COLOR_PRIMARY);
@@ -3542,26 +3647,41 @@ void drawLivePad(int padIndex, bool highlight) {
     uint16_t baseColor = padColors[padIndex];
     
     if (highlight) {
-        // Efecto PRESS: pad completamente iluminado
-        tft.fillRoundRect(x, y, padW, padH, 10, COLOR_BG);
-        tft.fillRoundRect(x+1, y+1, padW-2, padH-2, 9, baseColor);
+        // Efecto PRESS TREMOLO: pad súper brillante con flash
+        // Fondo blanco para máximo brillo
+        tft.fillRoundRect(x, y, padW, padH, 10, TFT_WHITE);
         
-        // Bordes brillantes
+        // Color vibrante saturado al máximo
+        uint8_t r = min(((baseColor >> 11) & 0x1F) * 10, 255);
+        uint8_t g = min(((baseColor >> 5) & 0x3F) * 5, 255);
+        uint8_t b = min((baseColor & 0x1F) * 10, 255);
+        uint16_t superBright = tft.color565(r, g, b);
+        
+        tft.fillRoundRect(x+2, y+2, padW-4, padH-4, 8, superBright);
+        
+        // Múltiples bordes blancos brillantes
         tft.drawRoundRect(x, y, padW, padH, 10, TFT_WHITE);
         tft.drawRoundRect(x+1, y+1, padW-2, padH-2, 9, TFT_WHITE);
-        tft.drawRoundRect(x+2, y+2, padW-4, padH-4, 8, baseColor);
+        tft.drawRoundRect(x+2, y+2, padW-4, padH-4, 8, TFT_WHITE);
+        tft.drawRoundRect(x+3, y+3, padW-6, padH-6, 7, superBright);
         
-        // Barra superior blanca brillante
-        tft.fillRoundRect(x + 4, y + 4, padW - 8, 12, 4, TFT_WHITE);
-        tft.drawRoundRect(x + 3, y + 3, padW - 6, 14, 5, TFT_WHITE);
+        // Barra superior ultra brillante
+        tft.fillRoundRect(x + 3, y + 3, padW - 6, 14, 5, TFT_WHITE);
+        tft.drawRoundRect(x + 2, y + 2, padW - 4, 16, 6, TFT_WHITE);
         
-        // Número con fondo blanco
-        tft.fillCircle(x + 15, y + 26, 9, TFT_WHITE);
-        tft.drawCircle(x + 15, y + 26, 10, TFT_WHITE);
+        // Número con fondo blanco y texto negro
+        tft.fillCircle(x + 15, y + 26, 11, TFT_WHITE);
+        tft.drawCircle(x + 15, y + 26, 12, TFT_WHITE);
         tft.setTextSize(2);
         tft.setTextColor(COLOR_BG);
         tft.setCursor(x + (padIndex < 9 ? 11 : 8), y + 19);
         tft.printf("%d", padIndex + 1);
+        
+        // Flash en las esquinas para efecto explosivo
+        tft.fillCircle(x + 8, y + 8, 4, TFT_WHITE);
+        tft.fillCircle(x + padW - 8, y + 8, 4, TFT_WHITE);
+        tft.fillCircle(x + 8, y + padH - 8, 4, TFT_WHITE);
+        tft.fillCircle(x + padW - 8, y + padH - 8, 4, TFT_WHITE);
         
     } else {
         // Estado NORMAL: color atenuado
@@ -3694,6 +3814,192 @@ void drawPatternsScreen() {
     tft.print("BACK:Menu");
 }
 
+// ============================================
+// PANTALLA VOLUMENES - Estilo Estudio Moderno (SIN PARPADEO)
+// ============================================
+void drawVolumesScreen() {
+    // Throttling: máximo 20 actualizaciones por segundo (50ms)
+    unsigned long now = millis();
+    bool forceUpdate = !volumesScreenInitialized || needsFullRedraw;
+    
+    if (!forceUpdate && (now - lastVolumesUpdate < 50)) {
+        return;  // No actualizar todavía
+    }
+    lastVolumesUpdate = now;
+    
+    // Solo dibujar elementos estáticos la PRIMERA VEZ
+    if (forceUpdate) {
+        tft.fillScreen(COLOR_BG);
+        drawHeader();
+        
+        // Título principal estilo consola
+        tft.fillRoundRect(140, 55, 200, 35, 8, COLOR_PRIMARY);
+        tft.drawRoundRect(140, 55, 200, 35, 8, COLOR_ACCENT);
+        tft.setTextSize(3);
+        tft.setTextColor(COLOR_TEXT);
+        tft.setCursor(145, 62);
+        tft.print("VOLUMENES");
+        
+        // Footer
+        tft.fillRect(0, 295, 480, 25, COLOR_PRIMARY);
+        tft.fillRect(0, 295, 480, 2, COLOR_ACCENT);
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_TEXT);
+        tft.setCursor(10, 305);
+        tft.print("M5-8ENC: Track Volumes");
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.print(" | ");
+        tft.setTextColor(COLOR_ACCENT);
+        tft.print("KNOB: Master");
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.print(" | ");
+        tft.setTextColor(COLOR_ACCENT2);
+        tft.print("BACK: Menu");
+        
+        // Resetear valores para forzar primer dibujo
+        lastSeqVolDisplay = -1;
+        lastLiveVolDisplay = -1;
+        lastVolModeDisplay = (VolumeMode)-1;
+        for (int i = 0; i < 8; i++) {
+            lastTrackVolDisplay[i] = -1;
+            lastTrackMuteDisplay[i] = false;
+        }
+        
+        volumesScreenInitialized = true;
+    }
+    
+    // ========== VOLÚMENES MASTER (SEQ + PAD) - Solo actualizar si cambió ==========
+    const int masterY = 100;
+    const int masterW = 200;
+    const int masterH = 50;
+    
+    // SEQUENCER Volume - actualizar solo si cambió
+    int x1 = 20;
+    if (lastSeqVolDisplay != sequencerVolume || lastVolModeDisplay != volumeMode) {
+        tft.fillRoundRect(x1, masterY, masterW, masterH, 8, COLOR_PRIMARY);
+        tft.drawRoundRect(x1, masterY, masterW, masterH, 8, volumeMode == VOL_SEQUENCER ? COLOR_SUCCESS : COLOR_BORDER);
+        tft.setTextSize(2);
+        tft.setTextColor(volumeMode == VOL_SEQUENCER ? COLOR_SUCCESS : COLOR_TEXT);
+        tft.setCursor(x1 + 10, masterY + 8);
+        tft.print("SEQUENCER");
+        tft.setTextSize(3);
+        tft.setTextColor(COLOR_ACCENT);
+        tft.setCursor(x1 + 60, masterY + 26);
+        tft.printf("%3d%%", sequencerVolume);
+        lastSeqVolDisplay = sequencerVolume;
+    }
+    
+    // LIVE PADS Volume - actualizar solo si cambió
+    int x2 = 260;
+    if (lastLiveVolDisplay != livePadsVolume || lastVolModeDisplay != volumeMode) {
+        tft.fillRoundRect(x2, masterY, masterW, masterH, 8, COLOR_PRIMARY);
+        tft.drawRoundRect(x2, masterY, masterW, masterH, 8, volumeMode == VOL_LIVE_PADS ? COLOR_WARNING : COLOR_BORDER);
+        tft.setTextSize(2);
+        tft.setTextColor(volumeMode == VOL_LIVE_PADS ? COLOR_WARNING : COLOR_TEXT);
+        tft.setCursor(x2 + 30, masterY + 8);
+        tft.print("LIVE PAD");
+        tft.setTextSize(3);
+        tft.setTextColor(COLOR_ACCENT2);
+        tft.setCursor(x2 + 60, masterY + 26);
+        tft.printf("%3d%%", livePadsVolume);
+        lastLiveVolDisplay = livePadsVolume;
+    }
+    lastVolModeDisplay = volumeMode;
+    
+    // ========== TRACK VOLUMES (8 sliders estilo mezcladora) ==========
+    int sliderStartY = 165;
+    int sliderH = 100;
+    int sliderW = 46;
+    int spacing = 7;
+    int startX = 16;
+    
+    // Colores por track (mismo esquema que LIVE pads)
+    const uint16_t trackColors[8] = {
+        COLOR_INST_KICK,   // BD - Rojo
+        COLOR_INST_SNARE,  // SD - Naranja
+        COLOR_INST_CLHAT,  // CH - Amarillo
+        COLOR_INST_OPHAT,  // OH - Cian
+        COLOR_INST_CLAP,   // CL - Magenta
+        COLOR_INST_TOMLO,  // T1 - Verde
+        COLOR_INST_TOMHI,  // T2 - Verde agua
+        COLOR_INST_CYMBAL  // CY - Azul
+    };
+    
+    for (int i = 0; i < 8; i++) {
+        int x = startX + i * (sliderW + spacing);
+        uint16_t trackColor = trackColors[i];
+        int volPercent = trackVolumes[i];
+        
+        // PRIMERA VEZ: dibujar marco, fondo y labels (SOLO UNA VEZ)
+        if (!volumesScreenInitialized || needsFullRedraw) {
+            // Fondo interno
+            tft.fillRoundRect(x + 1, sliderStartY + 1, sliderW - 2, sliderH - 2, 3, COLOR_NAVY);
+            
+            // Marco del fader
+            tft.drawRoundRect(x, sliderStartY, sliderW, sliderH, 4, COLOR_BORDER);
+            
+            // Label del track (abajo)
+            tft.setTextSize(2);
+            tft.setTextColor(trackColor);
+            tft.setCursor(x + (sliderW - 24) / 2, sliderStartY + sliderH + 5);
+            tft.print(trackNames[i]);
+        }
+        
+        // ACTUALIZAR SOLO SI CAMBIÓ - MODO INCREMENTAL SIN BORRAR TODO
+        if (lastTrackVolDisplay[i] != volPercent || lastTrackMuteDisplay[i] != trackMuted[i]) {
+            // Calcular alturas
+            int newFillH = map(volPercent, 0, MAX_VOLUME, 0, sliderH - 8);
+            
+            // Colores
+            uint16_t color1 = trackColor;
+            uint8_t r = ((color1 >> 11) & 0x1F) * 5;
+            uint8_t g = ((color1 >> 5) & 0x3F) * 2;
+            uint8_t b = (color1 & 0x1F) * 5;
+            uint16_t color2 = tft.color565(r, g, b);
+            
+            // Limpiar SOLO el área de la barra (no todo el fader)
+            int barAreaY = sliderStartY + 3;
+            int barAreaH = sliderH - 8;
+            tft.fillRect(x + 4, barAreaY, sliderW - 8, barAreaH, COLOR_NAVY);
+            
+            // Barra completa (evita líneas negras al subir)
+            if (newFillH > 0) {
+                int barY = sliderStartY + sliderH - 5 - newFillH;
+                tft.fillRect(x + 4, barY, sliderW - 8, newFillH, color2);
+                if (newFillH > 2) {
+                    tft.fillRect(x + 5, barY + 1, sliderW - 10, newFillH - 2, trackColor);
+                }
+            }
+            
+            // Si cambió mute, redibujar área superior
+            if (lastTrackMuteDisplay[i] != trackMuted[i]) {
+                // Limpiar área del mute
+                tft.fillCircle(x + sliderW / 2, sliderStartY + 10, 8, COLOR_NAVY);
+                
+                if (trackMuted[i]) {
+                    tft.fillCircle(x + sliderW / 2, sliderStartY + 10, 6, COLOR_ERROR);
+                    tft.setTextSize(1);
+                    tft.setTextColor(COLOR_BG);
+                    tft.setCursor(x + sliderW / 2 - 3, sliderStartY + 7);
+                    tft.print("M");
+                }
+            }
+            
+            // Valor numérico - actualizar SOLO si cambió
+            if (lastTrackVolDisplay[i] != volPercent) {
+                tft.fillRect(x + 4, sliderStartY + sliderH + 22, sliderW - 8, 8, COLOR_BG);
+                tft.setTextSize(1);
+                tft.setTextColor(COLOR_TEXT_DIM);
+                tft.setCursor(x + (volPercent < 100 ? 12 : 8), sliderStartY + sliderH + 22);
+                tft.printf("%d%%", volPercent);
+            }
+            
+            lastTrackVolDisplay[i] = volPercent;
+            lastTrackMuteDisplay[i] = trackMuted[i];
+        }
+    }
+}
+
 void drawSinglePattern(int patternIndex, bool isSelected) {
     // Redibujar un solo patrón sin parpadeo
     if (patternIndex < 0 || patternIndex >= 6) return;
@@ -3807,18 +4113,30 @@ void changeTempo(int delta) {
 }
 
 void changePattern(int delta) {
-    currentPattern = (currentPattern + delta + MAX_PATTERNS) % MAX_PATTERNS;
+    // CORRECCIÓN: Validar nuevo patrón antes de cambiar
+    int newPattern = (currentPattern + delta + MAX_PATTERNS) % MAX_PATTERNS;
+    if (newPattern < 0 || newPattern >= MAX_PATTERNS) {
+        Serial.printf("✗ Invalid pattern: %d\n", newPattern);
+        return;
+    }
+    
+    currentPattern = newPattern;
     currentStep = 0;
     needsFullRedraw = true;
     
     // Enviar cambio de patrón al MASTER
+    if (!udpConnected) {
+        Serial.println("✗ Cannot change pattern: UDP not connected");
+        return;
+    }
+    
     JsonDocument doc;
     doc["cmd"] = "selectPattern";
     doc["index"] = currentPattern;
     sendUDPCommand(doc);
     
-    // Esperar un poco y solicitar el nuevo patrón automáticamente
-    delay(50);
+    // CORRECCIÓN: Delay mayor para evitar conflictos
+    delay(150);
     requestPatternFromMaster();
     
     Serial.printf("► Pattern changed to %d, requesting sync...\n", currentPattern + 1);
@@ -3868,6 +4186,20 @@ void changeScreen(Screen newScreen) {
 }
 
 void toggleStep(int track, int step) {
+    // CORRECCIÓN: Validar índices antes de acceder a arrays
+    if (currentPattern < 0 || currentPattern >= MAX_PATTERNS) {
+        Serial.printf("✗ Invalid pattern: %d\n", currentPattern);
+        return;
+    }
+    if (track < 0 || track >= MAX_TRACKS) {
+        Serial.printf("✗ Invalid track: %d\n", track);
+        return;
+    }
+    if (step < 0 || step >= MAX_STEPS) {
+        Serial.printf("✗ Invalid step: %d\n", step);
+        return;
+    }
+    
     patterns[currentPattern].steps[track][step] = 
         !patterns[currentPattern].steps[track][step];
     needsGridUpdate = true;
@@ -3877,12 +4209,16 @@ void toggleStep(int track, int step) {
                   patterns[currentPattern].steps[track][step] ? "ON" : "OFF");
     
     // Enviar al MASTER
+    if (!udpConnected) {
+        Serial.println("✗ Cannot toggle step: UDP not connected");
+        return;
+    }
+    
     JsonDocument doc;
-    doc["cmd"] = "toggleStep";
-    doc["pattern"] = currentPattern;
+    doc["cmd"] = "setStep";
     doc["track"] = track;
     doc["step"] = step;
-    doc["state"] = patterns[currentPattern].steps[track][step];
+    doc["active"] = patterns[currentPattern].steps[track][step];
     sendUDPCommand(doc);
 }
 
@@ -4182,7 +4518,7 @@ void setupWebServer() {
         // Este endpoint recibe el patrón completo del MASTER
         request->send(200, "application/json", "{\"status\":\"ok\"}");
     }, NULL, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
-        // Parsear JSON con el patrón
+        // Parsear JSON con el patrón - CORRECCIÓN: Buffer de 4KB
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, data, len);
         

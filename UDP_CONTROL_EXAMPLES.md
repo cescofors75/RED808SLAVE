@@ -10,6 +10,44 @@
 
 ---
 
+## 📋 Tabla Resumen de Comandos UDP
+
+| Categoría | Comando | Parámetros | Descripción |
+|-----------|---------|------------|-------------|
+| **Sequencer** | `start` | - | Iniciar secuenciador |
+| | `stop` | - | Detener secuenciador |
+| | `tempo` | `value` (60-200) | Cambiar BPM |
+| | `selectPattern` | `index` (0-15) | Cambiar patrón activo |
+| | **`kit`** | **`value` (0-2)** | **Cambiar kit de samples (NUEVO)** |
+| **Pattern** | `setStep` | `track`, `step`, `active` | Activar/desactivar step |
+| | `mute` | `track`, `value` | Silenciar/activar track |
+| | `toggleLoop` | `track` | Toggle loop en track |
+| | `pauseLoop` | `track` | Pausar loop |
+| | `setStepVelocity` | `track`, `step`, `velocity` | Establecer velocity de step (0-127) |
+| | `getStepVelocity` | `track`, `step` | Obtener velocity de step |
+| **Pads** | `trigger` | `pad`, `vel` (opcional) | Trigger pad con velocity |
+| **Volumen** | `setVolume` | `value` (0-150) | Volumen maestro |
+| | `setSequencerVolume` | `value` (0-150) | Volumen del sequencer |
+| | `setLiveVolume` | `value` (0-150) | Volumen de live pads |
+| | **`setTrackVolume`** | **`track`, `volume` (0-100)** | **Volumen por track (NUEVO)** |
+| | **`getTrackVolume`** | **`track`** | **Obtener volumen de track (NUEVO)** |
+| | **`getTrackVolumes`** | **-** | **Obtener todos los volúmenes (NUEVO)** |
+| **FX** | `setFilter` | `type` (0-9) | Tipo de filtro global |
+| | `setFilterCutoff` | `value` (20-20000) | Frecuencia de corte (Hz) |
+| | `setFilterResonance` | `value` (0.1-10.0) | Resonancia del filtro |
+| | `setBitCrush` | `value` (1-16) | Bit depth |
+| | `setDistortion` | `value` (0.0-1.0) | Distorsión |
+| | `setSampleRate` | `value` (1000-44100) | Sample rate reduction |
+| | `setTrackFilter` | `track`, `filterType`, `cutoff`, `resonance`, `gain` | Filtro por track |
+| | `clearTrackFilter` | `track` | Eliminar filtro de track |
+| | `setPadFilter` | `pad`, `filterType`, `cutoff`, `resonance`, `gain` | Filtro por pad |
+| | `clearPadFilter` | `pad` | Eliminar filtro de pad |
+| **Samples** | `loadSample` | `family`, `filename`, `pad` | Cargar sample en pad |
+| **LED** | `setLedMonoMode` | `value` (bool) | Modo mono LED |
+| **Sync** | `get_pattern` | `pattern` (opcional) | Solicitar patrón |
+
+---
+
 ## CÓDIGO ARDUINO/ESP32 (Slave Controller)
 
 ### Ejemplo Básico - Enviar Comandos UDP
@@ -81,6 +119,20 @@ void setTempo(int bpm) {
   sendCommand(doc);
 }
 
+void selectPattern(int index) {
+  StaticJsonDocument<128> doc;
+  doc["cmd"] = "selectPattern";
+  doc["index"] = index;
+  sendCommand(doc);
+}
+
+void selectKit(int kitNum) {
+  StaticJsonDocument<128> doc;
+  doc["cmd"] = "kit";
+  doc["value"] = kitNum;
+  sendCommand(doc);
+}
+
 void startSequencer() {
   StaticJsonDocument<64> doc;
   doc["cmd"] = "start";
@@ -100,10 +152,60 @@ void setVolume(int volume) {
   sendCommand(doc);
 }
 
+// 🆕 Funciones para control de volumen por track
+void setTrackVolume(int track, int volume) {
+  StaticJsonDocument<128> doc;
+  doc["cmd"] = "setTrackVolume";
+  doc["track"] = track;
+  doc["volume"] = volume;
+  sendCommand(doc);
+}
+
+void getTrackVolume(int track) {
+  StaticJsonDocument<128> doc;
+  doc["cmd"] = "getTrackVolume";
+  doc["track"] = track;
+  sendCommand(doc);
+}
+
+void getTrackVolumes() {
+  StaticJsonDocument<64> doc;
+  doc["cmd"] = "getTrackVolumes";
+  sendCommand(doc);
+}
+
+// Otras funciones útiles
+void setStepVelocity(int track, int step, int velocity) {
+  StaticJsonDocument<128> doc;
+  doc["cmd"] = "setStepVelocity";
+  doc["track"] = track;
+  doc["step"] = step;
+  doc["velocity"] = velocity;
+  sendCommand(doc);
+}
+
+void setFilter(int type) {
+  StaticJsonDocument<128> doc;
+  doc["cmd"] = "setFilter";
+  doc["type"] = type;
+  sendCommand(doc);
+}
+
+void setFilterCutoff(int value) {
+  StaticJsonDocument<128> doc;
+  doc["cmd"] = "setFilterCutoff";
+  doc["value"] = value;
+  sendCommand(doc);
+}
+
 void loop() {
   // Ejemplo: Enviar kick cada 2 segundos
   triggerPad(0, 127);  // Pad 0 = BD (Bombo)
   delay(2000);
+  
+  // Ejemplo: Ajustar volumen de kick a 75%
+  setTrackVolume(0, 75);
+  delay(100);
 }
 ```
 
@@ -387,6 +489,12 @@ void loop() {
 {"cmd":"selectPattern","index":0}
 ```
 
+#### **🆕 Cambiar kit de samples (0-2: 808 CLASSIC, 808 BRIGHT, 808 DRY)**
+```json
+{"cmd":"kit","value":0}
+```
+- `value`: 0 = 808 CLASSIC, 1 = 808 BRIGHT, 2 = 808 DRY
+
 ---
 
 ### 2. EDITAR SEQUENCER
@@ -456,6 +564,31 @@ void loop() {
 #### Volumen de live pads (0-100)
 ```json
 {"cmd":"setLiveVolume","value":90}
+```
+
+#### **🆕 Volumen por track individual (0-100)**
+```json
+{"cmd":"setTrackVolume","track":0,"volume":75}
+```
+- `track`: 0-15 (track específico)
+- `volume`: 0-100 (nivel de volumen)
+
+#### **🆕 Obtener volumen de un track**
+```json
+{"cmd":"getTrackVolume","track":0}
+```
+Respuesta:
+```json
+{"status":"ok","track":0,"volume":75}
+```
+
+#### **🆕 Obtener todos los volúmenes de tracks**
+```json
+{"cmd":"getTrackVolumes"}
+```
+Respuesta:
+```json
+{"status":"ok","volumes":[100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100]}
 ```
 
 ---
@@ -643,3 +776,170 @@ Si hay error de parsing JSON:
 ```
 [UDP] JSON parse error: InvalidInput
 ```
+---
+
+## 🧪 Tests Rápidos de Verificación
+
+### Test 1: Conectividad Básica
+```bash
+# PowerShell (Windows)
+$udp = New-Object System.Net.Sockets.UdpClient
+$bytes = [Text.Encoding]::UTF8.GetBytes('{"cmd":"getTrackVolumes"}')
+$udp.Send($bytes, $bytes.Length, "192.168.4.1", 8888)
+$udp.Close()
+```
+
+### Test 2: Trigger Pad
+```json
+{"cmd":"trigger","pad":0,"vel":127}
+```
+**Resultado esperado**: Sonido de bombo (BD)
+
+### Test 3: Control de Tempo
+```json
+{"cmd":"tempo","value":140}
+```
+**Resultado esperado**: BPM cambia a 140
+
+### Test 4: Volumen por Track
+```json
+{"cmd":"setTrackVolume","track":0,"volume":50}
+```
+**Resultado esperado**: Volumen del kick al 50%
+
+### Test 5: Obtener Estado
+```json
+{"cmd":"getTrackVolumes"}
+```
+**Resultado esperado**:
+```json
+{"status":"ok","volumes":[50,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100]}
+```
+
+### Test 6: Sequencer Start/Stop
+```json
+{"cmd":"start"}
+```
+**Resultado esperado**: Secuenciador comienza a reproducir
+
+```json
+{"cmd":"stop"}
+```
+**Resultado esperado**: Secuenciador se detiene
+
+---
+
+## 📊 Monitoreo y Verificación
+
+### Verificar Conexión WiFi
+1. Conectar a red WiFi `RED808` (password: `red808esp32`)
+2. Verificar IP asignada (ej: `192.168.4.2`)
+3. Hacer ping a `192.168.4.1`
+
+### Verificar Puerto UDP
+```bash
+# Linux/Mac
+echo '{"cmd":"getTrackVolumes"}' | nc -u 192.168.4.1 8888
+
+# Windows PowerShell
+Test-NetConnection -ComputerName 192.168.4.1 -Port 8888
+```
+
+### Script de Test Completo (Arduino)
+```cpp
+void testAllCommands() {
+  Serial.println("=== INICIANDO TESTS UDP ===");
+  
+  // Test 1: Get Volumes
+  Serial.println("\n[TEST 1] getTrackVolumes");
+  getTrackVolumes();
+  delay(500);
+  
+  // Test 2: Set Track Volume
+  Serial.println("\n[TEST 2] setTrackVolume");
+  setTrackVolume(0, 75);
+  delay(500);
+  
+  // Test 3: Trigger Pad
+  Serial.println("\n[TEST 3] trigger pad 0");
+  triggerPad(0, 127);
+  delay(1000);
+  
+  // Test 4: Tempo
+  Serial.println("\n[TEST 4] tempo 140");
+  setTempo(140);
+  delay(500);
+  
+  // Test 5: Start/Stop
+  Serial.println("\n[TEST 5] start");
+  startSequencer();
+  delay(2000);
+  
+  Serial.println("\n[TEST 6] stop");
+  stopSequencer();
+  delay(500);
+  
+  // Test 6: Volume
+  Serial.println("\n[TEST 7] setVolume 80");
+  setVolume(80);
+  delay(500);
+  
+  Serial.println("\n=== TESTS COMPLETADOS ===");
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Conectar WiFi
+  WiFi.begin("RED808", "red808esp32");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✓ Conectado!");
+  
+  udp.begin(0);
+  
+  // Ejecutar tests
+  delay(2000);
+  testAllCommands();
+}
+
+void loop() {
+  // Tests completados
+  delay(1000);
+}
+```
+
+---
+
+## ⚠️ Solución de Problemas
+
+| Problema | Causa Probable | Solución |
+|----------|----------------|----------|
+| No conecta WiFi | Password incorrecto | Verificar `red808esp32` |
+| Sin respuesta UDP | Firewall bloqueando | Verificar configuración de red |
+| Comandos ignorados | JSON malformado | Validar sintaxis JSON |
+| Latencia alta | Red saturada | Reducir frecuencia de envío |
+| Pads no suenan | Volumen en 0 | Verificar `setVolume`, `setTrackVolume` |
+| Tempo no cambia | Valor fuera de rango | Usar 60-200 BPM |
+
+---
+
+## 📱 Apps de Testing Recomendadas
+
+### Android
+- **UDP Sender/Receiver** - Testing simple
+- **Network Tools** - Diagnóstico completo
+- **Packet Sender** - UDP profesional
+
+### iOS
+- **Network Analyzer** - Testing UDP
+- **UDP Test Tool** - Envío de paquetes
+
+### PC/Mac
+- **Packet Sender** (multiplataforma)
+- **netcat** (línea de comandos)
+- **Python scripts** (máxima flexibilidad)
+
+---
