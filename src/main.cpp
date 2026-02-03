@@ -361,6 +361,7 @@ bool ledActive[8] = {false};         // 8 LEDs (simplificado)
 int audioLevels[8] = {0};
 bool padPressed[8] = {false};  // 8 pads presionados (simplificado)
 unsigned long padPressTime[8] = {0};  // Tiempo de presión para tremolo (8 pads)
+unsigned long padPulseTime[8] = {0};  // Control de animación visual
 unsigned long lastVizUpdate = 0;
 
 DisplayMode currentDisplayMode = DISPLAY_BPM;
@@ -604,7 +605,7 @@ void setupWiFiAndUDP() {
     
     // Esperar hasta 15 segundos (30 intentos x 500ms)
     int attempts = 0;
-    int maxAttempts = 30;  // 15 segundos total
+    int maxAttempts = 16;  // 8 segundos total (arranque más rápido)
     while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
         delay(500);
         Serial.print(".");
@@ -1663,7 +1664,7 @@ void setup() {
     
     if (udpConnected) {
         tm1.displayText("SURFACE ");
-        tm2.displayText("READY   ");
+        tm2.displayText("ENLACE  ");
     } else {
         tm1.displayText("NO CONN ");
         tm2.displayText("MASTER  ");
@@ -2827,7 +2828,7 @@ void drawConsoleBootScreen() {
         "WiFi",
         "UDP Client",
         "Patterns",
-        "Ready"
+        "Listo"
     };
     
     for (int i = 0; i < 10; i++) {
@@ -2861,18 +2862,24 @@ void drawConsoleBootScreen() {
     // MENSAJE FINAL - Grande y centrado
     tft.fillRect(0, progY + 70, 480, 40, 0x0000);
     
-    // Caja de "READY"
-    tft.fillRoundRect(140, progY + 70, 200, 45, 10, THEME_RED808.accent);
-    tft.drawRoundRect(140, progY + 70, 200, 45, 10, 0xFFFF);
-    tft.setTextSize(3);
+    // Caja de estado
+    tft.fillRoundRect(90, progY + 68, 300, 60, 10, THEME_RED808.accent);
+    tft.drawRoundRect(90, progY + 68, 300, 60, 10, 0xFFFF);
+    tft.setTextSize(2);
     tft.setTextColor(0x0000);
-    tft.setCursor(175, progY + 80);
-    tft.println("READY");
+    tft.setCursor(122, progY + 76);
+    tft.println("ENLACE MASTER");
+    tft.setTextSize(1);
+    tft.setTextColor(0x0000);
+    tft.setCursor(115, progY + 95);
+    tft.println("WIFI STA · UDP 8888 · HANDSHAKE");
+    tft.setCursor(150, progY + 108);
+    tft.println("MASTER 192.168.4.1");
     
     // Iconos de check
     for (int i = 0; i < 3; i++) {
-        tft.fillCircle(120 + i * 5, progY + 92, 3, 0x07E0);
-        tft.fillCircle(360 + i * 5, progY + 92, 3, 0x07E0);
+        tft.fillCircle(116 + i * 5, progY + 114, 3, 0x07E0);
+        tft.fillCircle(364 + i * 5, progY + 114, 3, 0x07E0);
     }
     
     delay(800);
@@ -3067,26 +3074,26 @@ void drawLiveScreen() {
     
     // ========== 8 PADS GRANDES ESTILO AKAI APC MINI ==========
     // Maximizar tamaño de pads para llenar pantalla 480x320
-    const int padW = 115;  // Más anchos
-    const int padH = 110;  // Más altos
-    const int startX = 8;
+    const int padW = 112;  // Ajustado para centrar
+    const int padH = 108;  // Ajustado para centrar
+    const int startX = 10; // Centrado horizontal
     const int startY = 65;  
-    const int spacingX = 5;
+    const int spacingX = 4;
     const int spacingY = 8;
     
     // Colores vibrantes estilo AKAI APC (RGB saturados)
     const uint16_t padColors[8] = {
-        tft.color565(255, 20, 20),    // KICK - Rojo intenso
-        tft.color565(255, 240, 0),    // SNARE - Amarillo brillante
-        tft.color565(0, 255, 255),    // CL-HAT - Cyan eléctrico
-        tft.color565(255, 160, 0),    // OP-HAT - Naranja vibrante
-        tft.color565(255, 0, 200),    // CLAP - Magenta
-        tft.color565(150, 255, 0),    // TOM-LO - Verde lima brillante
-        tft.color565(0, 180, 255),    // TOM-HI - Azul brillante
-        tft.color565(255, 80, 150)    // CYMBAL - Rosa neón
+        COLOR_INST_KICK,   // BD
+        COLOR_INST_SNARE,  // SD
+        COLOR_INST_CLHAT,  // CH
+        COLOR_INST_OPHAT,  // OH
+        COLOR_INST_CLAP,   // CL
+        COLOR_INST_TOMLO,  // T1
+        COLOR_INST_TOMHI,  // T2
+        COLOR_INST_CYMBAL  // CY
     };
     
-    // Dibujar los 8 pads con diseño mejorado (4 columnas x 2 filas)
+    // Dibujar los 8 pads con diseño tipo controlador (4 columnas x 2 filas)
     for (int i = 0; i < 8; i++) {
         int col = i % 4;
         int row = i / 4;
@@ -3095,29 +3102,33 @@ void drawLiveScreen() {
         
         uint16_t baseColor = padColors[i];
         
-        // Color atenuado para estado OFF (más oscuro)
-        uint8_t r = ((baseColor >> 11) & 0x1F) * 3;
-        uint8_t g = ((baseColor >> 5) & 0x3F) * 1.5;
-        uint8_t b = (baseColor & 0x1F) * 3;
+        // Color atenuado para estado OFF (LED pálido)
+        uint8_t r = ((baseColor >> 11) & 0x1F) * 4;
+        uint8_t g = ((baseColor >> 5) & 0x3F) * 2;
+        uint8_t b = (baseColor & 0x1F) * 4;
         uint16_t dimColor = tft.color565(r, g, b);
+        uint16_t softColor = tft.color565(min((int)r + 10, 255), min((int)g + 8, 255), min((int)b + 10, 255));
         
-        // Fondo con gradiente simulado (3 capas)
-        tft.fillRoundRect(x, y, padW, padH, 10, COLOR_BG);
-        tft.fillRoundRect(x+1, y+1, padW-2, padH-2, 9, dimColor);
-        
-        // Borde doble para efecto 3D
-        tft.drawRoundRect(x, y, padW, padH, 10, baseColor);
-        tft.drawRoundRect(x+1, y+1, padW-2, padH-2, 9, baseColor);
-        
-        // Barra superior LED estilo AKAI (más grande)
-        tft.fillRoundRect(x + 4, y + 4, padW - 8, 12, 4, baseColor);
-        
-        // Efecto glow en la barra
+        // Glow suave
         uint8_t rg = ((baseColor >> 11) & 0x1F) * 6;
         uint8_t gg = ((baseColor >> 5) & 0x3F) * 3;
         uint8_t bg = (baseColor & 0x1F) * 6;
         uint16_t glowColor = tft.color565(rg, gg, bg);
-        tft.drawRoundRect(x + 3, y + 3, padW - 6, 14, 5, glowColor);
+        uint16_t shadowColor = tft.color565(6, 6, 8);
+        
+        // Sombras y bisel tipo APC
+        tft.fillRoundRect(x + 2, y + 3, padW, padH, 11, shadowColor);
+        tft.fillRoundRect(x, y, padW, padH, 11, dimColor);
+        tft.fillRoundRect(x + 2, y + 2, padW - 4, padH - 4, 9, softColor);
+        
+        // Bordes con brillo suave
+        tft.drawRoundRect(x + 1, y + 1, padW - 2, padH - 2, 10, baseColor);
+        tft.drawRoundRect(x + 3, y + 3, padW - 6, padH - 6, 8, glowColor);
+        
+        // Barra superior LED estilo controlador
+        tft.fillRoundRect(x + 6, y + 6, padW - 12, 10, 4, baseColor);
+        tft.drawRoundRect(x + 5, y + 5, padW - 10, 12, 5, glowColor);
+        tft.drawFastHLine(x + 7, y + 8, padW - 14, TFT_WHITE);
         
         // Número del pad (más grande y con fondo)
         tft.fillCircle(x + 15, y + 26, 9, COLOR_BG);
@@ -3127,7 +3138,7 @@ void drawLiveScreen() {
         tft.setCursor(x + (i < 9 ? 11 : 8), y + 19);
         tft.printf("%d", i + 1);
         
-        // Nombre del instrumento (más grande, centrado)
+        // Nombre del instrumento (centrado)
         tft.setTextSize(2);
         tft.setTextColor(COLOR_TEXT);
         String instName = String(instrumentNames[i]);
@@ -3620,11 +3631,11 @@ void drawHeader() {
 
 void drawLivePad(int padIndex, bool highlight) {
     // COORDENADAS IDÉNTICAS A drawLiveScreen
-    const int padW = 115;  // Mismo que drawLiveScreen
-    const int padH = 110;  // Mismo que drawLiveScreen
-    const int startX = 8;
+    const int padW = 112;  // Mismo que drawLiveScreen
+    const int padH = 108;  // Mismo que drawLiveScreen
+    const int startX = 10;
     const int startY = 65; // Mismo que drawLiveScreen
-    const int spacingX = 5;
+    const int spacingX = 4;
     const int spacingY = 8; // Mismo que drawLiveScreen
     
     int col = padIndex % 4;
@@ -3634,78 +3645,81 @@ void drawLivePad(int padIndex, bool highlight) {
     
     // Colores vibrantes estilo AKAI (mismos que drawLiveScreen)
     const uint16_t padColors[8] = {
-        tft.color565(255, 20, 20),    // KICK - Rojo intenso
-        tft.color565(255, 240, 0),    // SNARE - Amarillo brillante
-        tft.color565(0, 255, 255),    // CL-HAT - Cyan eléctrico
-        tft.color565(255, 160, 0),    // OP-HAT - Naranja vibrante
-        tft.color565(255, 0, 200),    // CLAP - Magenta
-        tft.color565(150, 255, 0),    // TOM-LO - Verde lima brillante
-        tft.color565(0, 180, 255),    // TOM-HI - Azul brillante
-        tft.color565(255, 80, 150)    // CYMBAL - Rosa neón
+        COLOR_INST_KICK,   // BD
+        COLOR_INST_SNARE,  // SD
+        COLOR_INST_CLHAT,  // CH
+        COLOR_INST_OPHAT,  // OH
+        COLOR_INST_CLAP,   // CL
+        COLOR_INST_TOMLO,  // T1
+        COLOR_INST_TOMHI,  // T2
+        COLOR_INST_CYMBAL  // CY
     };
     
     uint16_t baseColor = padColors[padIndex];
     
     if (highlight) {
-        // Efecto PRESS TREMOLO: pad súper brillante con flash
-        // Fondo blanco para máximo brillo
-        tft.fillRoundRect(x, y, padW, padH, 10, TFT_WHITE);
+        // Efecto PRESS: sube de tono (más potencia) sin parpadeo
+        uint8_t r8 = ((baseColor >> 11) & 0x1F) << 3;
+        uint8_t g8 = ((baseColor >> 5) & 0x3F) << 2;
+        uint8_t b8 = (baseColor & 0x1F) << 3;
         
-        // Color vibrante saturado al máximo
-        uint8_t r = min(((baseColor >> 11) & 0x1F) * 10, 255);
-        uint8_t g = min(((baseColor >> 5) & 0x3F) * 5, 255);
-        uint8_t b = min((baseColor & 0x1F) * 10, 255);
-        uint16_t superBright = tft.color565(r, g, b);
+        int scale = 180; // 180% fijo
+        uint8_t r = min((r8 * scale) / 100, 255);
+        uint8_t g = min((g8 * scale) / 100, 255);
+        uint8_t b = min((b8 * scale) / 100, 255);
+        uint16_t brightColor = tft.color565(r, g, b);
+        uint16_t halo = tft.color565(min(r + 30, 255), min(g + 30, 255), min(b + 30, 255));
+        uint16_t shadowColor = tft.color565(6, 6, 8);
         
-        tft.fillRoundRect(x+2, y+2, padW-4, padH-4, 8, superBright);
+        // Corona externa
+        tft.drawRoundRect(x - 2, y - 2, padW + 4, padH + 4, 12, halo);
+        tft.drawRoundRect(x - 1, y - 1, padW + 2, padH + 2, 11, brightColor);
         
-        // Múltiples bordes blancos brillantes
-        tft.drawRoundRect(x, y, padW, padH, 10, TFT_WHITE);
-        tft.drawRoundRect(x+1, y+1, padW-2, padH-2, 9, TFT_WHITE);
-        tft.drawRoundRect(x+2, y+2, padW-4, padH-4, 8, TFT_WHITE);
-        tft.drawRoundRect(x+3, y+3, padW-6, padH-6, 7, superBright);
+        // Cuerpo brillante en color
+        tft.fillRoundRect(x + 2, y + 3, padW, padH, 11, shadowColor);
+        tft.fillRoundRect(x, y, padW, padH, 11, brightColor);
+        tft.fillRoundRect(x + 2, y + 2, padW - 4, padH - 4, 9, halo);
+        
+        // Bordes luminosos
+        tft.drawRoundRect(x + 1, y + 1, padW - 2, padH - 2, 10, brightColor);
+        tft.drawRoundRect(x + 3, y + 3, padW - 6, padH - 6, 8, halo);
         
         // Barra superior ultra brillante
-        tft.fillRoundRect(x + 3, y + 3, padW - 6, 14, 5, TFT_WHITE);
-        tft.drawRoundRect(x + 2, y + 2, padW - 4, 16, 6, TFT_WHITE);
+        tft.fillRoundRect(x + 6, y + 6, padW - 12, 12, 5, halo);
+        tft.drawRoundRect(x + 5, y + 5, padW - 10, 14, 6, brightColor);
+        tft.drawFastHLine(x + 7, y + 8, padW - 14, TFT_WHITE);
         
-        // Número con fondo blanco y texto negro
-        tft.fillCircle(x + 15, y + 26, 11, TFT_WHITE);
-        tft.drawCircle(x + 15, y + 26, 12, TFT_WHITE);
+        // Número con fondo claro
+        tft.fillCircle(x + 15, y + 26, 11, halo);
+        tft.drawCircle(x + 15, y + 26, 12, brightColor);
         tft.setTextSize(2);
         tft.setTextColor(COLOR_BG);
         tft.setCursor(x + (padIndex < 9 ? 11 : 8), y + 19);
         tft.printf("%d", padIndex + 1);
         
-        // Flash en las esquinas para efecto explosivo
-        tft.fillCircle(x + 8, y + 8, 4, TFT_WHITE);
-        tft.fillCircle(x + padW - 8, y + 8, 4, TFT_WHITE);
-        tft.fillCircle(x + 8, y + padH - 8, 4, TFT_WHITE);
-        tft.fillCircle(x + padW - 8, y + padH - 8, 4, TFT_WHITE);
-        
     } else {
-        // Estado NORMAL: color atenuado
-        uint8_t r = ((baseColor >> 11) & 0x1F) * 3;
-        uint8_t g = ((baseColor >> 5) & 0x3F) * 1.5;
-        uint8_t b = (baseColor & 0x1F) * 3;
+        // Estado NORMAL: estilo controlador
+        uint8_t r = ((baseColor >> 11) & 0x1F) * 4;
+        uint8_t g = ((baseColor >> 5) & 0x3F) * 2;
+        uint8_t b = (baseColor & 0x1F) * 4;
         uint16_t dimColor = tft.color565(r, g, b);
-        
-        tft.fillRoundRect(x, y, padW, padH, 10, COLOR_BG);
-        tft.fillRoundRect(x+1, y+1, padW-2, padH-2, 9, dimColor);
-        
-        // Borde doble
-        tft.drawRoundRect(x, y, padW, padH, 10, baseColor);
-        tft.drawRoundRect(x+1, y+1, padW-2, padH-2, 9, baseColor);
-        
-        // Barra superior LED
-        tft.fillRoundRect(x + 4, y + 4, padW - 8, 12, 4, baseColor);
-        
-        // Efecto glow
+        uint16_t softColor = tft.color565(min((int)r + 10, 255), min((int)g + 8, 255), min((int)b + 10, 255));
         uint8_t rg = ((baseColor >> 11) & 0x1F) * 6;
         uint8_t gg = ((baseColor >> 5) & 0x3F) * 3;
         uint8_t bg = (baseColor & 0x1F) * 6;
         uint16_t glowColor = tft.color565(rg, gg, bg);
-        tft.drawRoundRect(x + 3, y + 3, padW - 6, 14, 5, glowColor);
+        uint16_t shadowColor = tft.color565(6, 6, 8);
+        
+        tft.fillRoundRect(x + 2, y + 3, padW, padH, 11, shadowColor);
+        tft.fillRoundRect(x, y, padW, padH, 11, dimColor);
+        tft.fillRoundRect(x + 2, y + 2, padW - 4, padH - 4, 9, softColor);
+        
+        tft.drawRoundRect(x + 1, y + 1, padW - 2, padH - 2, 10, baseColor);
+        tft.drawRoundRect(x + 3, y + 3, padW - 6, padH - 6, 8, glowColor);
+        
+        tft.fillRoundRect(x + 6, y + 6, padW - 12, 10, 4, baseColor);
+        tft.drawRoundRect(x + 5, y + 5, padW - 10, 12, 5, glowColor);
+        tft.drawFastHLine(x + 7, y + 8, padW - 14, TFT_WHITE);
         
         // Número con fondo
         tft.fillCircle(x + 15, y + 26, 9, COLOR_BG);
@@ -4044,58 +4058,58 @@ void drawSinglePattern(int patternIndex, bool isSelected) {
 }
 
 void drawSyncingScreen() {
-    // Pantalla temporal de sincronización
+    // Pantalla de sincronización estilo RED808
     tft.fillScreen(COLOR_BG);
+    drawHeader();
     
-    // Caja central con mensaje
-    int boxW = 360;
-    int boxH = 140;
-    int boxX = (480 - boxW) / 2;
-    int boxY = (320 - boxH) / 2;
+    const int boxW = 380;
+    const int boxH = 170;
+    const int boxX = (480 - boxW) / 2;
+    const int boxY = 95;
     
-    // Fondo de la caja con glow
-    for (int i = 3; i > 0; i--) {
-        uint8_t brightness = map(i, 3, 1, 30, 80);
-        uint16_t glowColor = tft.color565(brightness, brightness, 0);
-        tft.drawRoundRect(boxX - i, boxY - i, boxW + i * 2, boxH + i * 2, 12, glowColor);
+    // Glow exterior
+    for (int i = 4; i > 0; i--) {
+        uint16_t glow = tft.color565(10 + i * 6, 2 + i * 3, 0);
+        tft.drawRoundRect(boxX - i, boxY - i, boxW + i * 2, boxH + i * 2, 14, glow);
     }
     
-    tft.fillRoundRect(boxX, boxY, boxW, boxH, 10, COLOR_PRIMARY);
-    tft.drawRoundRect(boxX, boxY, boxW, boxH, 10, COLOR_WARNING);
-    tft.drawRoundRect(boxX + 2, boxY + 2, boxW - 4, boxH - 4, 8, COLOR_ACCENT);
+    // Panel principal
+    tft.fillRoundRect(boxX, boxY, boxW, boxH, 12, COLOR_PRIMARY);
+    tft.drawRoundRect(boxX, boxY, boxW, boxH, 12, COLOR_ACCENT);
+    tft.drawRoundRect(boxX + 2, boxY + 2, boxW - 4, boxH - 4, 10, COLOR_ACCENT2);
     
-    // Icono de búsqueda (círculo con puntos animados)
+    // Banda superior tipo consola
+    tft.fillRoundRect(boxX + 10, boxY + 10, boxW - 20, 22, 6, COLOR_PRIMARY_LIGHT);
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(boxX + 20, boxY + 16);
+    tft.print("WIFI LINK STATUS");
+    
+    // Icono WiFi + anillo
     int centerX = 240;
-    int centerY = boxY + 50;
-    tft.drawCircle(centerX, centerY, 25, COLOR_WARNING);
-    tft.drawCircle(centerX, centerY, 23, COLOR_WARNING);
-    
-    // Puntos alrededor del círculo
-    for (int i = 0; i < 8; i++) {
-        float angle = i * 45 * PI / 180.0;
-        int x = centerX + cos(angle) * 30;
-        int y = centerY + sin(angle) * 30;
-        tft.fillCircle(x, y, 3, COLOR_ACCENT2);
-    }
+    int centerY = boxY + 70;
+    tft.drawCircle(centerX, centerY, 24, COLOR_ACCENT2);
+    tft.drawCircle(centerX, centerY, 22, COLOR_ACCENT2);
+    tft.drawFastHLine(centerX - 10, centerY + 8, 20, COLOR_ACCENT2);
+    tft.fillCircle(centerX, centerY + 10, 3, COLOR_ACCENT2);
+    tft.drawCircle(centerX, centerY, 16, COLOR_WARNING);
+    tft.drawCircle(centerX, centerY, 10, COLOR_WARNING);
     
     // Texto principal
-    tft.setTextSize(3);
-    tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(boxX + 35, boxY + 95);
-    tft.print("BUSCANDO");
-    
     tft.setTextSize(2);
-    tft.setTextColor(COLOR_ACCENT);
-    tft.setCursor(boxX + 85, boxY + 120);
-    tft.print("SINCRONIZACION");
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(boxX + 40, boxY + 105);
+    tft.print("BUSCANDO MASTER");
     
-    // Mensaje inferior
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT_DIM);
-    tft.setCursor(boxX + 90, boxY + boxH - 15);
-    tft.print("Conectando al MASTER...");
+    tft.setCursor(boxX + 70, boxY + 128);
+    tft.print("SINCRONIZACION EN CURSO");
     
-    delay(500);  // Mostrar por medio segundo para que sea visible
+    // Barra de progreso sutil
+    tft.drawRoundRect(boxX + 40, boxY + 145, boxW - 80, 10, 5, COLOR_BORDER);
+    int pulse = (millis() / 60) % (boxW - 92);
+    tft.fillRoundRect(boxX + 42 + pulse, boxY + 147, 16, 6, 3, COLOR_ACCENT);
 }
 
 // ============================================
