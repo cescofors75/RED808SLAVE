@@ -1542,6 +1542,14 @@ void setup() {
     Serial.print("► ADC Init... ");
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
+    
+    // Inicializar buffer ADC del ROTARY_ANGLE_PIN con lecturas estables
+    pinMode(ROTARY_ANGLE_PIN, INPUT);
+    Serial.print("Calibrating volume pot... ");
+    for (int i = 0; i < 10; i++) {
+        analogRead(ROTARY_ANGLE_PIN);
+        delay(10);
+    }
     Serial.println("OK");
     
     // I2C Init para M5 8ENCODER
@@ -2365,51 +2373,77 @@ void debugAnalogButtons() {
 
 void handleVolume() {
     static bool lastToggleBtnState = HIGH;
+    static unsigned long lastTogglePressTime = 0;
     static int lastPotValue = -1;  // Valor del potenciómetro en el último cambio de modo
     static bool potMoved = true;   // Flag para detectar si el pot se movió después de cambiar modo
     static int targetVolume = -1;  // Soft takeover: volumen objetivo del modo actual
+    static int adcReadings[5] = {0, 0, 0, 0, 0};  // Buffer para filtrado de ruido ADC
+    static int adcIndex = 0;
     
-    // Leer botón toggle (pin 14) con pull-up interno
+    // Leer botón toggle (pin 14) con pull-up interno y debounce mejorado
     bool toggleBtnState = digitalRead(VOLUME_TOGGLE_BTN);
+    unsigned long now = millis();
     
-    // Detectar flanco de bajada (botón presionado)
+    // Detectar flanco de bajada (botón presionado) con debounce robusto
     if (toggleBtnState == LOW && lastToggleBtnState == HIGH) {
-        delay(50);  // Debounce
-        
-        // Capturar posición actual del potenciómetro
-        int raw = analogRead(ROTARY_ANGLE_PIN);
-        lastPotValue = map(raw, 0, 4095, MAX_VOLUME, 0);
-        potMoved = false;  // El pot NO se ha movido desde el cambio de modo
-        
-        // Alternar modo de volumen
-        volumeMode = (volumeMode == VOL_SEQUENCER) ? VOL_LIVE_PADS : VOL_SEQUENCER;
-        
-        // Soft takeover: bloquear hasta que el pot coincida con el volumen actual del modo
-        targetVolume = (volumeMode == VOL_SEQUENCER) ? sequencerVolume : livePadsVolume;
-        Serial.printf("► Volume Mode: %s (soft takeover: target %d%%)\n", 
-                 volumeMode == VOL_SEQUENCER ? "SEQUENCER" : "LIVE PADS",
-                 targetVolume);
-        
-        // Mostrar en TM1638
-        tm1.displayText(volumeMode == VOL_SEQUENCER ? "SEQ VOL " : "PAD VOL ");
-        tm2.displayText("        ");
-        lastDisplayChange = millis();
-        currentDisplayMode = DISPLAY_VOLUME;
-        needsHeaderUpdate = true;
+        if (now - lastTogglePressTime > 200) {  // Debounce de 200ms
+            lastTogglePressTime = now;
+            
+            // Capturar posición actual del potenciómetro (filtrada)
+            int rawSum = 0;
+            for (int i = 0; i < 5; i++) {
+                rawSum += analogRead(ROTARY_ANGLE_PIN);
+                delay(2);
+            }
+            int raw = rawSum / 5;
+            lastPotValue = map(raw, 0, 4095, MAX_VOLUME, 0);
+            potMoved = false;  // El pot NO se ha movido desde el cambio de modo
+            
+            // Alternar modo de volumen
+            volumeMode = (volumeMode == VOL_SEQUENCER) ? VOL_LIVE_PADS : VOL_SEQUENCER;
+            
+            // Soft takeover: bloquear hasta que el pot coincida con el volumen actual del modo
+            targetVolume = (volumeMode == VOL_SEQUENCER) ? sequencerVolume : livePadsVolume;
+            Serial.printf("► Volume Mode: %s (target %d%%, pot at %d%%)\n", 
+                     volumeMode == VOL_SEQUENCER ? "SEQUENCER" : "LIVE PADS",
+                     targetVolume, lastPotValue);
+            
+            // Mostrar en TM1638
+            tm1.displayText(volumeMode == VOL_SEQUENCER ? "SEQ VOL " : "PAD VOL ");
+            tm2.displayText("        ");
+            lastDisplayChange = millis();
+            currentDisplayMode = DISPLAY_VOLUME;
+            needsHeaderUpdate = true;
+        }
     }
     lastToggleBtnState = toggleBtnState;
     
-    // Leer potenciómetro (0-100%)
-    int raw = analogRead(ROTARY_ANGLE_PIN);
+    // Leer potenciómetro con filtro de media móvil (reduce ruido ADC)
+    int rawReading = analogRead(ROTARY_ANGLE_PIN);
+    adcReadings[adcIndex] = rawReading;
+    adcIndex = (adcIndex + 1) % 5;
+    
+    // Calcular promedio de las últimas 5 lecturas
+    int rawSum = 0;
+    for (int i = 0; i < 5; i++) {
+        rawSum += adcReadings[i];
+    }
+    int raw = rawSum / 5;
     int newVol = map(raw, 0, 4095, MAX_VOLUME, 0);  // Invertido: girar derecha = subir volumen
     
     // Detectar si el potenciómetro se movió desde el cambio de modo
     if (!potMoved) {
-        // Desbloquear solo cuando el pot se acerque al volumen objetivo del modo
-        if (targetVolume >= 0 && abs(newVol - targetVolume) <= 4) {
+        // Desbloquear cuando el pot se acerque al volumen objetivo (tolerancia ±8%)
+        if (targetVolume >= 0 && abs(newVol - targetVolume) <= 8) {
             potMoved = true;
-            Serial.println("► Potentiometer matched target - volume control unlocked");
+            Serial.printf("► Potentiometer matched target (%d%% ≈ %d%%) - control unlocked\n", 
+                         newVol, targetVolume);
         } else {
+            // Mostrar posición actual vs target para debug
+            if (now % 1000 < 50) {  // Cada ~1 segundo
+                Serial.printf("  Waiting for pot match: current %d%%, target %d%% (diff: %d%%)\n",
+                            newVol, targetVolume, abs(newVol - targetVolume));
+            }
             return;
         }
     }
@@ -2420,7 +2454,7 @@ void handleVolume() {
         if (!udpConnected) {
             // No imprimir error constantemente, solo actualizar local
             if (volumeMode == VOL_SEQUENCER) {
-                if (abs(newVol - lastSequencerVolume) > 2) {
+                if (abs(newVol - lastSequencerVolume) > 3) {  // Hysteresis de 3%
                     sequencerVolume = newVol;
                     lastSequencerVolume = newVol;
                     showVolumeOnTM1638();
@@ -2428,7 +2462,7 @@ void handleVolume() {
                     needsHeaderUpdate = true;
                 }
             } else {
-                if (abs(newVol - lastLivePadsVolume) > 2) {
+                if (abs(newVol - lastLivePadsVolume) > 3) {  // Hysteresis de 3%
                     livePadsVolume = newVol;
                     lastLivePadsVolume = newVol;
                     showVolumeOnTM1638();
@@ -2440,7 +2474,6 @@ void handleVolume() {
         }
         
         // CORRECCIÓN: Limitar frecuencia de envío (max 10 msg/seg)
-        unsigned long now = millis();
         static unsigned long lastVolumeSent = 0;
         if (now - lastVolumeSent < 100) {  // Mínimo 100ms entre envíos
             return;
@@ -2448,7 +2481,7 @@ void handleVolume() {
         lastVolumeSent = now;
         
         if (volumeMode == VOL_SEQUENCER) {
-            if (abs(newVol - lastSequencerVolume) > 2) {  // Hysteresis de 2%
+            if (abs(newVol - lastSequencerVolume) > 3) {  // Hysteresis de 3%
                 sequencerVolume = newVol;
                 lastSequencerVolume = newVol;
                 
@@ -2464,7 +2497,7 @@ void handleVolume() {
                 needsHeaderUpdate = true;
             }
         } else {
-            if (abs(newVol - lastLivePadsVolume) > 2) {  // Hysteresis de 2%
+            if (abs(newVol - lastLivePadsVolume) > 3) {  // Hysteresis de 3%
                 livePadsVolume = newVol;
                 lastLivePadsVolume = newVol;
                 
