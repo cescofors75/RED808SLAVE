@@ -4147,6 +4147,12 @@ void drawVolumesScreen() {
             tft.setTextColor(trackColor);
             tft.setCursor(x + (sliderW - 24) / 2, sliderStartY + sliderH + 5);
             tft.print(trackNames[i]);
+            
+            // Limpiar área del indicador de mute antiguo (ya no se usa)
+            const int muteX = x + sliderW / 2;
+            const int muteY = sliderStartY - 10;
+            const int muteR = 7;
+            tft.fillCircle(muteX, muteY, muteR + 1, COLOR_BG);
         }
         
         // ACTUALIZAR SOLO SI CAMBIÓ - MODO INCREMENTAL SIN BORRAR TODO
