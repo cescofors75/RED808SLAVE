@@ -7,70 +7,25 @@
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
 
-// ============================================
-// PIN DEFINITIONS
-// ============================================
-
-// TFT Display (SPI) - Sin Touch
-#define TFT_CS   5
-#define TFT_DC   2
-#define TFT_RST  4
-#define TFT_MOSI 23
-#define TFT_SCK  18
-#define TFT_MISO 19
-//#define TFT_BL   -1
-
-// TM1638 Module 1 (Steps 1-8)
-#define TM1638_1_STB 33
-#define TM1638_1_CLK 25
-#define TM1638_1_DIO 26
-
-// TM1638 Module 2 (Steps 9-16)
-#define TM1638_2_STB 32
-#define TM1638_2_CLK 25
-#define TM1638_2_DIO 27
-
-// Rotary Encoder (5 pins)
-#define ENCODER_CLK 15
-#define ENCODER_DT  16  // Cambiado de 12 a 16 (el 12 da problemas en upload)
-#define ENCODER_SW  13
-
-// 3 BUTTON PANEL - SMART OPEN ANALOG BUTTONS (3 pins: GND, VCC, SIG)
-#define ANALOG_BUTTONS_PIN 34  // Pin analógico para leer los 3 botones
-
-// Rangos de valores ADC para cada botón (CALIBRADOS según medición real)
-#define BTN_PLAY_STOP_MIN  350   // Botón 1: Play/Stop (medido: 432-656)
-#define BTN_PLAY_STOP_MAX  750
-#define BTN_MUTE_MIN       1450  // Botón 2: Mute/Clear (medido: 1500-1550)
-#define BTN_MUTE_MAX       1600
-#define BTN_BACK_MIN       2250  // Botón 3: Back (medido: 2316-2376)
-#define BTN_BACK_MAX       2450
-#define BTN_NONE_THRESHOLD 300   // Sin botón presionado
-
-// Rotary Angle Potentiometer (3 pins)
-#define ROTARY_ANGLE_PIN 35
-
-// Volume Toggle Button (pin 14)
-#define VOLUME_TOGGLE_BTN 14
-
-// I2C Pins for M5 8ENCODER
-#define I2C_SDA 21
-#define I2C_SCL 22
-#define M5_8ENCODER_ADDR 0x41  // Dirección por defecto del M5 8ENCODER
+// Project headers
+#include "debug_utils.h"    // Debug macros and utilities
+#include "config.h"         // Configuration constants
+#include "system_state.h"   // State structures
 
 // ============================================
-// CONSTANTS
+// LEGACY DEFINES (for backward compatibility)
+// TODO: Gradually replace with Config:: namespace
 // ============================================
-#define MAX_STEPS 16
-#define MAX_TRACKS 8  // 8 tracks/instrumentos (simplificado)
-#define MAX_PATTERNS 16
-#define MAX_KITS 3
-#define MIN_BPM 40
-#define MAX_BPM 240
-#define DEFAULT_BPM 120
-#define DEFAULT_VOLUME 75
-#define MAX_VOLUME 150  // Volumen máximo ampliado para mayor potencia
-#define MAX_SAMPLES 8  // 8 LIVE PADS (simplificado)
+#define MAX_STEPS Config::MAX_STEPS
+#define MAX_TRACKS Config::MAX_TRACKS
+#define MAX_PATTERNS Config::MAX_PATTERNS
+#define MAX_KITS Config::MAX_KITS
+#define MIN_BPM Config::MIN_BPM
+#define MAX_BPM Config::MAX_BPM
+#define DEFAULT_BPM Config::DEFAULT_BPM
+#define DEFAULT_VOLUME Config::DEFAULT_VOLUME
+#define MAX_VOLUME Config::MAX_VOLUME
+#define MAX_SAMPLES Config::MAX_SAMPLES
 
 // ============================================
 // SISTEMA DE TEMAS VISUALES
@@ -190,32 +145,10 @@ const ColorTheme* activeTheme = &THEME_RED808;
 #define COLOR_INST_CYMBAL  0x4A7F  // Azul claro - Cymbal
 
 // ============================================
-// ENUMS
+// ENUMS (moved to system_state.h)
 // ============================================
-enum Screen {
-    SCREEN_BOOT,
-    SCREEN_MENU,
-    SCREEN_LIVE,
-    SCREEN_SEQUENCER,
-    SCREEN_SETTINGS,
-    SCREEN_DIAGNOSTICS,
-    SCREEN_PATTERNS,
-    SCREEN_VOLUMES
-};
-
-enum DisplayMode {
-    DISPLAY_BPM,
-    DISPLAY_VOLUME,
-    DISPLAY_PATTERN,
-    DISPLAY_KIT,
-    DISPLAY_INSTRUMENT,
-    DISPLAY_STEP
-};
-
-enum SequencerView {
-    SEQ_VIEW_GRID,
-    SEQ_VIEW_CIRCULAR
-};
+// Screen, DisplayMode, SequencerView, VolumeMode, EncoderMode
+// are now defined in system_state.h
 
 // ============================================
 // STRUCTURES
@@ -256,8 +189,7 @@ struct DiagnosticInfo {
 TFT_eSPI tft = TFT_eSPI();
 TM1638plus tm1(TM1638_1_STB, TM1638_1_CLK, TM1638_1_DIO, true);
 TM1638plus tm2(TM1638_2_STB, TM1638_2_CLK, TM1638_2_DIO, true);
-HardwareSerial dfplayerSerial(1);  // UART1 para DFPlayer (pines configurables)
-M5ROTATE8 m5encoder(M5_8ENCODER_ADDR);  // M5 8ENCODER module
+M5ROTATE8 m5encoder(Config::M5_ENCODER_ADDR);  // M5 8ENCODER module
 // RotaryEncoder encoder(ENCODER_CLK, ENCODER_DT, RotaryEncoder::LatchMode::TWO03);
 
 // GLOBAL VARIABLES
@@ -266,37 +198,41 @@ Pattern patterns[MAX_PATTERNS];
 DrumKit kits[MAX_KITS];
 DiagnosticInfo diagnostic;
 
-// M5 8ENCODER Variables
-int32_t encoderValues[8] = {0};        // Valores actuales de cada encoder
-int32_t lastEncoderValues[8] = {0};    // Últimos valores leídos
-uint8_t encoderLEDColors[8][3];        // RGB para cada LED (canal 0-7)
-bool m5encoderConnected = false;       // Estado de conexión del M5 8ENCODER
-unsigned long lastEncoderRead = 0;     // Control de lectura
-const unsigned long ENCODER_READ_INTERVAL = 50; // 50ms = 20Hz
-unsigned long lastM5ButtonTime[8] = {0}; // Debounce botones M5 8ENCODER
-
-// Parámetros controlables por encoder (por cada track)
-enum EncoderMode {
-    ENC_MODE_VOLUME,      // Volumen individual del track
-    ENC_MODE_PITCH,       // Pitch/velocidad
-    ENC_MODE_PAN,         // Paneo (futuro)
-    ENC_MODE_EFFECT       // Efecto (futuro)
-};
-EncoderMode encoderMode = ENC_MODE_VOLUME;  // Modo actual
-int trackVolumes[8] = {100, 100, 100, 100, 100, 100, 100, 100};  // Volumen individual por track (0-150)
-bool trackMuted[8] = {false, false, false, false, false, false, false, false};  // Estado mute por track
-
-Screen currentScreen = SCREEN_BOOT;
-
+// ============================================
+// STATE VARIABLES
+// ============================================
+// Sequencer State
 int currentPattern = 0;
 int currentKit = 0;
 int currentStep = 0;
-// sequencerPage REMOVIDO - solo 1 página con 8 tracks
 int tempo = DEFAULT_BPM;
-int volume = DEFAULT_VOLUME;
+bool isPlaying = false;
 unsigned long lastStepTime = 0;
 unsigned long stepInterval = 0;
-bool isPlaying = false;
+
+// UI State
+Screen currentScreen = SCREEN_SEQUENCER;
+int menuSelection = 0;
+int selectedTrack = 0;
+bool needsFullRedraw = true;
+bool needsHeaderUpdate = false;
+bool needsGridUpdate = false;
+int lastDisplayedStep = -1;
+int lastToggledTrack = -1;
+
+// Hardware State
+int encoderPos = 0;
+int lastEncoderPos = 0;
+bool encoderChanged = false;
+EncoderMode encoderMode = ENC_MODE_VOLUME;
+
+// Audio State
+int trackVolumes[MAX_TRACKS] = {100, 100, 100, 100, 100, 100, 100, 100};
+bool trackMuted[MAX_TRACKS] = {false};
+
+// Network State
+bool udpConnected = false;
+unsigned long lastUdpCheck = 0;
 
 // Servidor Web WiFi
 // Configuración WiFi - SLAVE se conecta al MASTER
@@ -321,35 +257,30 @@ IPAddress subnet(255, 255, 255, 0);
 
 WiFiUDP udp;
 
-int selectedTrack = 0;
-int selectedStep = 0;
-int menuSelection = 0;
+// Variables legacy que aún se necesitan (no están en structs)
 const int menuItemCount = 5;  // LIVE, SEQUENCER, VOLUMES, SETTINGS, DIAGNOSTICS
 
-bool needsFullRedraw = true;
-bool needsHeaderUpdate = false;
-bool needsGridUpdate = false;
-int lastDisplayedStep = -1;
-int lastToggledTrack = -1; // Track que cambió para actualizar solo su fila
-
-int lastEncoderPos = 0;
-
 // Rotary Encoder variables (sin biblioteca)
-volatile int encoderPos = 0;
-volatile bool encoderChanged = false;
 static uint8_t encoderState = 0;
 static const int8_t encoderStates[] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
 
+// M5 8ENCODER variables
+bool m5encoderConnected = false;
+uint8_t encoderLEDColors[8][3] = {{0}};  // RGB colors for each encoder LED
+unsigned long lastEncoderRead = 0;
+const unsigned long ENCODER_READ_INTERVAL = 20;  // 20ms entre lecturas
+unsigned long lastM5ButtonTime[8] = {0};  // Debounce para botones de encoders
+int32_t encoderValues[8] = {100, 100, 100, 100, 100, 100, 100, 100};
+int32_t lastEncoderValues[8] = {100, 100, 100, 100, 100, 100, 100, 100};
+
 // Volume control - DUAL MODE (Sequencer / Live Pads)
-enum VolumeMode {
-    VOL_SEQUENCER,
-    VOL_LIVE_PADS
-};
-VolumeMode volumeMode = VOL_SEQUENCER;
+// enum VolumeMode definido en system_state.h
+VolumeMode volumeMode = VOL_SEQUENCER;  // Modo por defecto
 int sequencerVolume = DEFAULT_VOLUME;  // 75%
 int livePadsVolume = 100;  // 100% - más fuerte para tocar en vivo
 int lastSequencerVolume = DEFAULT_VOLUME;
 int lastLivePadsVolume = 100;
+// lastVolumeRead ahora está en audioState
 unsigned long lastVolumeRead = 0;
 
 // Variables para optimizar pantalla VOLUMES (evitar parpadeo)
@@ -382,8 +313,6 @@ unsigned long lastButtonDebug = 0;
 int lastAdcValue = -1;
 
 // UDP connection state
-bool udpConnected = false;
-unsigned long lastUdpCheck = 0;
 const unsigned long UDP_CHECK_INTERVAL = 30000;  // 30 segundos entre intentos de reconexión
 
 // Variables para manejo de botones (8 botones)
@@ -453,12 +382,10 @@ void handleM5Encoders();
 void updateEncoderLEDs();
 void debugAnalogButtons();
 void triggerDrum(int track);
-void testButtonsOnBoot();
 void sendUDPCommand(const char* cmd);
 void sendUDPCommand(JsonDocument& doc);
 void receiveUDPData();
 void requestPatternFromMaster();
-void drawBootScreen();
 void drawConsoleBootScreen();
 void drawSpectrumAnimation();
 void drawMainMenu();
@@ -744,9 +671,9 @@ void receiveUDPData() {
                     JsonArray data = doc["data"];
                     if (data && data.size() > 0) {
                         int totalStepsActive = 0;
-                        int tracksReceived = min((int)data.size(), MAX_TRACKS);
+                        int tracksReceived = min((int)data.size(), (int)MAX_TRACKS);
                         
-                        Serial.printf("► Tracks received: %d/%d\n", tracksReceived, MAX_TRACKS);
+                        Serial.printf("► Tracks received: %d/%d\n", tracksReceived, (int)MAX_TRACKS);
                         
                         // Primero limpiar el patrón completo
                         for (int t = 0; t < MAX_TRACKS; t++) {
@@ -759,7 +686,7 @@ void receiveUDPData() {
                         for (int t = 0; t < tracksReceived; t++) {
                             JsonArray trackData = data[t];
                             if (trackData) {
-                                int stepsInTrack = min((int)trackData.size(), MAX_STEPS);
+                                int stepsInTrack = min((int)trackData.size(), (int)MAX_STEPS);
                                 Serial.printf("   Track %02d: %d steps\n", t + 1, stepsInTrack);
                                 
                                 for (int s = 0; s < stepsInTrack; s++) {
@@ -929,529 +856,8 @@ void calculateStepInterval() {
 // ============================================
 // El SLAVE no necesita servidor web, solo envía comandos UDP al MASTER
 // Funciones deshabilitadas para mejorar performance y reducir uso de RAM
-
-/*
-void enableWebServer() {
-    // DESHABILITADO - No se usa en SLAVE
-}
-
-void disableWebServer() {
-    // DESHABILITADO - No se usa en SLAVE  
-}
-
-void toggleWebServer() {
-    // DESHABILITADO - No se usa en SLAVE
-}
-*/
-
-/*
-void setupSDCard() {
-    tft.fillScreen(COLOR_BG);
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(120, 130);
-    tft.println("Checking SD Card...");
-    
-    Serial.println("\n╔════════════════════════════════════════════╗");
-    Serial.println("║  SD CARD INITIALIZATION                    ║");
-    Serial.println("╚════════════════════════════════════════════╝");
-    Serial.println("Pin Configuration:");
-    Serial.printf("  CS   = Pin %d\n", SD_CS);
-    Serial.printf("  MOSI = Pin %d\n", SD_MOSI);
-    Serial.printf("  MISO = Pin %d\n", SD_MISO);
-    Serial.printf("  SCK  = Pin %d\n", SD_SCK);
-    
-    // Asegurar que TFT_CS está en HIGH para no interferir
-    pinMode(TFT_CS, OUTPUT);
-    digitalWrite(TFT_CS, HIGH);
-    
-    // Configurar CS como OUTPUT y ponerlo en HIGH antes de inicializar
-    pinMode(SD_CS, OUTPUT);
-    digitalWrite(SD_CS, HIGH);
-    delay(100);
-    
-    // Test de conectividad MISO
-    Serial.println("\nTesting MISO line...");
-    pinMode(SD_MISO, INPUT_PULLUP);
-    int misoState = digitalRead(SD_MISO);
-    Serial.printf("  MISO state: %s\n", misoState ? "HIGH (OK)" : "LOW (check connection)");
-    
-    // Test de conectividad CS
-    Serial.println("\nTesting CS line...");
-    digitalWrite(SD_CS, LOW);
-    delay(10);
-    digitalWrite(SD_CS, HIGH);
-    Serial.println("  CS toggle: OK");
-    
-    // Enviar 80 pulsos de reloj con CS alto para resetear la SD (protocolo SPI SD)
-    Serial.println("\nSending SD reset sequence...");
-    digitalWrite(SD_CS, HIGH);
-    SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
-    for (int i = 0; i < 10; i++) {
-        SPI.transfer(0xFF);  // 10 bytes = 80 bits de reloj
-    }
-    SPI.endTransaction();
-    delay(100);
-    Serial.println("  Reset sequence sent");
-    
-    // Intentar varias configuraciones comunes
-    bool sdOk = false;
-    
-    // Intento 1: Frecuencia muy baja (250kHz - modo ultra seguro)
-    Serial.println("\n[1] Trying 250kHz (ultra safe mode)...");
-    digitalWrite(TFT_CS, HIGH);  // TFT desactivado
-    
-    if (SD.begin(SD_CS, SPI, 250000)) {
-        sdOk = true;
-        Serial.println("  ✓ SUCCESS with 250kHz");
-    } else {
-        Serial.println("  ✗ Failed");
-    }
-    
-    // Intento 2: 1MHz
-    if (!sdOk) {
-        Serial.println("[2] Trying 1MHz...");
-        SD.end();
-        delay(100);
-        if (SD.begin(SD_CS, SPI, 1000000)) {
-            sdOk = true;
-            Serial.println("  ✓ SUCCESS with 1MHz");
-        } else {
-            Serial.println("  ✗ Failed");
-        }
-    }
-    
-    // Intento 3: 4MHz
-    if (!sdOk) {
-        Serial.println("[3] Trying 4MHz...");
-        SD.end();
-        delay(100);
-        if (SD.begin(SD_CS, SPI, 4000000)) {
-            sdOk = true;
-            Serial.println("  ✓ SUCCESS with 4MHz");
-        } else {
-            Serial.println("  ✗ Failed");
-        }
-    }
-    
-    // Intento 4: Sin especificar frecuencia
-    if (!sdOk) {
-        Serial.println("[4] Trying default frequency...");
-        SD.end();
-        delay(100);
-        if (SD.begin(SD_CS)) {
-            sdOk = true;
-            Serial.println("  ✓ SUCCESS with default");
-        } else {
-            Serial.println("  ✗ Failed");
-        }
-    }
-    
-    // Intento 5: Reiniciar SPI manualmente
-    if (!sdOk) {
-        Serial.println("[5] Trying manual SPI restart...");
-        SPI.end();
-        delay(100);
-        SPI.begin(SD_SCK, SD_MISO, SD_MOSI, -1);
-        delay(100);
-        if (SD.begin(SD_CS, SPI, 400000)) {
-            sdOk = true;
-            Serial.println("  ✓ SUCCESS with manual SPI");
-        } else {
-            Serial.println("  ✗ Failed");
-        }
-    }
-    
-    if (sdOk) {
-        diagnostic.sdCardOk = true;
-        
-        uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-        Serial.printf("  ✓ SD Card: %lluMB\n", cardSize);
-        
-        int totalFiles = 0;
-        for (int kit = 1; kit <= 3; kit++) {
-            char path[20];
-            snprintf(path, sizeof(path), "/%02d", kit);
-            File dir = SD.open(path);
-            if (dir && dir.isDirectory()) {
-                File file = dir.openNextFile();
-                while (file) {
-                    if (!file.isDirectory()) {
-                        totalFiles++;
-                    }
-                    file = dir.openNextFile();
-                }
-                dir.close();
-            }
-        }
-        diagnostic.filesFound = totalFiles;
-        Serial.printf("  ✓ Sound files found: %d\n", totalFiles);
-        
-        tft.setTextColor(COLOR_SUCCESS);
-        tft.setCursor(120, 160);
-        tft.printf("SD: %lluMB - %d files", cardSize, totalFiles);
-        
-    } else {
-        diagnostic.sdCardOk = false;
-        diagnostic.lastError = "SD Card failed";
-        Serial.println("\n✗✗✗ ALL METHODS FAILED ✗✗✗");
-        Serial.println("\nPossible issues:");
-        Serial.println("  1. SD card not inserted or not making contact");
-        Serial.println("  2. SD card corrupted or wrong format (use FAT32)");
-        Serial.println("  3. Wiring issue - check all 6 connections");
-        Serial.println("  4. Power issue - SD needs stable 3.3V");
-        Serial.println("  5. Wrong SD module type");
-        Serial.println("\nContinuing without SD card...");
-        
-        tft.setTextColor(COLOR_WARNING);
-        tft.setCursor(120, 160);
-        tft.println("SD Card not found");
-    }
-    
-    delay(1000);
-}
-/*
-void setupSDCard() {
-    tft.fillScreen(COLOR_BG);
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(120, 130);
-    tft.println("Checking SD Card...");
-    
-    Serial.println("\n╔════════════════════════════════════════════╗");
-    Serial.println("║  SD CARD INITIALIZATION                    ║");
-    Serial.println("╚════════════════════════════════════════════╝");
-    Serial.println("Pin Configuration:");
-    Serial.printf("  CS   = Pin %d\n", SD_CS);
-    Serial.printf("  MOSI = Pin %d\n", SD_MOSI);
-    Serial.printf("  MISO = Pin %d\n", SD_MISO);
-    Serial.printf("  SCK  = Pin %d\n", SD_SCK);
-    
-    // CRÍTICO: Desactivar TODOS los dispositivos SPI antes de inicializar SD
-    pinMode(TFT_CS, OUTPUT);
-    digitalWrite(TFT_CS, HIGH);
-    pinMode(SD_CS, OUTPUT);
-    digitalWrite(SD_CS, HIGH);
-    
-    delay(100);
-    
-    // Secuencia de reset de la SD card (muy importante)
-    Serial.println("\nSending SD reset sequence...");
-    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, -1); // Inicializar SPI explícitamente
-    SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
-    digitalWrite(SD_CS, HIGH);
-    for (int i = 0; i < 10; i++) {
-        SPI.transfer(0xFF);
-    }
-    SPI.endTransaction();
-    delay(100);
-    
-    // MÉTODO CORRECTO: Pasar SPI como segundo parámetro
-    bool sdOk = false;
-    
-    // Intento 1: Con SPI explícito y frecuencia muy baja (400kHz)
-    Serial.println("\n[1] Trying 400kHz with explicit SPI...");
-    digitalWrite(TFT_CS, HIGH); // TFT desactivado
-    digitalWrite(SD_CS, HIGH);  // SD desactivado
-    delay(10);
-    
-    // IMPORTANTE: SD.begin(CS_PIN, SPI_OBJECT, FREQUENCY, MOUNT_POINT, MAX_FILES)
-    if (SD.begin(SD_CS, SPI, 400000, "/sd", 5)) {
-        sdOk = true;
-        Serial.println("  ✓ SUCCESS with 400kHz");
-    }
-    
-    if (!sdOk) {
-        Serial.println("[2] Trying 250kHz...");
-        SD.end();
-        delay(200);
-        if (SD.begin(SD_CS, SPI, 250000, "/sd", 5)) {
-            sdOk = true;
-            Serial.println("  ✓ SUCCESS with 250kHz");
-        }
-    }
-    
-    if (!sdOk) {
-        Serial.println("[3] Trying with SD_MMC mode (alternative)...");
-        // Nota: Esto solo funciona si tu módulo soporta modo MMC
-    }
-    
-    if (sdOk) {
-        diagnostic.sdCardOk = true;
-        
-        uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-        uint8_t cardType = SD.cardType();
-        
-        Serial.printf("  ✓ SD Card Type: ");
-        switch(cardType) {
-            case CARD_MMC: Serial.println("MMC"); break;
-            case CARD_SD: Serial.println("SDSC"); break;
-            case CARD_SDHC: Serial.println("SDHC"); break;
-            default: Serial.println("UNKNOWN"); break;
-        }
-        
-        Serial.printf("  ✓ SD Card Size: %lluMB\n", cardSize);
-        
-        // Contar archivos
-        int totalFiles = 0;
-        for (int kit = 1; kit <= 3; kit++) {
-            char path[20];
-            snprintf(path, sizeof(path), "/sd/%02d", kit); // IMPORTANTE: Agregar /sd/ al path
-            File dir = SD.open(path);
-            if (dir && dir.isDirectory()) {
-                File file = dir.openNextFile();
-                while (file) {
-                    if (!file.isDirectory()) {
-                        totalFiles++;
-                        Serial.printf("    Found: %s\n", file.name());
-                    }
-                    file = dir.openNextFile();
-                }
-                dir.close();
-            } else {
-                Serial.printf("  ! Folder %s not found\n", path);
-            }
-        }
-        
-        diagnostic.filesFound = totalFiles;
-        Serial.printf("  ✓ Total sound files: %d\n", totalFiles);
-        
-        // Mostrar en pantalla
-        digitalWrite(TFT_CS, LOW); // Reactivar TFT
-        delay(10);
-        tft.setTextColor(COLOR_SUCCESS);
-        tft.setCursor(120, 160);
-        tft.printf("SD: %lluMB - %d files", cardSize, totalFiles);
-        digitalWrite(TFT_CS, HIGH);
-        
-    } else {
-        diagnostic.sdCardOk = false;
-        diagnostic.lastError = "SD Card failed";
-        
-        Serial.println("\n✗✗✗ ALL METHODS FAILED ✗✗✗");
-        Serial.println("\nDIAGNOSTIC CHECKLIST:");
-        Serial.println("  [1] SD card inserted correctly?");
-        Serial.println("  [2] SD formatted as FAT32?");
-        Serial.println("  [3] Check wiring:");
-        Serial.println("      - CS  -> Pin 15");
-        Serial.println("      - SCK -> Pin 18 (shared)");
-        Serial.println("      - MOSI-> Pin 23 (shared)");
-        Serial.println("      - MISO-> Pin 19 (shared)");
-        Serial.println("      - VCC -> 5V");
-        Serial.println("      - GND -> GND");
-        Serial.println("  [4] Try different SD card (some cards are incompatible)");
-        Serial.println("  [5] Check SD module has voltage regulator (3.3V/5V)");
-        
-        digitalWrite(TFT_CS, LOW);
-        delay(10);
-        tft.setTextColor(COLOR_WARNING);
-        tft.setCursor(120, 160);
-        tft.println("SD Card ERROR!");
-        digitalWrite(TFT_CS, HIGH);
-    }
-    
-    delay(2000);
-}  */
-/*
-void setupSDCard() {
-    tft.fillScreen(COLOR_BG);
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_TEXT);
-    tft.setCursor(120, 130);
-    tft.println("Checking SD Card...");
-    
-    Serial.println("\n╔════════════════════════════════════════════╗");
-    Serial.println("║  SD CARD INITIALIZATION                    ║");
-    Serial.println("╚════════════════════════════════════════════╝");
-    Serial.println("Pin Configuration:");
-    Serial.printf("  CS   = Pin %d (GPIO 14)\n", SD_CS);
-    Serial.printf("  MOSI = Pin %d (shared)\n", SD_MOSI);
-    Serial.printf("  MISO = Pin %d (shared)\n", SD_MISO);
-    Serial.printf("  SCK  = Pin %d (shared)\n", SD_SCK);
-    
-    // CRÍTICO: Todos los CS en HIGH antes de inicializar
-    pinMode(TFT_CS, OUTPUT);
-    digitalWrite(TFT_CS, HIGH);
-    pinMode(SD_CS, OUTPUT);
-    digitalWrite(SD_CS, HIGH);
-    
-    delay(100);
-    
-    Serial.println("\nInitializing SD card...");
-    
-    // MÉTODO SIMPLE (funciona en ESP32)
-    if (!SD.begin(SD_CS)) {
-        Serial.println("✗ Card Mount Failed");
-        diagnostic.sdCardOk = false;
-        diagnostic.lastError = "SD Mount Failed";
-        
-        tft.setTextColor(COLOR_ERROR);
-        tft.setCursor(100, 160);
-        tft.println("SD MOUNT FAILED!");
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_TEXT_DIM);
-        tft.setCursor(80, 185);
-        tft.println("Check: Card inserted? Formatted FAT32?");
-        tft.setCursor(80, 200);
-        tft.printf("CS connected to GPIO %d?", SD_CS);
-        
-        delay(3000);
-        return;
-    }
-    
-    uint8_t cardType = SD.cardType();
-    
-    if (cardType == CARD_NONE) {
-        Serial.println("✗ No SD card attached");
-        diagnostic.sdCardOk = false;
-        diagnostic.lastError = "No SD card";
-        
-        tft.setTextColor(COLOR_WARNING);
-        tft.setCursor(120, 160);
-        tft.println("NO SD CARD!");
-        delay(2000);
-        return;
-    }
-    
-    // ✓ SUCCESS!
-    diagnostic.sdCardOk = true;
-    
-    Serial.print("✓ SD Card Type: ");
-    switch(cardType) {
-        case CARD_MMC: Serial.println("MMC"); break;
-        case CARD_SD: Serial.println("SDSC"); break;
-        case CARD_SDHC: Serial.println("SDHC"); break;
-        default: Serial.println("UNKNOWN");
-    }
-    
-    uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-    Serial.printf("✓ SD Card Size: %lluMB\n", cardSize);
-    
-    // Contar archivos
-    int totalFiles = 0;
-    Serial.println("\nScanning folders:");
-    
-    for (int kit = 1; kit <= 3; kit++) {
-        char path[10];
-        snprintf(path, 10, "/%02d", kit);
-        
-        File dir = SD.open(path);
-        if (!dir) {
-            Serial.printf("  Creating folder %s\n", path);
-            SD.mkdir(path);
-            continue;
-        }
-        
-        if (dir.isDirectory()) {
-            Serial.printf("  %s/: ", path);
-            int count = 0;
-            File file = dir.openNextFile();
-            while (file) {
-                if (!file.isDirectory()) {
-                    count++;
-                    totalFiles++;
-                }
-                file.close();
-                file = dir.openNextFile();
-            }
-            Serial.printf("%d files\n", count);
-        }
-        dir.close();
-    }
-    
-    diagnostic.filesFound = totalFiles;
-    Serial.printf("\n✓ Total: %d sound files\n", totalFiles);
-    
-    // Mostrar en pantalla
-    tft.setTextColor(COLOR_SUCCESS);
-    tft.setCursor(110, 160);
-    tft.printf("SD: %lluMB", cardSize);
-    tft.setCursor(110, 185);
-    tft.setTextColor(COLOR_ACCENT2);
-    tft.printf("%d sound files ready", totalFiles);
-    
-    delay(1500);
-}
-
-void testSDWiring() {
-    Serial.println("\n═══ SD WIRING TEST ═══");
-    
-    pinMode(SD_CS, OUTPUT);
-    pinMode(SD_MISO, INPUT);
-    
-    // Test 1: CS toggle
-    Serial.print("CS toggle test: ");
-    digitalWrite(SD_CS, HIGH);
-    delay(10);
-    digitalWrite(SD_CS, LOW);
-    delay(10);
-    digitalWrite(SD_CS, HIGH);
-    Serial.println("OK");
-    
-    // Test 2: MISO pullup
-    Serial.print("MISO state (should be HIGH): ");
-    pinMode(SD_MISO, INPUT_PULLUP);
-    delay(10);
-    int misoState = digitalRead(SD_MISO);
-    Serial.println(misoState ? "OK (HIGH)" : "FAIL (LOW - check wiring!)");
-    
-    // Test 3: SPI communication test
-    Serial.print("SPI communication test: ");
-    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, -1);
-    SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
-    digitalWrite(SD_CS, LOW);
-    uint8_t response = SPI.transfer(0xFF);
-    digitalWrite(SD_CS, HIGH);
-    SPI.endTransaction();
-    Serial.printf("Response: 0x%02X %s\n", response, 
-                  (response != 0xFF && response != 0x00) ? "(OK)" : "(Check connection)");
-}
-
-void testButtonsOnBoot() {
-    Serial.println("\nWaiting for button presses (5 seconds)...");
-    Serial.println("Press S1-S8 on TM1638 #1, S9-S16 on TM1638 #2");
-    Serial.println("─────────────────────────────────────");
-    
-    unsigned long testStart = millis();
-    int buttonPressCount = 0;
-    
-    while (millis() - testStart < 5000) {
-        uint16_t buttons = readAllButtons();
-        
-        if (buttons != 0) {
-            Serial.printf("► BUTTONS: 0x%04X (", buttons);
-            for (int i = 15; i >= 0; i--) {
-                Serial.print((buttons >> i) & 1);
-                if (i == 8) Serial.print(" ");
-            }
-            Serial.println(")");
-            
-            for (int i = 0; i < 8; i++) {  // Solo 8 botones
-                if (buttons & (1 << i)) {
-                    Serial.printf("  ✓ Button S%d pressed\n", i + 1);
-                    setLED(i, true);
-                    buttonPressCount++;
-                }
-            }
-            
-            delay(200);
-            setAllLEDs(0x0000);
-            delay(100);
-        }
-        
-        delay(10);
-    }
-    
-    Serial.println("─────────────────────────────────────");
-    Serial.printf("Test complete! %d button presses detected\n", buttonPressCount);
-    
-    if (buttonPressCount == 0) {
-        Serial.println("⚠ WARNING: No buttons detected!");
-    }
-    
-    Serial.println("");
-}
-*/
+// enableWebServer() y disableWebServer() - DESHABILITADOS en SLAVE
+// SD Card setup y WebServer removidos - no se usan en modo SLAVE
 
 // ============================================
 // SETUP
@@ -1716,8 +1122,10 @@ void loop() {
     // M5 8ENCODER: Leer encoders rotativos para control de tracks
     handleM5Encoders();
     
-    // DEBUG: Mostrar valores ADC de botones analógicos
+    // DEBUG: Mostrar valores ADC de botones analógicos (activar solo en desarrollo)
+    #ifdef DEBUG_MODE
     debugAnalogButtons();
+    #endif
     
     handlePlayStopButton();
     handleMuteButton();
@@ -1840,7 +1248,7 @@ void updateSequencer() {
 void triggerDrum(int track) {
     // Enviar comando UDP al MASTER para reproducir el instrumento
     // La velocity está basada en el volumen de Live Pads (con boost del 25%)
-    int boostedVolume = min((int)(livePadsVolume * 1.25), MAX_VOLUME);
+    int boostedVolume = min((int)(livePadsVolume * 1.25), (int)MAX_VOLUME);
     int velocity = map(boostedVolume, 0, MAX_VOLUME, 0, 127);
     velocity = constrain(velocity, 0, 127);
     
@@ -2502,7 +1910,7 @@ void handleVolume() {
                 lastLivePadsVolume = newVol;
                 
                 // Enviar al MASTER con boost del 25% (pero limitado a MAX_VOLUME)
-                int boostedVolume = min((int)(livePadsVolume * 1.25), MAX_VOLUME);
+                int boostedVolume = min((int)(livePadsVolume * 1.25), (int)MAX_VOLUME);
                 JsonDocument doc;
                 doc["cmd"] = "setLiveVolume";
                 doc["value"] = boostedVolume;
@@ -2801,10 +2209,6 @@ void updateAudioVisualization() {
 // ============================================
 // DRAW FUNCTIONS
 // ============================================
-void drawBootScreen() {
-    // Esta función ya no se usa - reemplazada por drawConsoleBootScreen()
-}
-
 void drawConsoleBootScreen() {
     // Fondo degradado oscuro moderno
     for (int y = 0; y < 320; y += 2) {
@@ -4433,409 +3837,6 @@ void toggleStep(int track, int step) {
 }
 
 // ============================================
-// SERVIDOR WEB ASYNC - DESHABILITADO EN SLAVE
+// SERVIDOR WEB ASYNC - REMOVIDO
 // ============================================
-// El SLAVE no necesita servidor web, toda la función está comentada
-/*
-void setupWebServer() {
-    if (!fsOK) {
-        Serial.println("✗ Error montando LittleFS - servidor continuará sin archivos");
-    } else {
-        Serial.println("► LittleFS montado correctamente");
-        
-        // Listar archivos para debug
-        fs::File root = LittleFS.open("/");
-        fs::File file = root.openNextFile();
-        Serial.println("► Archivos en LittleFS:");
-        while(file) {
-            Serial.print("  - ");
-            Serial.print(file.name());
-            Serial.print(" (");
-            Serial.print(file.size());
-            Serial.println(" bytes)");
-            file = root.openNextFile();
-        }
-    }
-    
-    // Configurar WiFi AP
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP("RED808", "12345678");
-    
-    Serial.println("► WiFi AP configurado: RED808");
-    Serial.print("► IP Address: ");
-    Serial.println(WiFi.softAPIP());
-    
-    // ========== ARCHIVOS ESTÁTICOS ==========
-    if (fsOK) {
-        // Servir index.html desde LittleFS
-        server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-            if (LittleFS.exists("/index.html")) {
-                request->send(LittleFS, "/index.html", "text/html");
-            } else {
-                request->send(404, "text/plain", "index.html no encontrado");
-            }
-        });
-        
-        // Servir CSS
-        server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest *request){
-            if (LittleFS.exists("/style.css")) {
-                request->send(LittleFS, "/style.css", "text/css");
-            } else {
-                request->send(404, "text/plain", "style.css no encontrado");
-            }
-        });
-        
-        // Servir JavaScript
-        server.on("/script.js", HTTP_GET, [](AsyncWebServerRequest *request){
-            if (LittleFS.exists("/script.js")) {
-                request->send(LittleFS, "/script.js", "application/javascript");
-            } else {
-                request->send(404, "text/plain", "script.js no encontrado");
-            }
-        });
-    } else {
-        // Fallback: página de error si LittleFS falló
-        server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-            String html = "<html><body style='font-family:monospace;background:#000;color:#f00;padding:40px'>";
-            html += "<h1>ERROR: LittleFS no montado</h1>";
-            html += "<p>Los archivos web no se subieron correctamente.</p>";
-            html += "<p>Ejecuta: <code>pio run --target uploadfs</code></p>";
-            html += "</body></html>";
-            request->send(200, "text/html", html);
-        });
-    }
-    
-    // ========== ENDPOINTS DE STATUS ==========
-    // Estado completo del sistema (JSON)
-    server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
-        String json = "{";
-        json += "\"bpm\":" + String(tempo);
-        json += ",\"pattern\":" + String(currentPattern);
-        json += ",\"kit\":" + String(currentKit);
-        json += ",\"playing\":" + String(isPlaying ? "true" : "false");
-        json += ",\"step\":" + String(currentStep);
-        json += ",\"track\":" + String(selectedTrack);
-        json += ",\"volume\":" + String(volume);
-        json += ",\"kitName\":\"" + kits[currentKit].name + "\"";
-        json += ",\"time\":" + String(millis() / 1000.0, 1);
-        json += "}";
-        request->send(200, "application/json", json);
-    });
-    
-    // ========== ENDPOINTS DE CONTROL ==========
-    // Play/Stop
-    server.on("/play", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (!isPlaying) {
-            isPlaying = true;
-            Serial.println("► PLAY (Web)");
-        }
-        request->send(200, "application/json", "{\"status\":\"playing\"}");
-    });
-    
-    server.on("/stop", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (isPlaying) {
-            isPlaying = false;
-            currentStep = 0;
-            setAllLEDs(0x0000);
-            Serial.println("► STOP (Web)");
-        }
-        request->send(200, "application/json", "{\"status\":\"stopped\"}");
-    });
-    
-    // Toggle Play/Stop
-    server.on("/toggle", HTTP_GET, [](AsyncWebServerRequest *request){
-        isPlaying = !isPlaying;
-        if (!isPlaying) {
-            currentStep = 0;
-            setAllLEDs(0x0000);
-        }
-        String response = "{\"playing\":" + String(isPlaying ? "true" : "false") + "}";
-        request->send(200, "application/json", response);
-    });
-    
-    // Cambiar Tempo
-    server.on("/tempo", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (request->hasParam("delta")) {
-            int delta = request->getParam("delta")->value().toInt();
-            changeTempo(delta);
-            Serial.printf("► TEMPO changed: %d BPM (Web)\n", tempo);
-        } else if (request->hasParam("value")) {
-            int newTempo = request->getParam("value")->value().toInt();
-            tempo = constrain(newTempo, MIN_BPM, MAX_BPM);
-            stepInterval = (60000 / tempo) / 4;
-            
-            // Enviar al MASTER
-            JsonDocument doc;
-            doc["cmd"] = "tempo";
-            doc["value"] = tempo;
-            sendUDPCommand(doc);
-            
-            Serial.printf("► TEMPO set: %d BPM (Web) - Sent to MASTER\n", tempo);
-        }
-        request->send(200, "application/json", "{\"bpm\":" + String(tempo) + "}");
-    });
-    
-    // Cambiar Pattern
-    server.on("/pattern", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (request->hasParam("pattern")) {
-            int newPattern = request->getParam("pattern")->value().toInt();
-            if (newPattern >= 0 && newPattern < MAX_PATTERNS) {
-                changePattern(newPattern - currentPattern);
-                Serial.printf("► PATTERN changed: %d (Web)\n", currentPattern + 1);
-            }
-        }
-        request->send(200, "application/json", "{\"pattern\":" + String(currentPattern) + "}");
-    });
-    
-    // Cambiar Kit
-    server.on("/kit", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (request->hasParam("kit")) {
-            int newKit = request->getParam("kit")->value().toInt();
-            if (newKit >= 0 && newKit < MAX_KITS) {
-                changeKit(newKit - currentKit);
-                Serial.printf("► KIT changed: %s (Web)\n", kits[currentKit].name.c_str());
-            }
-        }
-        request->send(200, "application/json", "{\"kit\":" + String(currentKit) + "}");
-    });
-    
-    // Toggle Step (Control bidireccional del sequencer)
-    server.on("/step", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (request->hasParam("track") && request->hasParam("step")) {
-            int track = request->getParam("track")->value().toInt();
-            int step = request->getParam("step")->value().toInt();
-            
-            if (track >= 0 && track < MAX_TRACKS && step >= 0 && step < MAX_STEPS) {
-                // Si se especifica valor, usarlo; sino, toggle
-                if (request->hasParam("value")) {
-                    int value = request->getParam("value")->value().toInt();
-                    patterns[currentPattern].steps[track][step] = (value != 0);
-                } else {
-                    patterns[currentPattern].steps[track][step] = 
-                        !patterns[currentPattern].steps[track][step];
-                }
-                
-                needsGridUpdate = true;
-                Serial.printf("► STEP toggled: T%d S%d = %s (Web)\n", 
-                              track, step, 
-                              patterns[currentPattern].steps[track][step] ? "ON" : "OFF");
-            }
-        }
-        request->send(200, "application/json", "{\"status\":\"ok\"}");
-    });
-    
-    // Endpoint para obtener pattern completo
-    server.on("/getpattern", HTTP_GET, [](AsyncWebServerRequest *request){
-        String json = "{\"pattern\":" + String(currentPattern) + ",\"data\":[";
-        
-        for (int track = 0; track < MAX_TRACKS; track++) {
-            json += "[";
-            for (int step = 0; step < MAX_STEPS; step++) {
-                json += patterns[currentPattern].steps[track][step] ? "1" : "0";
-                if (step < MAX_STEPS - 1) json += ",";
-            }
-            json += "]";
-            if (track < MAX_TRACKS - 1) json += ",";
-        }
-        
-        json += "]}";
-        request->send(200, "application/json", json);
-    });
-    
-    // ========== NUEVOS ENDPOINTS ==========
-    // Control de volumen
-    server.on("/volume", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (request->hasParam("value")) {
-            int newVolume = request->getParam("value")->value().toInt();
-            volume = constrain(newVolume, 0, 30);
-            
-            // Enviar al MASTER
-            JsonDocument doc;
-            doc["cmd"] = "setVolume";
-            doc["value"] = volume;
-            sendUDPCommand(doc);
-            
-            Serial.printf("► VOLUME set: %d (Web)\n", volume);
-        }
-        request->send(200, "application/json", "{\"volume\":" + String(volume) + "}");
-    });
-    
-    // Clear track (borrar todos los steps de un track)
-    server.on("/clear", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (request->hasParam("track")) {
-            int track = request->getParam("track")->value().toInt();
-            if (track >= 0 && track < MAX_TRACKS) {
-                for (int step = 0; step < MAX_STEPS; step++) {
-                    patterns[currentPattern].steps[track][step] = false;
-                }
-                needsGridUpdate = true;
-                Serial.printf("► TRACK %d cleared (Web)\n", track + 1);
-            }
-        }
-        request->send(200, "application/json", "{\"status\":\"ok\"}");
-    });
-    
-    // Mute track (silenciar track - solo visual por ahora)
-    server.on("/mute", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (request->hasParam("track")) {
-            int track = request->getParam("track")->value().toInt();
-            if (track >= 0 && track < MAX_TRACKS) {
-                // Toggle mute (implementar lógica si es necesario)
-                Serial.printf("► TRACK %d mute toggled (Web)\n", track + 1);
-            }
-        }
-        request->send(200, "application/json", "{\"status\":\"ok\"}");
-    });
-    
-    // Copy pattern
-    server.on("/copy", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (request->hasParam("from") && request->hasParam("to")) {
-            int fromPattern = request->getParam("from")->value().toInt();
-            int toPattern = request->getParam("to")->value().toInt();
-            
-            if (fromPattern >= 0 && fromPattern < MAX_PATTERNS && 
-                toPattern >= 0 && toPattern < MAX_PATTERNS) {
-                
-                // Copiar todos los steps
-                for (int track = 0; track < MAX_TRACKS; track++) {
-                    for (int step = 0; step < MAX_STEPS; step++) {
-                        patterns[toPattern].steps[track][step] = 
-                            patterns[fromPattern].steps[track][step];
-                    }
-                }
-                
-                Serial.printf("► PATTERN %d copied to %d (Web)\n", fromPattern + 1, toPattern + 1);
-            }
-        }
-        request->send(200, "application/json", "{\"status\":\"ok\"}");
-    });
-    
-    // Trigger sample (para Live Pads)
-    server.on("/trigger", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (request->hasParam("track")) {
-            int track = request->getParam("track")->value().toInt();
-            if (track >= 0 && track < MAX_TRACKS) {
-                // Enviar trigger al MASTER
-                triggerDrum(track);
-                Serial.printf("► PAD %d triggered (Web)\n", track + 1);
-            }
-        }
-        request->send(200, "application/json", "{\"status\":\"ok\"}");
-    });
-    
-    // Recibir patrón completo del MASTER (para sincronización)
-    server.on("/syncpattern", HTTP_POST, [](AsyncWebServerRequest *request){
-        // Este endpoint recibe el patrón completo del MASTER
-        request->send(200, "application/json", "{\"status\":\"ok\"}");
-    }, NULL, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
-        // Parsear JSON con el patrón - CORRECCIÓN: Buffer de 4KB
-        JsonDocument doc;
-        DeserializationError error = deserializeJson(doc, data, len);
-        
-        if (!error) {
-            int patternNum = doc["pattern"] | currentPattern;
-            
-            Serial.printf("\n► RECEIVING PATTERN %d FROM MASTER (%dx%d)...\n", 
-                         patternNum + 1, MAX_TRACKS, MAX_STEPS);
-            
-            // Cargar patrón
-            if (doc["data"].is<JsonArray>()) {
-                JsonArray dataArray = doc["data"].as<JsonArray>();
-                int t = 0;
-                for (JsonArray trackData : dataArray) {
-                    if (t < MAX_TRACKS) {
-                        int s = 0;
-                        for (bool stepValue : trackData) {
-                            if (s < MAX_STEPS) {
-                                patterns[patternNum].steps[t][s] = stepValue;
-                                s++;
-                            }
-                        }
-                        t++;
-                    }
-                }
-            }
-            
-            // Imprimir patrón recibido para debug
-            printReceivedPattern(patternNum);
-            
-            needsFullRedraw = true;
-            Serial.println("✓ Pattern synchronized from MASTER");
-        } else {
-            Serial.printf("✗ JSON parse error: %s\n", error.c_str());
-        }
-    });
-    
-    // ========== ENDPOINTS DE DIAGNÓSTICO ==========
-    // Información completa del sistema
-    server.on("/diagnostic", HTTP_GET, [](AsyncWebServerRequest *request){
-        String json = "{";
-        
-        // WiFi Stats
-        json += "\"wifi\":{";
-        json += "\"ssid\":\"" + String(WiFi.softAPSSID()) + "\"";
-        json += ",\"ip\":\"" + WiFi.softAPIP().toString() + "\"";
-        json += ",\"clients\":" + String(WiFi.softAPgetStationNum());
-        json += ",\"mac\":\"" + WiFi.softAPmacAddress() + "\"";
-        json += ",\"channel\":" + String(WiFi.channel());
-        json += "},";
-        
-        // System Info
-        json += "\"system\":{";
-        json += "\"uptime\":" + String(millis() / 1000);
-        json += ",\"freeHeap\":" + String(ESP.getFreeHeap());
-        json += ",\"heapSize\":" + String(ESP.getHeapSize());
-        json += ",\"chipModel\":\"" + String(ESP.getChipModel()) + "\"";
-        json += ",\"cpuFreq\":" + String(ESP.getCpuFreqMHz());
-        json += ",\"flashSize\":" + String(ESP.getFlashChipSize());
-        json += "},";
-        
-        // Filesystem Info
-        json += "\"filesystem\":{";
-        json += "\"totalBytes\":" + String(LittleFS.totalBytes());
-        json += ",\"usedBytes\":" + String(LittleFS.usedBytes());
-        json += ",\"mounted\":" + String(LittleFS.begin() ? "true" : "false");
-        json += "},";
-        
-        // Hardware Status
-        json += "\"hardware\":{";
-        json += "\"tft\":" + String(diagnostic.tftOk ? "true" : "false");
-        json += ",\"tm1638_1\":" + String(diagnostic.tm1638_1_Ok ? "true" : "false");
-        json += ",\"tm1638_2\":" + String(diagnostic.tm1638_2_Ok ? "true" : "false");
-        json += ",\"encoder\":" + String(diagnostic.encoderOk ? "true" : "false");
-        json += ",\"udpConnected\":" + String(diagnostic.udpConnected ? "true" : "false");
-        json += "},";
-        
-        // RED808 Status
-        json += "\"red808\":{";
-        json += "\"version\":\"V6-SURFACE\"";
-        json += ",\"bpm\":" + String(tempo);
-        json += ",\"pattern\":" + String(currentPattern);
-        json += ",\"kit\":" + String(currentKit);
-        json += ",\"playing\":" + String(isPlaying ? "true" : "false");
-        json += ",\"volume\":" + String(volume);
-        json += "}";
-        
-        json += "}";
-        request->send(200, "application/json", json);
-    });
-    
-    // Info de sistema simplificada
-    server.on("/system-info", HTTP_GET, [](AsyncWebServerRequest *request){
-        String json = "{";
-        json += "\"uptime\":" + String(millis() / 1000);
-        json += ",\"freeHeap\":" + String(ESP.getFreeHeap());
-        json += ",\"wifiClients\":" + String(WiFi.softAPgetStationNum());
-        json += ",\"version\":\"RED808 V6-SURFACE\"";
-        json += "}";
-        request->send(200, "application/json", json);
-    });
-    
-    // Iniciar servidor
-    server.begin();
-    webServerEnabled = true;
-    Serial.println("► WebServer INICIADO en http://" + WiFi.softAPIP().toString());
-    Serial.println("► Interfaz web profesional disponible");
-}
-*/
-// Función setupWebServer() completamente comentada - SLAVE no requiere servidor web
+// El SLAVE no necesita servidor web. Ver MASTER para implementación web.
