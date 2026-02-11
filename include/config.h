@@ -101,22 +101,27 @@ namespace Config {
 
 // Rotary Encoder
 #ifndef ENCODER_CLK
-  #define ENCODER_CLK 15
-  #define ENCODER_DT  16
+  #define ENCODER_CLK 12   // Cambiado de 15 para test
+  #define ENCODER_DT  14   // Cambiado de 16 para test
   #define ENCODER_SW  13
 #endif
 
-// Analog Buttons
+// Analog Buttons (3-button keypad on single ADC pin)
 #ifndef ANALOG_BUTTONS_PIN
   #define ANALOG_BUTTONS_PIN 34
+  #define BTN_COUNT          3
   
-  // Rangos ADC calibrados
+  // Rangos ADC - CALIBRADOS con serial monitor (valores medidos reales)
+  // Botón 1: PLAY/STOP (medido: 593-609)
   #define BTN_PLAY_STOP_MIN  350
   #define BTN_PLAY_STOP_MAX  750
-  #define BTN_MUTE_MIN       1450
-  #define BTN_MUTE_MAX       1600
-  #define BTN_BACK_MIN       2250
-  #define BTN_BACK_MAX       2450
+  // Botón 2: MUTE (click) / CLEAR (hold) (medido: 1383-1389)
+  #define BTN_MUTE_MIN       1250
+  #define BTN_MUTE_MAX       1500
+  // Botón 3: BACK (medido: 2146-2154)
+  #define BTN_BACK_MIN       2000
+  #define BTN_BACK_MAX       2300
+  // Sin botón presionado
   #define BTN_NONE_THRESHOLD 300
 #endif
 
@@ -125,9 +130,17 @@ namespace Config {
   #define ROTARY_ANGLE_PIN 35
 #endif
 
-// Volume Toggle Button
-#ifndef VOLUME_TOGGLE_BTN
-  #define VOLUME_TOGGLE_BTN 14
+// Rotary Angle Potentiometer 2 (Live Pads Volume)
+// NOTA: Debe ser ADC1 (GPIO 32-39) porque ADC2 no funciona con WiFi activo
+// GPIO 39 = pin VN en ESP32 DevKit (input-only, perfecto para pot)
+#ifndef ROTARY_ANGLE_PIN2
+  #define ROTARY_ANGLE_PIN2 39
+#endif
+
+// Rotary Angle Potentiometer 3 (BPM Control)
+// GPIO 36 = pin VP/SVP en ESP32 DevKit (ADC1_CH0, input-only)
+#ifndef BPM_POT_PIN
+  #define BPM_POT_PIN 36
 #endif
 
 // I2C Pins

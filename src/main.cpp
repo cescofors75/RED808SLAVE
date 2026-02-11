@@ -221,9 +221,9 @@ int lastDisplayedStep = -1;
 int lastToggledTrack = -1;
 
 // Hardware State
-int encoderPos = 0;
+volatile int encoderPos = 0;
 int lastEncoderPos = 0;
-bool encoderChanged = false;
+volatile bool encoderChanged = false;
 EncoderMode encoderMode = ENC_MODE_VOLUME;
 
 // Audio State
@@ -268,10 +268,7 @@ static const int8_t encoderStates[] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
 bool m5encoderConnected = false;
 uint8_t encoderLEDColors[8][3] = {{0}};  // RGB colors for each encoder LED
 unsigned long lastEncoderRead = 0;
-const unsigned long ENCODER_READ_INTERVAL = 20;  // 20ms entre lecturas
 unsigned long lastM5ButtonTime[8] = {0};  // Debounce para botones de encoders
-int32_t encoderValues[8] = {100, 100, 100, 100, 100, 100, 100, 100};
-int32_t lastEncoderValues[8] = {100, 100, 100, 100, 100, 100, 100, 100};
 
 // Volume control - DUAL MODE (Sequencer / Live Pads)
 // enum VolumeMode definido en system_state.h
@@ -292,13 +289,15 @@ VolumeMode lastVolModeDisplay = VOL_SEQUENCER;
 bool volumesScreenInitialized = false;  // Flag para saber si ya se dibujó todo
 unsigned long lastVolumesUpdate = 0;    // Throttling temporal
 
+// Lectura ADC compartida (una sola lectura por loop para todos los handlers)
+int currentADCValue = 0;
+
 unsigned long ledOffTime[8] = {0};  // 8 LEDs (simplificado)
 bool ledActive[8] = {false};         // 8 LEDs (simplificado)
 
 int audioLevels[8] = {0};
 bool padPressed[8] = {false};  // 8 pads presionados (simplificado)
 unsigned long padPressTime[8] = {0};  // Tiempo de presión para tremolo (8 pads)
-unsigned long padPulseTime[8] = {0};  // Control de animación visual
 unsigned long lastVizUpdate = 0;
 
 DisplayMode currentDisplayMode = DISPLAY_BPM;
@@ -307,13 +306,6 @@ int lastInstrumentPlayed = -1;
 unsigned long instrumentDisplayTime = 0;
 
 SequencerView sequencerView = SEQ_VIEW_GRID;
-
-// Debug analog buttons
-unsigned long lastButtonDebug = 0;
-int lastAdcValue = -1;
-
-// UDP connection state
-const unsigned long UDP_CHECK_INTERVAL = 30000;  // 30 segundos entre intentos de reconexión
 
 // Variables para manejo de botones (8 botones)
 uint16_t lastButtonState = 0;
@@ -378,9 +370,10 @@ void handleBackButton();
 void handlePlayStopButton();
 void handleMuteButton();
 void handleVolume();
+void handleBPMPot();
 void handleM5Encoders();
 void updateEncoderLEDs();
-void debugAnalogButtons();
+void readKeypad();  // Lectura única ADC por loop
 void triggerDrum(int track);
 void sendUDPCommand(const char* cmd);
 void sendUDPCommand(JsonDocument& doc);
@@ -395,10 +388,11 @@ void drawSequencerScreen();
 void drawSettingsScreen();
 void drawDiagnosticsScreen();
 void drawPatternsScreen();
-void drawVolumesScreen();  // Nueva pantalla de volúmenes
+void drawVolumesScreen();  // Pantalla de volúmenes
 void drawSinglePattern(int patternIndex, bool isSelected);
 void drawSyncingScreen();
 void drawHeader();
+void updateHeaderValues();  // Actualización parcial sin parpadeo
 void drawLivePad(int padIndex, bool highlight);
 void drawSequencerCircularScreen();
 void updateTM1638Displays();
@@ -602,7 +596,7 @@ void setupWiFiAndUDP() {
             Serial.println("    → Try moving devices closer together");
             Serial.println("    → Check MASTER is not overloaded");
         }
-        Serial.println("  Will auto-retry every 30 seconds...\n");
+        Serial.println("  Conexión manual desde SETTINGS > S3\n");
         udpConnected = false;
         diagnostic.udpConnected = false;
         diagnostic.lastError = masterFound ? "Connection timeout" : "Master not found";
@@ -912,9 +906,9 @@ void setup() {
     pinMode(ANALOG_BUTTONS_PIN, INPUT);
     Serial.println("3 Analog Buttons ready on pin 34 (PLAY/STOP, MUTE, BACK)");
     
-    // Volume Toggle Button (pin 14)
-    pinMode(VOLUME_TOGGLE_BTN, INPUT_PULLUP);
-    Serial.println("► Volume Toggle Button ready on pin 14 (SEQ/PADS)");
+    // Rotary Angle Potentiometer 2 (Live Pads Volume) - pin 39/VN (ADC1)
+    pinMode(ROTARY_ANGLE_PIN2, INPUT);
+    Serial.println("► Rotary Pot 2 (PADS Volume) ready on pin 39 (VN)");
     
     // Configurar interrupciones para CLK y DT
     attachInterrupt(digitalPinToInterrupt(ENCODER_CLK), []() {
@@ -949,14 +943,18 @@ void setup() {
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
     
-    // Inicializar buffer ADC del ROTARY_ANGLE_PIN con lecturas estables
+    // Inicializar buffer ADC de los 3 potenciómetros
     pinMode(ROTARY_ANGLE_PIN, INPUT);
-    Serial.print("Calibrating volume pot... ");
+    pinMode(ROTARY_ANGLE_PIN2, INPUT);
+    pinMode(BPM_POT_PIN, INPUT);
+    Serial.print("Calibrating pots... ");
     for (int i = 0; i < 10; i++) {
         analogRead(ROTARY_ANGLE_PIN);
+        analogRead(ROTARY_ANGLE_PIN2);
+        analogRead(BPM_POT_PIN);
         delay(10);
     }
-    Serial.println("OK");
+    Serial.println("OK (SEQ pin 35, PADS pin 39/VN, BPM pin 36/VP)");
     
     // I2C Init para M5 8ENCODER
     Serial.print("► I2C Init (SDA:21, SCL:22)... ");
@@ -1027,8 +1025,6 @@ void setup() {
             encoderLEDColors[i][2] = b;
             // Inicializar valores de encoder
             m5encoder.setAbsCounter(i, 100);  // Empezar en volumen 100
-            encoderValues[i] = 100;
-            lastEncoderValues[i] = 100;
             delay(100);
         }
         
@@ -1117,22 +1113,23 @@ void loop() {
     lastLoopTime = currentTime;
     
     handleButtons();
+    
     handleEncoder();
     
     // M5 8ENCODER: Leer encoders rotativos para control de tracks
     handleM5Encoders();
     
-    // DEBUG: Mostrar valores ADC de botones analógicos (activar solo en desarrollo)
-    #ifdef DEBUG_MODE
-    debugAnalogButtons();
-    #endif
+    // Lectura única ADC para botonera analógica (3 botones)
+    readKeypad();
     
+    // Procesar los 3 botones analógicos
     handlePlayStopButton();
     handleMuteButton();
     handleBackButton();
     
     if (currentTime - lastVolumeRead > 100) {
         handleVolume();
+        handleBPMPot();
         lastVolumeRead = currentTime;
     }
     
@@ -1140,22 +1137,9 @@ void loop() {
         updateSequencer();
     }
     
-    // Recibir datos UDP del MASTER
-    receiveUDPData();
-    
-    // Reconectar WiFi si se pierde la conexión
-    if (!udpConnected && (currentTime - lastUdpCheck > UDP_CHECK_INTERVAL)) {
-        lastUdpCheck = currentTime;
-        Serial.println("\n═══ AUTO-RETRY WiFi CONNECTION ═══");
-        
-        // Mostrar pantalla de sincronización
-        drawSyncingScreen();
-        
-        // Intentar reconectar
-        setupWiFiAndUDP();
-        
-        // Restaurar pantalla anterior
-        needsFullRedraw = true;
+    // Recibir datos UDP del MASTER (solo si conectado)
+    if (udpConnected) {
+        receiveUDPData();
     }
     
     updateAudioVisualization();
@@ -1181,7 +1165,7 @@ void loop() {
                 drawPatternsScreen();
                 break;
             case SCREEN_VOLUMES:
-                drawVolumesScreen();  // Dibujar solo una vez
+                drawVolumesScreen();
                 break;
             default:
                 break;
@@ -1193,13 +1177,12 @@ void loop() {
         
     } else {
         // Actualización parcial cuando NO es full redraw
-        // VOLUMES se actualiza automáticamente dentro de su propia función
         if (currentScreen == SCREEN_VOLUMES) {
             drawVolumesScreen();
         }
         
         if (needsHeaderUpdate && currentScreen != SCREEN_MENU) {
-            drawHeader();
+            updateHeaderValues();  // Solo repinta valores que cambiaron
             needsHeaderUpdate = false;
         }
         
@@ -1223,9 +1206,7 @@ void updateSequencer() {
     if (isPlaying) {
         unsigned long currentTime = millis();
         
-        // Calcular intervalo entre steps basado en tempo actual
-        unsigned long stepInterval = (60000 / tempo) / 4;  // 4 steps por beat (16th notes)
-        
+        // Usar stepInterval global (calculada por calculateStepInterval())
         if (currentTime - lastStepTime >= stepInterval) {
             lastStepTime = currentTime;
             currentStep = (currentStep + 1) % MAX_STEPS;
@@ -1337,6 +1318,12 @@ void handleButtons() {
                         sequencerView = newView;
                         drawSettingsScreen();
                     }
+                } else if (i == 2) {
+                    // S3: CONNECT MASTER (buscar y conectar WiFi/UDP)
+                    Serial.println("\n► S3: CONNECT TO MASTER...");
+                    drawSyncingScreen();
+                    setupWiFiAndUDP();
+                    needsFullRedraw = true;
                 } else if (i >= 4 && i < 4 + THEME_COUNT && (i - 4) < THEME_COUNT) {
                     // S5-S8: Cambiar theme (local)
                     int newTheme = i - 4;
@@ -1387,8 +1374,7 @@ void handleEncoder() {
     bool isHolding = encoderBtnHeld && (currentTime - encoderBtnPressTime > 300);
     
     // Detectar si el botón BACK está presionado (para BACK+Encoder)
-    int adcValue = analogRead(ANALOG_BUTTONS_PIN);
-    bool backPressed = (adcValue >= BTN_BACK_MIN && adcValue <= BTN_BACK_MAX);
+    bool backPressed = (currentADCValue >= BTN_BACK_MIN && currentADCValue <= BTN_BACK_MAX);
     
     // Manejar rotación del encoder
     if (encoderChanged) {
@@ -1447,16 +1433,6 @@ void handleEncoder() {
                     // En settings: navegar entre opciones (Drum Kits, Themes, etc.)
                     int delta = rawDelta / 2;
                     if (delta != 0) {
-                        // Navegar por drum kits con el encoder
-                        changeKit(delta);
-                        Serial.printf("► Kit: %d\n", currentKit);
-                    }
-                    
-                } else if (currentScreen == SCREEN_SETTINGS) {
-                    // En settings: navegar entre opciones (Drum Kits, Themes, etc.)
-                    int delta = rawDelta / 2;
-                    if (delta != 0) {
-                        // Navegar por drum kits con el encoder
                         changeKit(delta);
                         Serial.printf("► Kit: %d\n", currentKit);
                     }
@@ -1552,8 +1528,7 @@ void handlePlayStopButton() {
     static unsigned long lastPlayStopBtnTime = 0;
     unsigned long currentTime = millis();
     
-    int adcValue = analogRead(ANALOG_BUTTONS_PIN);
-    bool playStopPressed = (adcValue >= BTN_PLAY_STOP_MIN && adcValue <= BTN_PLAY_STOP_MAX);
+    bool playStopPressed = (currentADCValue >= BTN_PLAY_STOP_MIN && currentADCValue <= BTN_PLAY_STOP_MAX);
     
     // Detectar flanco de subida (presión)
     if (playStopPressed && !lastPlayStopPressed) {
@@ -1592,25 +1567,22 @@ void handleMuteButton() {
     static bool lastMutePressed = false;
     static unsigned long muteBtnPressTime = 0;
     static bool holdProcessed = false;
-    static int lastMuteAdcValue = 0;
     unsigned long currentTime = millis();
     
-    int adcValue = analogRead(ANALOG_BUTTONS_PIN);
-    bool mutePressed = (adcValue >= BTN_MUTE_MIN && adcValue <= BTN_MUTE_MAX);
-    bool noButtonPressed = (adcValue < BTN_NONE_THRESHOLD);
+    bool mutePressed = (currentADCValue >= BTN_MUTE_MIN && currentADCValue <= BTN_MUTE_MAX);
+    bool noButtonPressed = (currentADCValue < BTN_NONE_THRESHOLD);
     
     // Detectar presión del botón (flanco de subida)
     if (mutePressed && !lastMutePressed) {
         muteBtnPressTime = currentTime;
         holdProcessed = false;
-        lastMuteAdcValue = adcValue;
-        Serial.printf("► MUTE BUTTON PRESSED (ADC: %d)\n", adcValue);
+        Serial.printf("► MUTE BUTTON PRESSED (ADC: %d)\n", currentADCValue);
     }
     
     // Detectar HOLD (mantener presionado >1 segundo) - CLEAR
     if (mutePressed && !holdProcessed && (currentTime - muteBtnPressTime > 1000)) {
         holdProcessed = true;
-        Serial.printf("► MUTE BUTTON (HOLD - CLEAR INSTRUMENT) ADC: %d\n", adcValue);
+        Serial.printf("► MUTE BUTTON (HOLD - CLEAR INSTRUMENT) ADC: %d\n", currentADCValue);
         
         // Solo funciona en SEQUENCER
         if (currentScreen == SCREEN_SEQUENCER) {
@@ -1690,8 +1662,7 @@ void handleBackButton() {
     static unsigned long lastBackBtnTime = 0;
     unsigned long currentTime = millis();
     
-    int adcValue = analogRead(ANALOG_BUTTONS_PIN);
-    bool backPressed = (adcValue >= BTN_BACK_MIN && adcValue <= BTN_BACK_MAX);
+    bool backPressed = (currentADCValue >= BTN_BACK_MIN && currentADCValue <= BTN_BACK_MAX);
     
     // Detectar flanco de subida (presión)
     if (backPressed && !lastBackPressed) {
@@ -1726,203 +1697,138 @@ void handleBackButton() {
     lastBackPressed = backPressed;
 }
 
-void debugAnalogButtons() {
-    unsigned long currentTime = millis();
+// ============================================
+// KEYPAD: Lectura única ADC por loop
+// ============================================
+void readKeypad() {
+    static int lastDebugADC = 0;
+    static unsigned long lastDebugTime = 0;
     
-    // Mostrar valor ADC cada 200ms
-    if (currentTime - lastButtonDebug > 200) {
-        lastButtonDebug = currentTime;
+    currentADCValue = analogRead(ANALOG_BUTTONS_PIN);
+    
+    // Debug: imprimir valor ADC cada 150ms si cambió significativamente
+    unsigned long now = millis();
+    if (now - lastDebugTime > 150 && abs(currentADCValue - lastDebugADC) > 30) {
+        lastDebugTime = now;
+        lastDebugADC = currentADCValue;
         
-        int adcValue = analogRead(ANALOG_BUTTONS_PIN);
+        // Identificar botón según rangos actuales
+        const char* btnName = "???";
+        if (currentADCValue < BTN_NONE_THRESHOLD)                                    btnName = "NONE";
+        else if (currentADCValue >= BTN_PLAY_STOP_MIN && currentADCValue <= BTN_PLAY_STOP_MAX) btnName = "1:PLAY/STOP";
+        else if (currentADCValue >= BTN_MUTE_MIN      && currentADCValue <= BTN_MUTE_MAX)      btnName = "2:MUTE";
+        else if (currentADCValue >= BTN_BACK_MIN       && currentADCValue <= BTN_BACK_MAX)      btnName = "3:BACK";
         
-        // Solo mostrar si el valor cambió significativamente
-        if (abs(adcValue - lastAdcValue) > 50) {
-            lastAdcValue = adcValue;
-            
-            Serial.printf("\n═══════════════════════════════════\n");
-            Serial.printf("ADC Value: %4d\n", adcValue);
-            
-            // Determinar qué botón está presionado
-            if (adcValue < BTN_NONE_THRESHOLD || adcValue > 4000) {
-                Serial.println("Status: NO BUTTON PRESSED (pull-up)");
-            }
-            else if (adcValue >= BTN_PLAY_STOP_MIN && adcValue <= BTN_PLAY_STOP_MAX) {
-                Serial.println("Button: PLAY/STOP ✓");
-            }
-            else if (adcValue >= BTN_MUTE_MIN && adcValue <= BTN_MUTE_MAX) {
-                Serial.println("Button: MUTE/CLEAR ✓");
-            }
-            else if (adcValue >= BTN_BACK_MIN && adcValue <= BTN_BACK_MAX) {
-                Serial.println("Button: BACK ✓");
-            }
-            else {
-                Serial.println("Status: ⚠️ VALUE OUT OF RANGE!");
-                Serial.println("\nSuggested action:");
-                
-                if (adcValue < BTN_PLAY_STOP_MIN) {
-                    Serial.printf("  → Lower BTN_PLAY_STOP_MIN to ~%d\n", adcValue - 50);
-                }
-                else if (adcValue > BTN_PLAY_STOP_MAX && adcValue < BTN_MUTE_MIN) {
-                    Serial.printf("  → Adjust: BTN_PLAY_STOP_MAX=%d, BTN_MUTE_MIN=%d\n", 
-                                 adcValue + 100, adcValue - 100);
-                }
-                else if (adcValue > BTN_MUTE_MAX && adcValue < BTN_BACK_MIN) {
-                    Serial.printf("  → Adjust: BTN_MUTE_MAX=%d, BTN_BACK_MIN=%d\n", 
-                                 adcValue + 100, adcValue - 100);
-                }
-                else if (adcValue > BTN_BACK_MAX) {
-                    Serial.printf("  → Raise BTN_BACK_MAX to ~%d\n", adcValue + 100);
-                }
-            }
-            Serial.printf("═══════════════════════════════════\n\n");
-        }
+        Serial.printf("[KEYPAD] ADC: %4d  -> %s\n", currentADCValue, btnName);
     }
 }
 
+
 void handleVolume() {
-    static bool lastToggleBtnState = HIGH;
-    static unsigned long lastTogglePressTime = 0;
-    static int lastPotValue = -1;  // Valor del potenciómetro en el último cambio de modo
-    static bool potMoved = true;   // Flag para detectar si el pot se movió después de cambiar modo
-    static int targetVolume = -1;  // Soft takeover: volumen objetivo del modo actual
-    static int adcReadings[5] = {0, 0, 0, 0, 0};  // Buffer para filtrado de ruido ADC
-    static int adcIndex = 0;
-    
-    // Leer botón toggle (pin 14) con pull-up interno y debounce mejorado
-    bool toggleBtnState = digitalRead(VOLUME_TOGGLE_BTN);
+    // === DUAL POTENTIOMETER VOLUME CONTROL ===
+    // Pin 35 (ROTARY_ANGLE_PIN)  → Sequencer Volume  (ADC1_CH7)
+    // Pin 39 (ROTARY_ANGLE_PIN2) → Live Pads Volume   (ADC1_CH3)
+    // NOTA: Ambos deben ser ADC1 porque ADC2 no funciona con WiFi activo
+    static int adcSeqReadings[5] = {0, 0, 0, 0, 0};
+    static int adcPadReadings[5] = {0, 0, 0, 0, 0};
+    static int adcSeqIndex = 0;
+    static int adcPadIndex = 0;
+    static unsigned long lastSeqSent = 0;
+    static unsigned long lastPadSent = 0;
     unsigned long now = millis();
     
-    // Detectar flanco de bajada (botón presionado) con debounce robusto
-    if (toggleBtnState == LOW && lastToggleBtnState == HIGH) {
-        if (now - lastTogglePressTime > 200) {  // Debounce de 200ms
-            lastTogglePressTime = now;
-            
-            // Capturar posición actual del potenciómetro (filtrada)
-            int rawSum = 0;
-            for (int i = 0; i < 5; i++) {
-                rawSum += analogRead(ROTARY_ANGLE_PIN);
-                delay(2);
-            }
-            int raw = rawSum / 5;
-            lastPotValue = map(raw, 0, 4095, MAX_VOLUME, 0);
-            potMoved = false;  // El pot NO se ha movido desde el cambio de modo
-            
-            // Alternar modo de volumen
-            volumeMode = (volumeMode == VOL_SEQUENCER) ? VOL_LIVE_PADS : VOL_SEQUENCER;
-            
-            // Soft takeover: bloquear hasta que el pot coincida con el volumen actual del modo
-            targetVolume = (volumeMode == VOL_SEQUENCER) ? sequencerVolume : livePadsVolume;
-            Serial.printf("► Volume Mode: %s (target %d%%, pot at %d%%)\n", 
-                     volumeMode == VOL_SEQUENCER ? "SEQUENCER" : "LIVE PADS",
-                     targetVolume, lastPotValue);
-            
-            // Mostrar en TM1638
-            tm1.displayText(volumeMode == VOL_SEQUENCER ? "SEQ VOL " : "PAD VOL ");
-            tm2.displayText("        ");
-            lastDisplayChange = millis();
-            currentDisplayMode = DISPLAY_VOLUME;
-            needsHeaderUpdate = true;
-        }
-    }
-    lastToggleBtnState = toggleBtnState;
+    // --- POT 1: Sequencer Volume (pin 35) ---
+    int rawSeq = analogRead(ROTARY_ANGLE_PIN);
+    adcSeqReadings[adcSeqIndex] = rawSeq;
+    adcSeqIndex = (adcSeqIndex + 1) % 5;
+    int seqSum = 0;
+    for (int i = 0; i < 5; i++) seqSum += adcSeqReadings[i];
+    int newSeqVol = map(seqSum / 5, 0, 4095, MAX_VOLUME, 0);
     
-    // Leer potenciómetro con filtro de media móvil (reduce ruido ADC)
-    int rawReading = analogRead(ROTARY_ANGLE_PIN);
-    adcReadings[adcIndex] = rawReading;
-    adcIndex = (adcIndex + 1) % 5;
+    // --- POT 2: Live Pads Volume (pin 36) ---
+    int rawPad = analogRead(ROTARY_ANGLE_PIN2);
+    adcPadReadings[adcPadIndex] = rawPad;
+    adcPadIndex = (adcPadIndex + 1) % 5;
+    int padSum = 0;
+    for (int i = 0; i < 5; i++) padSum += adcPadReadings[i];
+    int newPadVol = map(padSum / 5, 0, 4095, MAX_VOLUME, 0);
     
-    // Calcular promedio de las últimas 5 lecturas
-    int rawSum = 0;
-    for (int i = 0; i < 5; i++) {
-        rawSum += adcReadings[i];
-    }
-    int raw = rawSum / 5;
-    int newVol = map(raw, 0, 4095, MAX_VOLUME, 0);  // Invertido: girar derecha = subir volumen
-    
-    // Detectar si el potenciómetro se movió desde el cambio de modo
-    if (!potMoved) {
-        // Desbloquear cuando el pot se acerque al volumen objetivo (tolerancia ±8%)
-        if (targetVolume >= 0 && abs(newVol - targetVolume) <= 8) {
-            potMoved = true;
-            Serial.printf("► Potentiometer matched target (%d%% ≈ %d%%) - control unlocked\n", 
-                         newVol, targetVolume);
-        } else {
-            // Mostrar posición actual vs target para debug
-            if (now % 1000 < 50) {  // Cada ~1 segundo
-                Serial.printf("  Waiting for pot match: current %d%%, target %d%% (diff: %d%%)\n",
-                            newVol, targetVolume, abs(newVol - targetVolume));
-            }
-            return;
-        }
-    }
-    
-    // Solo actualizar volumen si el pot se movió después del cambio de modo
-    if (potMoved) {
-        // CORRECCIÓN: Validar conexión UDP antes de enviar
-        if (!udpConnected) {
-            // No imprimir error constantemente, solo actualizar local
-            if (volumeMode == VOL_SEQUENCER) {
-                if (abs(newVol - lastSequencerVolume) > 3) {  // Hysteresis de 3%
-                    sequencerVolume = newVol;
-                    lastSequencerVolume = newVol;
-                    showVolumeOnTM1638();
-                    lastDisplayChange = millis();
-                    needsHeaderUpdate = true;
-                }
-            } else {
-                if (abs(newVol - lastLivePadsVolume) > 3) {  // Hysteresis de 3%
-                    livePadsVolume = newVol;
-                    lastLivePadsVolume = newVol;
-                    showVolumeOnTM1638();
-                    lastDisplayChange = millis();
-                    needsHeaderUpdate = true;
-                }
-            }
-            return;
+    // --- Actualizar Sequencer Volume (rate-limit independiente) ---
+    if (abs(newSeqVol - lastSequencerVolume) > 3 && (now - lastSeqSent >= 100)) {
+        lastSeqSent = now;
+        sequencerVolume = newSeqVol;
+        lastSequencerVolume = newSeqVol;
+        
+        if (udpConnected) {
+            JsonDocument doc;
+            doc["cmd"] = "setSequencerVolume";
+            doc["value"] = sequencerVolume;
+            sendUDPCommand(doc);
         }
         
-        // CORRECCIÓN: Limitar frecuencia de envío (max 10 msg/seg)
-        static unsigned long lastVolumeSent = 0;
-        if (now - lastVolumeSent < 100) {  // Mínimo 100ms entre envíos
-            return;
-        }
-        lastVolumeSent = now;
+        Serial.printf("► SEQ Volume: %d%% (raw:%d)\n", sequencerVolume, rawSeq);
+        showVolumeOnTM1638();
+        lastDisplayChange = now;
+        needsHeaderUpdate = true;
+    }
+    
+    // --- Actualizar Live Pads Volume (rate-limit independiente) ---
+    if (abs(newPadVol - lastLivePadsVolume) > 3 && (now - lastPadSent >= 100)) {
+        lastPadSent = now;
+        livePadsVolume = newPadVol;
+        lastLivePadsVolume = newPadVol;
         
-        if (volumeMode == VOL_SEQUENCER) {
-            if (abs(newVol - lastSequencerVolume) > 3) {  // Hysteresis de 3%
-                sequencerVolume = newVol;
-                lastSequencerVolume = newVol;
-                
-                // Enviar al MASTER
-                JsonDocument doc;
-                doc["cmd"] = "setSequencerVolume";
-                doc["value"] = sequencerVolume;
-                sendUDPCommand(doc);
-                
-                Serial.printf("► Sequencer Volume: %d%%\n", sequencerVolume);
-                showVolumeOnTM1638();
-                lastDisplayChange = millis();
-                needsHeaderUpdate = true;
-            }
-        } else {
-            if (abs(newVol - lastLivePadsVolume) > 3) {  // Hysteresis de 3%
-                livePadsVolume = newVol;
-                lastLivePadsVolume = newVol;
-                
-                // Enviar al MASTER con boost del 25% (pero limitado a MAX_VOLUME)
-                int boostedVolume = min((int)(livePadsVolume * 1.25), (int)MAX_VOLUME);
-                JsonDocument doc;
-                doc["cmd"] = "setLiveVolume";
-                doc["value"] = boostedVolume;
-                sendUDPCommand(doc);
-                
-                Serial.printf("► Live Pads Volume: %d%% (sent: %d%% +25%% boost)\n", 
-                             livePadsVolume, boostedVolume);
-                showVolumeOnTM1638();
-                lastDisplayChange = millis();
-                needsHeaderUpdate = true;
-            }
+        if (udpConnected) {
+            int boostedVolume = min((int)(livePadsVolume * 1.25), (int)MAX_VOLUME);
+            JsonDocument doc;
+            doc["cmd"] = "setLiveVolume";
+            doc["value"] = boostedVolume;
+            sendUDPCommand(doc);
         }
+        
+        Serial.printf("► PAD Volume: %d%% (raw:%d)\n", livePadsVolume, rawPad);
+        showVolumeOnTM1638();
+        lastDisplayChange = now;
+        needsHeaderUpdate = true;
+    }
+}
+
+// ============================================
+// BPM POTENTIOMETER HANDLING
+// ============================================
+void handleBPMPot() {
+    // === POTENTIOMETER 3: BPM CONTROL ===
+    // Pin 36/VP (BPM_POT_PIN) → BPM (ADC1_CH0)
+    static int adcBpmReadings[5] = {0, 0, 0, 0, 0};
+    static int adcBpmIndex = 0;
+    
+    int rawBpm = analogRead(BPM_POT_PIN);
+    adcBpmReadings[adcBpmIndex] = rawBpm;
+    adcBpmIndex = (adcBpmIndex + 1) % 5;
+    
+    int bpmSum = 0;
+    for (int i = 0; i < 5; i++) bpmSum += adcBpmReadings[i];
+    int avgAdc = bpmSum / 5;
+    
+    // Mapear ADC (0-4095) a rango BPM (invertido: giro derecha = más BPM)
+    int newBPM = map(avgAdc, 0, 4095, MAX_BPM, MIN_BPM);
+    newBPM = constrain(newBPM, MIN_BPM, MAX_BPM);
+    
+    // Histéresis: solo actualizar si cambio >= 2 BPM
+    if (abs(newBPM - tempo) >= 2) {
+        tempo = newBPM;
+        calculateStepInterval();
+        
+        if (udpConnected) {
+            JsonDocument doc;
+            doc["cmd"] = "tempo";
+            doc["value"] = tempo;
+            sendUDPCommand(doc);
+        }
+        
+        Serial.printf("► BPM Pot: %d BPM (raw:%d)\n", tempo, rawBpm);
+        showBPMOnTM1638();
+        needsHeaderUpdate = true;
     }
 }
 
@@ -1933,7 +1839,7 @@ void handleM5Encoders() {
     if (!m5encoderConnected) return;
     
     unsigned long currentTime = millis();
-    if (currentTime - lastEncoderRead < ENCODER_READ_INTERVAL) return;
+    if (currentTime - lastEncoderRead < Config::ENCODER_READ_INTERVAL) return;
     lastEncoderRead = currentTime;
     
     bool anyChange = false;
@@ -2044,11 +1950,16 @@ void handleM5Encoders() {
     }
     
     // Leer switch toggle del módulo
+    // Toggle switch con debounce para evitar spam
+    static bool lastSwitchState = false;
+    static unsigned long lastSwitchTime = 0;
     uint8_t switchState = m5encoder.inputSwitch();
-    if (switchState) {
+    if (switchState && !lastSwitchState && (millis() - lastSwitchTime > 300)) {
+        lastSwitchTime = millis();
         Serial.println("► M5 Toggle Switch activated");
         // TODO: Usar para reset general o cambio de modo global
     }
+    lastSwitchState = (switchState != 0);
 }
 
 void updateEncoderLEDs() {
@@ -3046,9 +2957,17 @@ void drawSettingsScreen() {
         tft.print(label);
     }
     
-    // ========== WIFI STATUS (solo mostrar info) ==========
+    // ========== WIFI STATUS + BOTÓN CONNECT ==========
     const int wifiY = sectionY + 165;
     
+    // Botón S3: CONNECT MASTER
+    tft.fillRoundRect(leftX, wifiY, 200, 32, 6, udpConnected ? COLOR_SUCCESS : COLOR_WARNING);
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(leftX + 10, wifiY + 8);
+    tft.print("S3 CONNECT");
+    
+    // Estado actual
     tft.fillRoundRect(rightX, wifiY, 200, 32, 6, udpConnected ? COLOR_SUCCESS : COLOR_ERROR);
     tft.setTextSize(2);
     tft.setTextColor(COLOR_TEXT);
@@ -3062,7 +2981,7 @@ void drawSettingsScreen() {
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT);
     tft.setCursor(10, 305);
-    tft.print("S1:GRID  S2:CIRC");
+    tft.print("S1:GRID  S2:CIRC  S3:WiFi");
     tft.setTextColor(COLOR_TEXT_DIM);
     tft.print(" | ");
     tft.setTextColor(COLOR_TEXT);
@@ -3153,30 +3072,116 @@ void drawDiagnosticsScreen() {
     tft.println("BACK: MENU");
 }
 
+// Cache para evitar redibujar si no cambió nada
+static int hdr_lastTempo = -1;
+static int hdr_lastSeqVol = -1;
+static int hdr_lastPadVol = -1;
+static bool hdr_lastPlaying = false;
+static int hdr_lastPattern = -1;
+static int hdr_lastTrack = -1;
+static Screen hdr_lastScreen = SCREEN_BOOT;
+
+// Actualización PARCIAL del header: solo repinta valores que cambiaron (sin parpadeo)
+void updateHeaderValues() {
+    bool tempoChanged   = (tempo != hdr_lastTempo);
+    bool seqVolChanged  = (sequencerVolume != hdr_lastSeqVol);
+    bool padVolChanged  = (livePadsVolume != hdr_lastPadVol);
+    bool playChanged    = (isPlaying != hdr_lastPlaying);
+    bool patternChanged = (currentPattern != hdr_lastPattern);
+    bool trackChanged   = (selectedTrack != hdr_lastTrack);
+
+    // BPM (zona x=240..300, y=10..32)
+    if (tempoChanged) {
+        tft.fillRect(240, 10, 60, 28, COLOR_NAVY);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_ACCENT2, COLOR_NAVY);
+        tft.setCursor(240, 14);
+        tft.printf("%d", tempo);
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_TEXT_DIM, COLOR_NAVY);
+        tft.setCursor(280, 20);
+        tft.print("BPM");
+        hdr_lastTempo = tempo;
+    }
+
+    // Sequencer Volume (zona x=340..440, y=0..20)
+    if (seqVolChanged) {
+        tft.fillRect(340, 0, 100, 22, COLOR_NAVY);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_SUCCESS, COLOR_NAVY);
+        tft.setCursor(340, 4);
+        tft.printf("S:%3d%%", sequencerVolume);
+        hdr_lastSeqVol = sequencerVolume;
+    }
+
+    // Pads Volume (zona x=340..440, y=24..48)
+    if (padVolChanged) {
+        tft.fillRect(340, 24, 100, 22, COLOR_NAVY);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_WARNING, COLOR_NAVY);
+        tft.setCursor(340, 26);
+        tft.printf("P:%3d%%", livePadsVolume);
+        hdr_lastPadVol = livePadsVolume;
+    }
+
+    // Pattern (zona x=310..340, y=10..32) - solo en sequencer
+    if (patternChanged && currentScreen == SCREEN_SEQUENCER) {
+        tft.fillRect(310, 10, 30, 24, COLOR_NAVY);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_TEXT, COLOR_NAVY);
+        tft.setCursor(310, 14);
+        tft.printf("P%d", currentPattern + 1);
+        hdr_lastPattern = currentPattern;
+    }
+
+    // Instrumento activo (zona x=100..230, y=10..32) - solo en sequencer
+    if (trackChanged && currentScreen == SCREEN_SEQUENCER) {
+        tft.fillRect(100, 10, 130, 24, COLOR_NAVY);
+        tft.setTextSize(2);
+        tft.setTextColor(getInstrumentColor(selectedTrack), COLOR_NAVY);
+        tft.setCursor(100, 14);
+        const char* name = instrumentNames[selectedTrack];
+        // Imprimir sin trailing spaces
+        int len = strlen(name);
+        while (len > 0 && name[len - 1] == ' ') len--;
+        for (int i = 0; i < len; i++) tft.print(name[i]);
+        hdr_lastTrack = selectedTrack;
+    }
+
+    // Play/Stop icon (zona x=443..467, y=12..36)
+    if (playChanged) {
+        tft.fillRect(443, 12, 24, 26, COLOR_NAVY);
+        if (isPlaying) {
+            tft.fillCircle(455, 24, 10, COLOR_SUCCESS);
+            tft.fillTriangle(450, 18, 450, 30, 460, 24, COLOR_BG);
+        } else {
+            tft.drawCircle(455, 24, 10, COLOR_BORDER);
+            tft.fillRect(451, 19, 3, 10, COLOR_TEXT_DIM);
+            tft.fillRect(456, 19, 3, 10, COLOR_TEXT_DIM);
+        }
+        hdr_lastPlaying = isPlaying;
+    }
+}
+
+// Dibujo COMPLETO del header (solo en full redraw)
 void drawHeader() {
     tft.fillRect(0, 0, 480, 48, COLOR_NAVY);
     tft.drawFastHLine(0, 48, 480, COLOR_ACCENT);
     
+    // Logo
     tft.setTextSize(3);
-    tft.setTextColor(COLOR_TEXT);
+    tft.setTextColor(COLOR_TEXT, COLOR_NAVY);
     tft.setCursor(10, 10);
-    tft.println("R808");
+    tft.print("R808");
     
-    // Mostrar nombre de pantalla actual
+    // Nombre de pantalla
     tft.setTextSize(1);
-    tft.setTextColor(COLOR_ACCENT);
+    tft.setTextColor(COLOR_ACCENT, COLOR_NAVY);
     tft.setCursor(10, 36);
     if (currentScreen == SCREEN_LIVE) {
         tft.print("LIVE PADS");
     } else if (currentScreen == SCREEN_SEQUENCER) {
         tft.print("SEQUENCER");
-        // Mostrar instrumento activo con su color
-        tft.setTextSize(2);
-        tft.setTextColor(getInstrumentColor(selectedTrack));
-        tft.setCursor(100, 14);
-        String instName = String(instrumentNames[selectedTrack]);
-        instName.trim();
-        tft.print(instName.c_str());
     } else if (currentScreen == SCREEN_SETTINGS) {
         tft.print("SETTINGS");
     } else if (currentScreen == SCREEN_DIAGNOSTICS) {
@@ -3184,43 +3189,18 @@ void drawHeader() {
     } else if (currentScreen == SCREEN_PATTERNS) {
         tft.print("PATTERNS");
     }
+    hdr_lastScreen = currentScreen;
     
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_ACCENT2);
-    tft.setCursor(240, 14);
-    tft.printf("%d", tempo);
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_TEXT_DIM);
-    tft.setCursor(280, 20);
-    tft.print("BPM");
+    // Invalidar cache para forzar redibujado de todos los valores
+    hdr_lastTempo = -1;
+    hdr_lastSeqVol = -1;
+    hdr_lastPadVol = -1;
+    hdr_lastPlaying = !isPlaying;
+    hdr_lastPattern = -1;
+    hdr_lastTrack = -1;
     
-    // Mostrar patrón en sequencer
-    if (currentScreen == SCREEN_SEQUENCER) {
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_TEXT);
-        tft.setCursor(320, 14);
-        tft.printf("P%d", currentPattern + 1);
-    }
-    
-    // Mostrar ambos volúmenes con indicador de modo activo
-    tft.setTextSize(1);
-    tft.setTextColor(volumeMode == VOL_SEQUENCER ? COLOR_SUCCESS : COLOR_TEXT_DIM);
-    tft.setCursor(370, 12);
-    tft.printf("SEQ:%d%%", sequencerVolume);
-    
-    tft.setTextColor(volumeMode == VOL_LIVE_PADS ? COLOR_SUCCESS : COLOR_TEXT_DIM);
-    tft.setCursor(370, 24);
-    tft.printf("PAD:%d%%", livePadsVolume);
-    
-    // Icono Play/Stop (solo icono, sin texto)
-    if (isPlaying) {
-        tft.fillCircle(455, 24, 10, COLOR_SUCCESS);
-        tft.fillTriangle(450, 18, 450, 30, 460, 24, COLOR_BG);
-    } else {
-        tft.drawCircle(455, 24, 10, COLOR_BORDER);
-        tft.fillRect(451, 19, 3, 10, COLOR_TEXT_DIM);
-        tft.fillRect(456, 19, 3, 10, COLOR_TEXT_DIM);
-    }
+    // Dibujar todos los valores dinámicos
+    updateHeaderValues();
 }
 
 void drawLivePad(int padIndex, bool highlight) {
@@ -3749,8 +3729,7 @@ void changePattern(int delta) {
     doc["index"] = currentPattern;
     sendUDPCommand(doc);
     
-    // CORRECCIÓN: Delay mayor para evitar conflictos
-    delay(150);
+    // Solicitar sync sin delay bloqueante
     requestPatternFromMaster();
     
     Serial.printf("► Pattern changed to %d, requesting sync...\n", currentPattern + 1);
