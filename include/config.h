@@ -62,7 +62,7 @@ namespace Config {
     // ============================================
     constexpr uint16_t SCREEN_WIDTH = 480;   ///< Ancho de pantalla TFT
     constexpr uint16_t SCREEN_HEIGHT = 320;  ///< Alto de pantalla TFT
-    constexpr uint8_t MENU_ITEMS = 5;        ///< Número de items en menú principal
+    constexpr uint8_t MENU_ITEMS = 6;        ///< Número de items en menú principal
     
     // ============================================
     // HARDWARE I2C

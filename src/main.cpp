@@ -241,24 +241,13 @@ const char* password = "red808esp32"; // Password del MASTER
 const char* masterIP = "192.168.4.1"; // IP del MASTER
 const int udpPort = 8888;              // Puerto UDP del MASTER
 
-// CONFIGURACIÓN DE IP ESTÁTICA PARA SLAVES (opcional pero recomendado)
-// Para evitar conflictos de IP entre múltiples slaves y clientes web:
-// - Web browsers: obtendrán IPs dinámicas desde .2 en adelante
-// - Slave 1 (Surface): configurar IP estática .50 (descomentar líneas abajo)
-// - Slave 2 (otro dispositivo): configurar IP estática .51
-// Descomenta y configura estas líneas en cada slave:
-/*
-IPAddress local_IP(192, 168, 4, 50);  // Cambiar último número para cada slave
-IPAddress gateway(192, 168, 4, 1);
-IPAddress subnet(255, 255, 255, 0);
-// Luego en setupWiFiAndUDP() agregar antes de WiFi.begin():
-// WiFi.config(local_IP, gateway, subnet);
-*/
+// WiFi reconexion state
+bool wifiReconnecting = false;  // true = WiFi.begin() lanzado, esperando resultado
 
 WiFiUDP udp;
 
 // Variables legacy que aún se necesitan (no están en structs)
-const int menuItemCount = 5;  // LIVE, SEQUENCER, VOLUMES, SETTINGS, DIAGNOSTICS
+const int menuItemCount = 6;  // LIVE, SEQUENCER, VOLUMES, FILTERS, SETTINGS, DIAGNOSTICS
 
 // Rotary Encoder variables (sin biblioteca)
 static uint8_t encoderState = 0;
@@ -288,6 +277,21 @@ bool lastTrackMuteDisplay[8] = {false,false,false,false,false,false,false,false}
 VolumeMode lastVolModeDisplay = VOL_SEQUENCER;
 bool volumesScreenInitialized = false;  // Flag para saber si ya se dibujó todo
 unsigned long lastVolumesUpdate = 0;    // Throttling temporal
+
+// ============================================
+// FILTER FX STATE
+// ============================================
+TrackFilter trackFilters[MAX_TRACKS];  // Filtros por track
+TrackFilter masterFilter;             // Filtro para MASTER OUT (salida global)
+int filterSelectedTrack = -1;         // -1 = MASTER OUT, 0-7 = tracks individuales
+int filterSelectedFX = 0;             // Filtro FX seleccionado (0=DELAY, 1=FLANGER, 2=COMPRESSOR)
+bool filterScreenInitialized = false; // Flag para primer dibujo
+bool needsFilterBarsUpdate = false;   // Flag para actualizar SOLO barras (sin full redraw)
+unsigned long lastFilterUpdate = 0;   // Throttling
+int lastFilterTrackDisplay = -1;      // Cache para evitar parpadeo
+int lastFilterFXDisplay = -1;
+uint8_t lastFilterParams[3][3] = {{0}}; // Cache 3 FX x 3 params
+bool lastFilterEnabled = false;
 
 // Lectura ADC compartida (una sola lectura por loop para todos los handlers)
 int currentADCValue = 0;
@@ -341,6 +345,7 @@ const char* menuItems[] = {
     "LIVE PAD",
     "SEQUENCER",
     "VOLUMENES",
+    "FILTERS FX",
     "SETTINGS",
     "DIAGNOSTICS"
 };
@@ -380,6 +385,7 @@ void sendUDPCommand(JsonDocument& doc);
 void receiveUDPData();
 void requestPatternFromMaster();
 bool attemptWiFiConnect(int maxWaitMs);
+void startWiFiReconnect();
 void checkWiFiReconnect();
 void drawConsoleBootScreen();
 void drawSpectrumAnimation();
@@ -391,6 +397,9 @@ void drawSettingsScreen();
 void drawDiagnosticsScreen();
 void drawPatternsScreen();
 void drawVolumesScreen();  // Pantalla de volúmenes
+void drawFiltersScreen();  // Pantalla de filtros FX
+void handleFilterPots();   // Control de filtros via potenciómetros
+void sendFilterUDP(int track, int filterType);  // Enviar filtro al MASTER
 void drawSinglePattern(int patternIndex, bool isSelected);
 void drawSyncingScreen();
 void drawHeader();
@@ -500,52 +509,57 @@ void printReceivedPattern(int patternNum) {
 // UDP COMMUNICATION FUNCTIONS
 // ============================================
 
-// Función de reconexión WiFi (usada en setup y en loop para auto-reconnect)
-bool attemptWiFiConnect(int maxWaitMs = 12000) {
-    Serial.println("[WiFi] Attempting connection...");
+// Función de reconexión WiFi BLOQUEANTE (solo para botón S3 / setup)
+bool attemptWiFiConnect(int maxWaitMs = 8000) {
+    Serial.println("[WiFi] Attempting connection (blocking)...");
     
-    // Limpiar estado previo para evitar problemas residuales
-    WiFi.disconnect(true);  // true = borrar credenciales guardadas
+    WiFi.disconnect(true);
     delay(100);
-    
-    // Configurar modo y optimizaciones ANTES de conectar
     WiFi.mode(WIFI_STA);
-    WiFi.persistent(false);        // No guardar en flash (evita desgaste y delays)
-    WiFi.setAutoReconnect(true);   // Reconexión automática del stack WiFi
-    WiFi.setSleep(false);          // Desactivar power-save (reduce latencia y drops)
-    
-    // Iniciar conexión
+    WiFi.persistent(false);
+    WiFi.setAutoReconnect(true);
+    WiFi.setSleep(false);
     WiFi.begin(ssid, password);
     
-    // Esperar conexión con timeout
     unsigned long startTime = millis();
-    int dots = 0;
     while (WiFi.status() != WL_CONNECTED && (millis() - startTime) < (unsigned long)maxWaitMs) {
-        delay(250);  // Polling más rápido que 500ms
+        delay(250);
         Serial.print(".");
-        dots++;
-        if (dots % 20 == 0) {
-            Serial.printf(" %lums/%dms (status:%d)\n", millis() - startTime, maxWaitMs, WiFi.status());
-        }
     }
     Serial.println();
     
     return (WiFi.status() == WL_CONNECTED);
 }
 
+// Iniciar reconexión NON-BLOCKING (para usar desde el loop)
+void startWiFiReconnect() {
+    Serial.println("[WiFi] Starting non-blocking reconnect...");
+    WiFi.disconnect(false);
+    delay(50);
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    WiFi.begin(ssid, password);
+    wifiReconnecting = true;
+}
+
 void setupWiFiAndUDP() {
     Serial.println("\n╔════════════════════════════════════╗");
-    Serial.println("║   CONNECTING TO MASTER (WiFi UDP)  ║");
+    Serial.println("║   CHECKING MASTER CONNECTION       ║");
     Serial.println("╚════════════════════════════════════╝");
     Serial.printf("  SSID: %s\n", ssid);
     Serial.printf("  Master IP: %s\n", masterIP);
     Serial.printf("  UDP Port: %d\n", udpPort);
     
-    // PASO 1: Conectar al MASTER directamente (sin scan previo = 3-5 seg más rápido)
-    // El scan es innecesario porque ya conocemos el SSID
-    Serial.println("\n[1/2] Connecting to MASTER...");
+    // WiFi.begin() ya fue llamado al inicio del setup() (early start)
+    // Comprobar si ya conectó durante las animaciones, si no esperar un poco
+    Serial.println("\n[1/2] Checking WiFi (started during boot)...");
     
-    bool connected = attemptWiFiConnect(12000);  // 12 segundos timeout
+    bool connected = (WiFi.status() == WL_CONNECTED);
+    if (!connected) {
+        // Si aún no conectó, intentar bloqueante (estamos en setup, no hay problema)
+        Serial.println("  Not yet connected, trying blocking connect...");
+        connected = attemptWiFiConnect(8000);
+    }
     
     if (connected) {
         Serial.println("✓ WiFi connected!");
@@ -606,7 +620,7 @@ void setupWiFiAndUDP() {
             Serial.println("    -> Check WiFi password");
             Serial.println("    -> Try moving devices closer");
         }
-        Serial.println("  Will auto-retry every 10 seconds in background\n");
+        Serial.println("  Will auto-retry every 5 seconds in background\n");
         udpConnected = false;
         diagnostic.udpConnected = false;
         diagnostic.lastError = masterFound ? "Connection timeout" : "Master not found";
@@ -614,7 +628,8 @@ void setupWiFiAndUDP() {
     }
 }
 
-// Reconexión automática en background (llamar desde loop)
+// Reconexión automática NON-BLOCKING (llamar desde loop)
+// NUNCA bloquea el loop - solo comprueba estado y lanza WiFi.begin() si toca
 void checkWiFiReconnect() {
     unsigned long now = millis();
     
@@ -626,40 +641,49 @@ void checkWiFiReconnect() {
             diagnostic.udpConnected = false;
             diagnostic.lastError = "WiFi disconnected";
             lastUdpCheck = now;
+            wifiReconnecting = false;
         }
         return;
     }
     
-    // Reintentar cada 10 segundos (no bloquear mucho el loop)
-    if (now - lastUdpCheck < 10000) return;
+    // Si ya lanzamos WiFi.begin(), solo comprobar si conectó
+    if (wifiReconnecting) {
+        if (WiFi.status() == WL_CONNECTED) {
+            // ¡Conectó!
+            Serial.println("✓ Reconnected to MASTER!");
+            Serial.printf("  IP: %s  RSSI: %d dBm\n", 
+                          WiFi.localIP().toString().c_str(), WiFi.RSSI());
+            
+            udp.begin(udpPort);
+            udpConnected = true;
+            diagnostic.udpConnected = true;
+            diagnostic.lastError = "";
+            wifiReconnecting = false;
+            
+            JsonDocument doc;
+            doc["cmd"] = "hello";
+            doc["device"] = "SURFACE";
+            sendUDPCommand(doc);
+            
+            delay(50);
+            requestPatternFromMaster();
+            needsHeaderUpdate = true;
+            
+        } else if (now - lastUdpCheck > 10000) {
+            // Llevamos 10s esperando, reintentar
+            Serial.println("  WiFi reconnect timeout, retrying...");
+            wifiReconnecting = false;
+            lastUdpCheck = now;
+        }
+        return;
+    }
+    
+    // Lanzar nuevo intento cada 8 segundos (NON-BLOCKING)
+    if (now - lastUdpCheck < 8000) return;
     lastUdpCheck = now;
     
-    Serial.println("\n► Auto-reconnecting to MASTER...");
-    
-    if (attemptWiFiConnect(5000)) {  // 5 seg timeout en reintentos (más corto)
-        Serial.println("✓ Reconnected to MASTER!");
-        Serial.printf("  IP: %s  RSSI: %d dBm\n", 
-                      WiFi.localIP().toString().c_str(), WiFi.RSSI());
-        
-        udp.begin(udpPort);
-        udpConnected = true;
-        diagnostic.udpConnected = true;
-        diagnostic.lastError = "";
-        
-        // Enviar hello
-        JsonDocument doc;
-        doc["cmd"] = "hello";
-        doc["device"] = "SURFACE";
-        sendUDPCommand(doc);
-        
-        // Solicitar patrón
-        delay(50);
-        requestPatternFromMaster();
-        
-        needsHeaderUpdate = true;
-    } else {
-        Serial.printf("  Retry failed (status: %d). Next retry in 10s\n", WiFi.status());
-    }
+    Serial.println("\n► Auto-reconnecting to MASTER (non-blocking)...");
+    startWiFiReconnect();
 }
 
 void sendUDPCommand(const char* cmd) {
@@ -916,13 +940,26 @@ void calculateStepInterval() {
 // ============================================
 void setup() {
     Serial.begin(115200);
-    delay(1000);
+    delay(300);
     
     Serial.println("\n\n╔════════════════════════════════════╗");
     Serial.println("║   RED808 V6 - SURFACE (SLAVE)     ║");
     Serial.println("║   UDP Controller via WiFi          ║");
     Serial.println("║   Connects to MASTER DrumMachine   ║");
     Serial.println("╚════════════════════════════════════╝\n");
+
+    // *** WIFI EARLY START - iniciar conexión ANTES de las animaciones ***
+    // Así WiFi conecta en background mientras se ejecutan TFT, TM1638, LEDs, etc.
+    Serial.println("► WiFi Early Start (non-blocking)...");
+    WiFi.disconnect(true);
+    delay(100);
+    WiFi.mode(WIFI_STA);
+    WiFi.persistent(false);
+    WiFi.setAutoReconnect(true);
+    WiFi.setSleep(false);
+    WiFi.begin(ssid, password);
+    Serial.printf("  SSID: %s | Target: %s:%d\n", ssid, masterIP, udpPort);
+    Serial.println("  Connecting while boot animations run...\n");
 
     // TFT Init
     Serial.print("► TFT Init... ");
@@ -1186,8 +1223,12 @@ void loop() {
     handleBackButton();
     
     if (currentTime - lastVolumeRead > 100) {
-        handleVolume();
-        handleBPMPot();
+        if (currentScreen == SCREEN_FILTERS) {
+            handleFilterPots();  // En FILTERS, los pots controlan parámetros FX
+        } else {
+            handleVolume();
+            handleBPMPot();
+        }
         lastVolumeRead = currentTime;
     }
     
@@ -1228,6 +1269,9 @@ void loop() {
             case SCREEN_VOLUMES:
                 drawVolumesScreen();
                 break;
+            case SCREEN_FILTERS:
+                drawFiltersScreen();
+                break;
             default:
                 break;
         }
@@ -1240,6 +1284,9 @@ void loop() {
         // Actualización parcial cuando NO es full redraw
         if (currentScreen == SCREEN_VOLUMES) {
             drawVolumesScreen();
+        }
+        if (currentScreen == SCREEN_FILTERS) {
+            drawFiltersScreen();
         }
         
         if (needsHeaderUpdate && currentScreen != SCREEN_MENU) {
@@ -1400,6 +1447,32 @@ void handleButtons() {
                     updateStepLEDsForTrack(selectedTrack);
                     needsGridUpdate = true;  // Solo actualizar grid, no full redraw
                 }
+            } else if (currentScreen == SCREEN_FILTERS) {
+                // S1-S3: Seleccionar tipo de filtro FX
+                if (i < FILTER_COUNT) {
+                    filterSelectedFX = i;
+                    const char* fxNames[] = {"DELAY   ", "FLANGER ", "COMPRESS"};
+                    tm1.displayText(fxNames[filterSelectedFX]);
+                    TrackFilter& f = (filterSelectedTrack == -1) ? masterFilter : trackFilters[filterSelectedTrack];
+                    char statusStr[9];
+                    snprintf(statusStr, sizeof(statusStr), f.enabled ? "  ON  " : "  OFF ");
+                    tm2.displayText(statusStr);
+                    needsFullRedraw = true;
+                    const char* targetName = (filterSelectedTrack == -1) ? "MASTER" : trackNames[filterSelectedTrack];
+                    Serial.printf("► Filter FX: %s on %s\n", fxNames[filterSelectedFX], targetName);
+                }
+                // S4: Seleccionar MASTER OUT
+                else if (i == 3) {
+                    filterSelectedTrack = -1;
+                    needsFullRedraw = true;
+                    Serial.println("► Filter Target: MASTER OUT");
+                }
+                // S5-S8: Seleccionar track 1-4 rápido
+                else if (i >= 4 && i < 8) {
+                    filterSelectedTrack = i - 4;
+                    needsFullRedraw = true;
+                    Serial.printf("► Filter Target: Track %d (%s)\n", filterSelectedTrack + 1, trackNames[filterSelectedTrack]);
+                }
             } else if (currentScreen == SCREEN_PATTERNS) {
                 // S1-S6: Seleccionar patrón (máximo 6 patrones)
                 if (i < 6) {
@@ -1517,6 +1590,36 @@ void handleEncoder() {
                         }
                     }
                     
+                } else if (currentScreen == SCREEN_FILTERS) {
+                    // En FILTERS: encoder selecciona target (-1=MASTER, 0-7=tracks)
+                    int delta = rawDelta / 2;
+                    if (delta != 0) {
+                        int oldTrack = filterSelectedTrack;
+                        filterSelectedTrack += delta;
+                        // Rango: -1 (MASTER) a MAX_TRACKS-1 (track 8)
+                        if (filterSelectedTrack < -1) filterSelectedTrack = MAX_TRACKS - 1;
+                        if (filterSelectedTrack >= MAX_TRACKS) filterSelectedTrack = -1;
+                        
+                        if (oldTrack != filterSelectedTrack) {
+                            // Mostrar en TM1638
+                            if (filterSelectedTrack == -1) {
+                                tm1.displayText("MASTER  ");
+                                tm2.displayText("FX OUT  ");
+                            } else {
+                                tm1.displayText(trackNames[filterSelectedTrack]);
+                                char fxStr[9];
+                                snprintf(fxStr, sizeof(fxStr), "FX TR %d", filterSelectedTrack + 1);
+                                tm2.displayText(fxStr);
+                            }
+                            needsFullRedraw = true;
+                            if (filterSelectedTrack == -1) {
+                                Serial.println("► Filter Target: MASTER OUT");
+                            } else {
+                                Serial.printf("► Filter Track: %d (%s)\n", filterSelectedTrack + 1, trackNames[filterSelectedTrack]);
+                            }
+                        }
+                    }
+                    
                 } else if (currentScreen == SCREEN_SEQUENCER) {
                     // En sequencer: navegación entre 8 tracks (sin páginas)
                     int delta = rawDelta / 2;
@@ -1560,9 +1663,31 @@ void handleEncoder() {
                     case 0: changeScreen(SCREEN_LIVE); break;
                     case 1: changeScreen(SCREEN_SEQUENCER); break;
                     case 2: changeScreen(SCREEN_VOLUMES); break;
-                    case 3: changeScreen(SCREEN_SETTINGS); break;
-                    case 4: changeScreen(SCREEN_DIAGNOSTICS); break;
+                    case 3: changeScreen(SCREEN_FILTERS); break;
+                    case 4: changeScreen(SCREEN_SETTINGS); break;
+                    case 5: changeScreen(SCREEN_DIAGNOSTICS); break;
                 }
+                
+            } else if (currentScreen == SCREEN_FILTERS) {
+                // En FILTERS: Enter toggle enable/disable del filtro seleccionado
+                TrackFilter& f = (filterSelectedTrack == -1) ? masterFilter : trackFilters[filterSelectedTrack];
+                f.enabled = !f.enabled;
+                
+                if (filterSelectedTrack == -1) {
+                    // MASTER: enviar ON/OFF de los 3 FX
+                    for (int fxi = 0; fxi < FILTER_COUNT; fxi++) {
+                        sendFilterUDP(-1, fxi);
+                    }
+                } else {
+                    // Per-track: enviar solo el FX seleccionado
+                    sendFilterUDP(filterSelectedTrack, filterSelectedFX);
+                }
+                
+                const char* targetName = (filterSelectedTrack == -1) ? "MASTER OUT" : trackNames[filterSelectedTrack];
+                Serial.printf("► Filter %s on %s: %s\n", 
+                    filterSelectedFX == 0 ? "DELAY" : filterSelectedFX == 1 ? "FLANGER" : "COMP",
+                    targetName, f.enabled ? "ON" : "OFF");
+                needsFilterBarsUpdate = true;  // Solo actualizar ON/OFF, no full redraw
                 
             } else if (currentScreen == SCREEN_PATTERNS) {
                 // En pantalla de patrones: Enter confirma selección
@@ -2472,51 +2597,51 @@ void drawMainMenu() {
     tft.setCursor(10, 36);
     tft.printf("RAM: %dK", ESP.getFreeHeap() / 1024);
     
-    int itemHeight = 52;
-    int startY = 70;
+    int itemHeight = 42;
+    int startY = 55;
     
     for (int i = 0; i < menuItemCount; i++) {
         int y = startY + i * itemHeight;
         
         if (i == menuSelection) {
-            tft.fillRoundRect(30, y, 420, 45, 8, COLOR_ACCENT);
-            tft.drawRoundRect(30, y, 420, 45, 8, COLOR_ACCENT2);
+            tft.fillRoundRect(30, y, 420, 38, 8, COLOR_ACCENT);
+            tft.drawRoundRect(30, y, 420, 38, 8, COLOR_ACCENT2);
             tft.setTextSize(3);
             tft.setTextColor(COLOR_TEXT);
         } else {
-            tft.fillRoundRect(30, y, 420, 45, 8, COLOR_NAVY_LIGHT);
+            tft.fillRoundRect(30, y, 420, 38, 8, COLOR_NAVY_LIGHT);
             tft.setTextSize(2);
             tft.setTextColor(COLOR_TEXT_DIM);
         }
         
-        tft.setCursor(50, y + (i == menuSelection ? 12 : 14));
+        tft.setCursor(50, y + (i == menuSelection ? 8 : 11));
         tft.print(menuItems[i]);
     }
 }
 
 // Función optimizada para solo actualizar items del menú sin parpadeo
 void drawMenuItems(int oldSelection, int newSelection) {
-    int itemHeight = 52;
-    int startY = 70;
+    int itemHeight = 42;
+    int startY = 55;
     
     // Redibujar item antiguo (no seleccionado)
     if (oldSelection >= 0 && oldSelection < menuItemCount) {
         int y = startY + oldSelection * itemHeight;
-        tft.fillRoundRect(30, y, 420, 45, 8, COLOR_NAVY_LIGHT);
+        tft.fillRoundRect(30, y, 420, 38, 8, COLOR_NAVY_LIGHT);
         tft.setTextSize(2);
         tft.setTextColor(COLOR_TEXT_DIM);
-        tft.setCursor(50, y + 14);
+        tft.setCursor(50, y + 11);
         tft.print(menuItems[oldSelection]);
     }
     
     // Redibujar item nuevo (seleccionado)
     if (newSelection >= 0 && newSelection < menuItemCount) {
         int y = startY + newSelection * itemHeight;
-        tft.fillRoundRect(30, y, 420, 45, 8, COLOR_ACCENT);
-        tft.drawRoundRect(30, y, 420, 45, 8, COLOR_ACCENT2);
+        tft.fillRoundRect(30, y, 420, 38, 8, COLOR_ACCENT);
+        tft.drawRoundRect(30, y, 420, 38, 8, COLOR_ACCENT2);
         tft.setTextSize(3);
         tft.setTextColor(COLOR_TEXT);
-        tft.setCursor(50, y + 12);
+        tft.setCursor(50, y + 8);
         tft.print(menuItems[newSelection]);
     }
 }
@@ -3249,6 +3374,8 @@ void drawHeader() {
         tft.print("DIAGNOSTICS");
     } else if (currentScreen == SCREEN_PATTERNS) {
         tft.print("PATTERNS");
+    } else if (currentScreen == SCREEN_FILTERS) {
+        tft.print("FILTERS FX");
     }
     hdr_lastScreen = currentScreen;
     
@@ -3698,6 +3825,455 @@ void drawSinglePattern(int patternIndex, bool isSelected) {
     tft.print(patternName);
 }
 
+// ============================================
+// FILTERS FX SCREEN
+// ============================================
+
+// Constantes de layout compartidas
+static const int FILTER_PANEL_W = 148;
+static const int FILTER_PANEL_H = 170;
+static const int FILTER_PANEL_Y = 100;
+static const int FILTER_SPACING = 6;
+
+// Helper: dibujar SOLO una barra de parámetro (sin repintar fondo ni labels)
+void drawFilterBar(int fx, int paramIdx, uint8_t value, bool isSelected) {
+    const uint16_t fxColors[] = {COLOR_ACCENT2, COLOR_INST_TOMHI, COLOR_INST_SNARE};
+    int x = 10 + fx * (FILTER_PANEL_W + FILTER_SPACING);
+    int py = FILTER_PANEL_Y + 42 + paramIdx * 42;
+    int barX = x + 6;
+    int barY = py + 12;
+    int barW = FILTER_PANEL_W - 16;
+    int barH = 10;
+    int fillW = map(value, 0, 127, 0, barW - 4);
+    
+    // Limpiar solo el interior de la barra
+    tft.fillRect(barX + 2, barY + 2, barW - 4, barH - 4, COLOR_NAVY);
+    
+    // Rellenar
+    if (fillW > 0) {
+        uint16_t barColor = isSelected ? fxColors[fx] : tft.color565(40, 40, 50);
+        tft.fillRect(barX + 2, barY + 2, fillW, barH - 4, barColor);
+    }
+    
+    // Valor numérico (limpiar + redibujar)
+    tft.fillRect(barX + barW - 24, py, 24, 11, isSelected ? COLOR_PRIMARY_LIGHT : COLOR_PRIMARY);
+    tft.setTextSize(1);
+    tft.setTextColor(isSelected ? COLOR_TEXT : COLOR_TEXT_DIM);
+    tft.setCursor(barX + barW - 22, py + 1);
+    tft.printf("%3d", value);
+}
+
+void drawFiltersScreen() {
+    unsigned long now = millis();
+    bool forceUpdate = !filterScreenInitialized || needsFullRedraw;
+    
+    if (!forceUpdate && !needsFilterBarsUpdate && (now - lastFilterUpdate < 50)) {
+        return;
+    }
+    lastFilterUpdate = now;
+    
+    TrackFilter& f = (filterSelectedTrack == -1) ? masterFilter : trackFilters[filterSelectedTrack];
+    
+    // Obtener parámetros actuales de los 3 FX
+    uint8_t curParams[3][3];
+    curParams[0][0] = f.delayMix;     curParams[0][1] = f.delayTime;     curParams[0][2] = f.delayFeedback;
+    curParams[1][0] = f.flangerRate;  curParams[1][1] = f.flangerDepth;  curParams[1][2] = f.flangerMix;
+    curParams[2][0] = f.compThreshold; curParams[2][1] = f.compRatio;    curParams[2][2] = f.compGain;
+    
+    // === ACTUALIZACIÓN PARCIAL: solo barras que cambiaron ===
+    if (!forceUpdate && needsFilterBarsUpdate) {
+        needsFilterBarsUpdate = false;
+        
+        // Solo actualizar barras que cambiaron de valor
+        for (int fx = 0; fx < FILTER_COUNT; fx++) {
+            bool isSel = (fx == filterSelectedFX);
+            for (int p = 0; p < 3; p++) {
+                if (curParams[fx][p] != lastFilterParams[fx][p]) {
+                    drawFilterBar(fx, p, curParams[fx][p], isSel);
+                    lastFilterParams[fx][p] = curParams[fx][p];
+                }
+            }
+        }
+        
+        // Actualizar ON/OFF si cambió
+        if (f.enabled != lastFilterEnabled) {
+            uint16_t statusColor = f.enabled ? COLOR_SUCCESS : COLOR_ERROR;
+            tft.fillRoundRect(400, 58, 60, 28, 6, statusColor);
+            tft.setTextSize(2);
+            tft.setTextColor(COLOR_BG);
+            tft.setCursor(410, 63);
+            tft.print(f.enabled ? "ON" : "OFF");
+            lastFilterEnabled = f.enabled;
+        }
+        return;
+    }
+    
+    // === DIBUJO COMPLETO (solo al entrar o cambiar track/FX) ===
+    if (forceUpdate) {
+        tft.fillScreen(COLOR_BG);
+        drawHeader();
+        
+        // Título con track seleccionado o MASTER OUT
+        tft.fillRoundRect(10, 55, 460, 35, 8, COLOR_PRIMARY);
+        tft.drawRoundRect(10, 55, 460, 35, 8, COLOR_ACCENT);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_TEXT);
+        tft.setCursor(20, 63);
+        if (filterSelectedTrack == -1) {
+            tft.setTextColor(COLOR_WARNING);
+            tft.print("FILTERS FX  -  ");
+            tft.setTextColor(COLOR_ACCENT2);
+            tft.print("MASTER OUT");
+        } else {
+            tft.printf("FILTERS FX  -  Track %d: %s", filterSelectedTrack + 1, instrumentNames[filterSelectedTrack]);
+        }
+        
+        // Indicador de estado ON/OFF
+        uint16_t statusColor = f.enabled ? COLOR_SUCCESS : COLOR_ERROR;
+        tft.fillRoundRect(400, 58, 60, 28, 6, statusColor);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_BG);
+        tft.setCursor(410, 63);
+        tft.print(f.enabled ? "ON" : "OFF");
+        
+        // --- 3 PANELES DE FILTROS ---
+        const char* fxLabels[] = {"DELAY/ECHO", "FLANGER", "COMPRESSOR"};
+        const char* param1Labels[] = {"MIX", "RATE", "THRESH"};
+        const char* param2Labels[] = {"TIME", "DEPTH", "RATIO"};
+        const char* param3Labels[] = {"FDBK", "MIX", "GAIN"};
+        const uint16_t fxColors[] = {COLOR_ACCENT2, COLOR_INST_TOMHI, COLOR_INST_SNARE};
+        const char* fxButtonLabels[] = {"S1", "S2", "S3"};
+        
+        for (int fx = 0; fx < FILTER_COUNT; fx++) {
+            int x = 10 + fx * (FILTER_PANEL_W + FILTER_SPACING);
+            bool isSelected = (fx == filterSelectedFX);
+            
+            // Panel background - más oscuro si no seleccionado
+            uint16_t panelBG = isSelected ? COLOR_PRIMARY_LIGHT : tft.color565(12, 8, 18);
+            uint16_t borderColor = isSelected ? fxColors[fx] : tft.color565(30, 25, 40);
+            tft.fillRoundRect(x, FILTER_PANEL_Y, FILTER_PANEL_W, FILTER_PANEL_H, 6, panelBG);
+            tft.drawRoundRect(x, FILTER_PANEL_Y, FILTER_PANEL_W, FILTER_PANEL_H, 6, borderColor);
+            if (isSelected) {
+                // Doble borde + glow para panel activo
+                tft.drawRoundRect(x + 1, FILTER_PANEL_Y + 1, FILTER_PANEL_W - 2, FILTER_PANEL_H - 2, 5, borderColor);
+                // Indicador triangular arriba
+                int cx = x + FILTER_PANEL_W / 2;
+                tft.fillTriangle(cx - 6, FILTER_PANEL_Y - 2, cx + 6, FILTER_PANEL_Y - 2, cx, FILTER_PANEL_Y - 8, fxColors[fx]);
+            }
+            
+            // FX Name header
+            uint16_t headerBG = isSelected ? fxColors[fx] : tft.color565(35, 25, 45);
+            tft.fillRoundRect(x + 4, FILTER_PANEL_Y + 4, FILTER_PANEL_W - 8, 22, 4, headerBG);
+            tft.setTextSize(1);
+            tft.setTextColor(isSelected ? COLOR_BG : COLOR_TEXT_DIM);
+            int nameLen = strlen(fxLabels[fx]);
+            tft.setCursor(x + (FILTER_PANEL_W - nameLen * 6) / 2, FILTER_PANEL_Y + 10);
+            tft.print(fxLabels[fx]);
+            
+            // Button indicator (S1-S3) con color
+            tft.setTextSize(1);
+            tft.setTextColor(isSelected ? fxColors[fx] : COLOR_TEXT_DIM);
+            tft.setCursor(x + 4, FILTER_PANEL_Y + 30);
+            tft.print(fxButtonLabels[fx]);
+            if (isSelected) {
+                tft.setTextColor(COLOR_WARNING);
+                tft.print(" ACTIVE");
+            }
+            
+            // Labels y potenciómetros
+            const char* pLabels[3] = {param1Labels[fx], param2Labels[fx], param3Labels[fx]};
+            const char* potLabels[] = {"POT1", "POT2", "POT3"};
+            
+            for (int p = 0; p < 3; p++) {
+                int py = FILTER_PANEL_Y + 42 + p * 42;
+                
+                // Label del parámetro
+                tft.setTextSize(1);
+                tft.setTextColor(isSelected ? COLOR_TEXT : tft.color565(80, 70, 90));
+                tft.setCursor(x + 6, py);
+                tft.print(pLabels[p]);
+                
+                if (isSelected) {
+                    tft.setTextColor(fxColors[fx]);
+                    tft.setCursor(x + 86, py);
+                    tft.print(potLabels[p]);
+                }
+                
+                // Barra de progreso (marco estático)
+                int barX = x + 6;
+                int barY = py + 12;
+                int barW = FILTER_PANEL_W - 16;
+                int barH = 10;
+                tft.fillRoundRect(barX, barY, barW, barH, 2, COLOR_NAVY);
+                tft.drawRoundRect(barX, barY, barW, barH, 2, isSelected ? COLOR_BORDER : tft.color565(25, 20, 35));
+                
+                // Rellenar con valor actual
+                int fillW = map(curParams[fx][p], 0, 127, 0, barW - 4);
+                if (fillW > 0) {
+                    uint16_t barColor = isSelected ? fxColors[fx] : tft.color565(40, 40, 50);
+                    tft.fillRect(barX + 2, barY + 2, fillW, barH - 4, barColor);
+                }
+                
+                // Valor numérico
+                tft.setTextSize(1);
+                tft.setTextColor(isSelected ? COLOR_TEXT : COLOR_TEXT_DIM);
+                tft.setCursor(barX + barW - 22, py + 1);
+                tft.printf("%3d", curParams[fx][p]);
+                
+                // Guardar en cache
+                lastFilterParams[fx][p] = curParams[fx][p];
+            }
+        }
+        
+        // Footer
+        tft.fillRect(0, 278, 480, 42, COLOR_PRIMARY);
+        tft.fillRect(0, 278, 480, 2, COLOR_ACCENT);
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_TEXT);
+        tft.setCursor(10, 286);
+        tft.print("ENC: Target");
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.print(" | ");
+        tft.setTextColor(COLOR_ACCENT2);
+        tft.print("S1-S3: FX");
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.print(" | ");
+        tft.setTextColor(COLOR_WARNING);
+        tft.print("S4: MASTER");
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.print(" | ");
+        tft.setTextColor(COLOR_SUCCESS);
+        tft.print("ENTER: ON/OFF");
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.print(" | ");
+        tft.setTextColor(COLOR_ERROR);
+        tft.print("BACK: Menu");
+        
+        tft.setTextColor(COLOR_ACCENT);
+        tft.setCursor(10, 300);
+        tft.print("KNOB1: Param1  KNOB2: Param2  KNOB3: Param3  (Live sync UDP)");
+        
+        // LEDs TM1638
+        setAllLEDs(0x0000);
+        if (filterSelectedTrack == -1) {
+            setAllLEDs(0xFFFF);
+        } else {
+            setLED(filterSelectedTrack, true);
+        }
+        
+        // Cache state
+        lastFilterTrackDisplay = filterSelectedTrack;
+        lastFilterFXDisplay = filterSelectedFX;
+        lastFilterEnabled = f.enabled;
+        needsFilterBarsUpdate = false;
+        filterScreenInitialized = true;
+    }
+}
+
+// ============================================
+// FILTER POTS HANDLING (3 analog pots -> 3 filter params)
+// ============================================
+void handleFilterPots() {
+    // En pantalla FILTERS: los 3 pots controlan parámetros del filtro seleccionado
+    // Pin 35 (ROTARY_ANGLE_PIN)  → Parámetro 1 (Mix/Rate/Threshold)
+    // Pin 39 (ROTARY_ANGLE_PIN2) → Parámetro 2 (Time/Depth/Ratio)
+    // Pin 36 (BPM_POT_PIN)       → Parámetro 3 (Feedback/Mix/Gain)
+    
+    static int adcF1Readings[5] = {0};
+    static int adcF2Readings[5] = {0};
+    static int adcF3Readings[5] = {0};
+    static int adcF1Index = 0, adcF2Index = 0, adcF3Index = 0;
+    static unsigned long lastF1Sent = 0, lastF2Sent = 0, lastF3Sent = 0;
+    static int lastFXForPots = -1;
+    static int lastTrackForPots = -99;
+    static int fillCycles = 0;        // Ciclos para llenar buffer ADC tras cambio
+    unsigned long now = millis();
+    
+    TrackFilter& f = (filterSelectedTrack == -1) ? masterFilter : trackFilters[filterSelectedTrack];
+    
+    // Si cambió el FX o Track, resetear buffers ADC y esperar unos ciclos
+    if (filterSelectedFX != lastFXForPots || filterSelectedTrack != lastTrackForPots) {
+        lastFXForPots = filterSelectedFX;
+        lastTrackForPots = filterSelectedTrack;
+        memset(adcF1Readings, 0, sizeof(adcF1Readings));
+        memset(adcF2Readings, 0, sizeof(adcF2Readings));
+        memset(adcF3Readings, 0, sizeof(adcF3Readings));
+        adcF1Index = adcF2Index = adcF3Index = 0;
+        fillCycles = 6;  // Esperar 6 ciclos (~600ms) para estabilizar lecturas
+        return;
+    }
+    
+    // Esperar a que el buffer ADC se llene con lecturas reales
+    if (fillCycles > 0) {
+        // Solo leer sin actuar (llenar el buffer averaging)
+        adcF1Readings[adcF1Index] = analogRead(ROTARY_ANGLE_PIN);
+        adcF1Index = (adcF1Index + 1) % 5;
+        adcF2Readings[adcF2Index] = analogRead(ROTARY_ANGLE_PIN2);
+        adcF2Index = (adcF2Index + 1) % 5;
+        adcF3Readings[adcF3Index] = analogRead(BPM_POT_PIN);
+        adcF3Index = (adcF3Index + 1) % 5;
+        fillCycles--;
+        if (fillCycles == 0) {
+            // Buffer lleno: sincronizar params con la posición real de los pots
+            // Esto evita el "salto" al primer movimiento
+            int s1 = 0, s2 = 0, s3 = 0;
+            for (int i = 0; i < 5; i++) { s1 += adcF1Readings[i]; s2 += adcF2Readings[i]; s3 += adcF3Readings[i]; }
+            // No escribir nada, solo marcar los valores para el hysteresis
+            lastF1Sent = now;
+            lastF2Sent = now;
+            lastF3Sent = now;
+        }
+        return;
+    }
+    
+    // Punteros a los 3 parámetros según el FX seleccionado
+    uint8_t* param1;
+    uint8_t* param2;
+    uint8_t* param3;
+    const char* p1Name;
+    const char* p2Name;
+    const char* p3Name;
+    
+    switch (filterSelectedFX) {
+        case FILTER_DELAY:
+            param1 = &f.delayMix;
+            param2 = &f.delayTime;
+            param3 = &f.delayFeedback;
+            p1Name = "Mix"; p2Name = "Time"; p3Name = "Feedback";
+            break;
+        case FILTER_FLANGER:
+            param1 = &f.flangerRate;
+            param2 = &f.flangerDepth;
+            param3 = &f.flangerMix;
+            p1Name = "Rate"; p2Name = "Depth"; p3Name = "Mix";
+            break;
+        case FILTER_COMPRESSOR:
+        default:
+            param1 = &f.compThreshold;
+            param2 = &f.compRatio;
+            param3 = &f.compGain;
+            p1Name = "Thresh"; p2Name = "Ratio"; p3Name = "Gain";
+            break;
+    }
+    
+    // --- POT 1: Parámetro 1 (pin 35) ---
+    int raw1 = analogRead(ROTARY_ANGLE_PIN);
+    adcF1Readings[adcF1Index] = raw1;
+    adcF1Index = (adcF1Index + 1) % 5;
+    int sum1 = 0;
+    for (int i = 0; i < 5; i++) sum1 += adcF1Readings[i];
+    int newVal1 = map(sum1 / 5, 0, 4095, 127, 0);
+    newVal1 = constrain(newVal1, 0, 127);
+    
+    if (abs(newVal1 - (int)*param1) > 2 && (now - lastF1Sent >= 80)) {
+        lastF1Sent = now;
+        *param1 = (uint8_t)newVal1;
+        sendFilterUDP(filterSelectedTrack, filterSelectedFX);
+        Serial.printf("► FX%d %s: %d\n", filterSelectedFX, p1Name, newVal1);
+        needsFilterBarsUpdate = true;
+    }
+    
+    // --- POT 2: Parámetro 2 (pin 39) ---
+    int raw2 = analogRead(ROTARY_ANGLE_PIN2);
+    adcF2Readings[adcF2Index] = raw2;
+    adcF2Index = (adcF2Index + 1) % 5;
+    int sum2 = 0;
+    for (int i = 0; i < 5; i++) sum2 += adcF2Readings[i];
+    int newVal2 = map(sum2 / 5, 0, 4095, 127, 0);
+    newVal2 = constrain(newVal2, 0, 127);
+    
+    if (abs(newVal2 - (int)*param2) > 2 && (now - lastF2Sent >= 80)) {
+        lastF2Sent = now;
+        *param2 = (uint8_t)newVal2;
+        sendFilterUDP(filterSelectedTrack, filterSelectedFX);
+        Serial.printf("► FX%d %s: %d\n", filterSelectedFX, p2Name, newVal2);
+        needsFilterBarsUpdate = true;
+    }
+    
+    // --- POT 3: Parámetro 3 (pin 36/BPM) ---
+    int raw3 = analogRead(BPM_POT_PIN);
+    adcF3Readings[adcF3Index] = raw3;
+    adcF3Index = (adcF3Index + 1) % 5;
+    int sum3 = 0;
+    for (int i = 0; i < 5; i++) sum3 += adcF3Readings[i];
+    int newVal3 = map(sum3 / 5, 0, 4095, 127, 0);
+    newVal3 = constrain(newVal3, 0, 127);
+    
+    if (abs(newVal3 - (int)*param3) > 2 && (now - lastF3Sent >= 80)) {
+        lastF3Sent = now;
+        *param3 = (uint8_t)newVal3;
+        sendFilterUDP(filterSelectedTrack, filterSelectedFX);
+        Serial.printf("► FX%d %s: %d\n", filterSelectedFX, p3Name, newVal3);
+        needsFilterBarsUpdate = true;
+    }
+}
+
+// ============================================
+// SEND FILTER STATE VIA UDP
+// ============================================
+void sendFilterUDP(int track, int filterType) {
+    if (!udpConnected) return;
+    
+    TrackFilter& f = (track == -1) ? masterFilter : trackFilters[track];
+    
+    if (track >= 0) {
+        // === PER-TRACK LIVE FX ===
+        JsonDocument doc;
+        switch (filterType) {
+            case FILTER_DELAY:
+                doc["cmd"] = "setTrackEcho";
+                doc["track"] = track;
+                doc["active"] = f.enabled;
+                doc["time"] = f.delayTime;
+                doc["feedback"] = f.delayFeedback;
+                doc["mix"] = f.delayMix;
+                break;
+            case FILTER_FLANGER:
+                doc["cmd"] = "setTrackFlanger";
+                doc["track"] = track;
+                doc["active"] = f.enabled;
+                doc["rate"] = f.flangerRate;
+                doc["depth"] = f.flangerDepth;
+                doc["feedback"] = f.flangerMix;
+                break;
+            case FILTER_COMPRESSOR:
+                doc["cmd"] = "setTrackCompressor";
+                doc["track"] = track;
+                doc["active"] = f.enabled;
+                doc["threshold"] = f.compThreshold;
+                doc["ratio"] = f.compRatio;
+                break;
+        }
+        sendUDPCommand(doc);
+        
+    } else {
+        // === MASTER EFFECTS ===
+        switch (filterType) {
+            case FILTER_DELAY: {
+                JsonDocument d1; d1["cmd"] = "setDelayActive"; d1["value"] = f.enabled; sendUDPCommand(d1);
+                JsonDocument d2; d2["cmd"] = "setDelayTime"; d2["value"] = f.delayTime; sendUDPCommand(d2);
+                JsonDocument d3; d3["cmd"] = "setDelayFeedback"; d3["value"] = f.delayFeedback; sendUDPCommand(d3);
+                JsonDocument d4; d4["cmd"] = "setDelayMix"; d4["value"] = f.delayMix; sendUDPCommand(d4);
+                break;
+            }
+            case FILTER_FLANGER: {
+                JsonDocument d1; d1["cmd"] = "setFlangerActive"; d1["value"] = f.enabled; sendUDPCommand(d1);
+                JsonDocument d2; d2["cmd"] = "setFlangerRate"; d2["value"] = f.flangerRate; sendUDPCommand(d2);
+                JsonDocument d3; d3["cmd"] = "setFlangerDepth"; d3["value"] = f.flangerDepth; sendUDPCommand(d3);
+                JsonDocument d4; d4["cmd"] = "setFlangerMix"; d4["value"] = f.flangerMix; sendUDPCommand(d4);
+                break;
+            }
+            case FILTER_COMPRESSOR: {
+                JsonDocument d1; d1["cmd"] = "setCompressorActive"; d1["value"] = f.enabled; sendUDPCommand(d1);
+                JsonDocument d2; d2["cmd"] = "setCompressorThreshold"; d2["value"] = f.compThreshold; sendUDPCommand(d2);
+                JsonDocument d3; d3["cmd"] = "setCompressorRatio"; d3["value"] = f.compRatio; sendUDPCommand(d3);
+                JsonDocument d4; d4["cmd"] = "setCompressorMakeupGain"; d4["value"] = f.compGain; sendUDPCommand(d4);
+                break;
+            }
+        }
+    }
+}
+
 void drawSyncingScreen() {
     // Pantalla de sincronización estilo RED808
     tft.fillScreen(COLOR_BG);
@@ -3836,6 +4412,27 @@ void changeScreen(Screen newScreen) {
         if (udpConnected) {
             requestPatternFromMaster();
         }
+    }
+    
+    // Si entramos a FILTERS, inicializar estado de pantalla
+    if (newScreen == SCREEN_FILTERS) {
+        filterScreenInitialized = false;
+        // Mostrar target actual en TM1638
+        if (filterSelectedTrack == -1) {
+            tm1.displayText("MASTER  ");
+            tm2.displayText("FX OUT  ");
+            setAllLEDs(0xFFFF);  // Todos LEDs = MASTER
+        } else {
+            tm1.displayText(trackNames[filterSelectedTrack]);
+            const char* fxNames[] = {"DELAY   ", "FLANGER ", "COMPRESS"};
+            tm2.displayText(fxNames[filterSelectedFX]);
+            setLED(filterSelectedTrack, true);
+        }
+    }
+    
+    // Resetear flag de volúmenes al salir
+    if (newScreen != SCREEN_VOLUMES) {
+        volumesScreenInitialized = false;
     }
 }
 

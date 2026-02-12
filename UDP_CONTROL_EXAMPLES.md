@@ -32,16 +32,34 @@
 | | **`setTrackVolume`** | **`track`, `volume` (0-100)** | **Volumen por track (NUEVO)** |
 | | **`getTrackVolume`** | **`track`** | **Obtener volumen de track (NUEVO)** |
 | | **`getTrackVolumes`** | **-** | **Obtener todos los volúmenes (NUEVO)** |
-| **FX** | `setFilter` | `type` (0-9) | Tipo de filtro global |
-| | `setFilterCutoff` | `value` (20-20000) | Frecuencia de corte (Hz) |
-| | `setFilterResonance` | `value` (0.1-10.0) | Resonancia del filtro |
-| | `setBitCrush` | `value` (1-16) | Bit depth |
-| | `setDistortion` | `value` (0.0-1.0) | Distorsión |
-| | `setSampleRate` | `value` (1000-44100) | Sample rate reduction |
-| | `setTrackFilter` | `track`, `filterType`, `cutoff`, `resonance`, `gain` | Filtro por track |
-| | `clearTrackFilter` | `track` | Eliminar filtro de track |
-| | `setPadFilter` | `pad`, `filterType`, `cutoff`, `resonance`, `gain` | Filtro por pad |
-| | `clearPadFilter` | `pad` | Eliminar filtro de pad |
+| **FX Globales** | `setFilter` | `type` (0-9) | Tipo de filtro global |
+| | `setFilterCutoff` | `value` (100-16000) | Frecuencia de corte (Hz) |
+| | `setFilterResonance` | `value` (0.5-20) | Resonancia del filtro |
+| | `setBitCrush` | `value` (4-16) | Bit depth |
+| | `setDistortion` | `value` (0-100) | Distorsión |
+| | `setDistortionMode` | `value` (0-3) | Mode: soft/hard/tube/fuzz |
+| | `setSampleRate` | `value` (8000-44100) | Sample rate reduction |
+| **Master Effects** | `setDelayActive` | `value` (bool) | Delay on/off |
+| | `setDelayTime` | `value` (0-127) | Delay time |
+| | `setDelayFeedback` | `value` (0-127) | Delay feedback |
+| | `setDelayMix` | `value` (0-127) | Delay mix |
+| | `setFlangerActive` | `value` (bool) | Flanger on/off |
+| | `setFlangerRate` | `value` (0-127) | Flanger rate |
+| | `setFlangerDepth` | `value` (0-127) | Flanger depth |
+| | `setFlangerMix` | `value` (0-127) | Flanger mix |
+| | `setCompressorActive` | `value` (bool) | Compresor on/off |
+| | `setCompressorThreshold` | `value` (0-127) | Threshold |
+| | `setCompressorRatio` | `value` (0-127) | Ratio |
+| | `setCompressorMakeupGain` | `value` (0-127) | Makeup gain |
+| **Per-Track FX** | `setTrackFilter` | `track`, `type`, `cutoff?`, `resonance?` | Filtro per-track |
+| | `clearTrackFilter` | `track` | Limpiar filtro track |
+| | `setTrackDistortion` | `track`, `amount`, `mode?` | Distortion per-track |
+| | `setTrackBitCrush` | `track`, `value` | BitCrush per-track |
+| | `clearTrackFX` | `track` | Limpiar FX track |
+| **Per-Track Live FX** | `setTrackEcho` | `track`, `active`, `time`, `feedback`, `mix` | Echo per-track |
+| | `setTrackFlanger` | `track`, `active`, `rate`, `depth`, `feedback` | Flanger per-track |
+| | `setTrackCompressor` | `track`, `active`, `threshold`, `ratio` | Compressor per-track |
+| | `clearTrackLiveFX` | `track` | Limpiar live FX track |
 | **Samples** | `loadSample` | `family`, `filename`, `pad` | Cargar sample en pad |
 | **LED** | `setLedMonoMode` | `value` (bool) | Modo mono LED |
 | **Sync** | `get_pattern` | `pattern` (opcional) | Solicitar patrón |

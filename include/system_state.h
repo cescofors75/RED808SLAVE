@@ -26,7 +26,8 @@ enum Screen {
     SCREEN_SETTINGS,
     SCREEN_DIAGNOSTICS,
     SCREEN_PATTERNS,
-    SCREEN_VOLUMES
+    SCREEN_VOLUMES,
+    SCREEN_FILTERS
 };
 
 enum DisplayMode {
@@ -53,6 +54,30 @@ enum EncoderMode {
     ENC_MODE_PITCH,       // Pitch/velocidad
     ENC_MODE_PAN,         // Paneo (futuro)
     ENC_MODE_EFFECT       // Efecto (futuro)
+};
+
+// ============================================
+// FILTER FX TYPES
+// ============================================
+enum FilterType {
+    FILTER_DELAY = 0,     // Delay/Echo
+    FILTER_FLANGER,       // Flanger
+    FILTER_COMPRESSOR,    // Compressor
+    FILTER_COUNT          // Total = 3
+};
+
+// Estructura para un filtro FX aplicado a un track
+struct TrackFilter {
+    bool enabled;            // Filtro activo
+    uint8_t delayMix;        // Delay/Echo: dry/wet mix (0-127)
+    uint8_t delayTime;       // Delay/Echo: tiempo ms mapeado (0-127)
+    uint8_t delayFeedback;   // Delay/Echo: feedback (0-127)
+    uint8_t flangerRate;     // Flanger: velocidad LFO (0-127)
+    uint8_t flangerDepth;    // Flanger: profundidad (0-127)
+    uint8_t flangerMix;      // Flanger: dry/wet (0-127)
+    uint8_t compThreshold;   // Compressor: umbral (0-127)
+    uint8_t compRatio;       // Compressor: ratio (0-127)
+    uint8_t compGain;        // Compressor: makeup gain (0-127)
 };
 
 #endif // SYSTEM_STATE_H
