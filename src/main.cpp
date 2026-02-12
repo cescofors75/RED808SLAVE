@@ -379,6 +379,8 @@ void sendUDPCommand(const char* cmd);
 void sendUDPCommand(JsonDocument& doc);
 void receiveUDPData();
 void requestPatternFromMaster();
+bool attemptWiFiConnect(int maxWaitMs);
+void checkWiFiReconnect();
 void drawConsoleBootScreen();
 void drawSpectrumAnimation();
 void drawMainMenu();
@@ -497,6 +499,40 @@ void printReceivedPattern(int patternNum) {
 // ============================================
 // UDP COMMUNICATION FUNCTIONS
 // ============================================
+
+// Función de reconexión WiFi (usada en setup y en loop para auto-reconnect)
+bool attemptWiFiConnect(int maxWaitMs = 12000) {
+    Serial.println("[WiFi] Attempting connection...");
+    
+    // Limpiar estado previo para evitar problemas residuales
+    WiFi.disconnect(true);  // true = borrar credenciales guardadas
+    delay(100);
+    
+    // Configurar modo y optimizaciones ANTES de conectar
+    WiFi.mode(WIFI_STA);
+    WiFi.persistent(false);        // No guardar en flash (evita desgaste y delays)
+    WiFi.setAutoReconnect(true);   // Reconexión automática del stack WiFi
+    WiFi.setSleep(false);          // Desactivar power-save (reduce latencia y drops)
+    
+    // Iniciar conexión
+    WiFi.begin(ssid, password);
+    
+    // Esperar conexión con timeout
+    unsigned long startTime = millis();
+    int dots = 0;
+    while (WiFi.status() != WL_CONNECTED && (millis() - startTime) < (unsigned long)maxWaitMs) {
+        delay(250);  // Polling más rápido que 500ms
+        Serial.print(".");
+        dots++;
+        if (dots % 20 == 0) {
+            Serial.printf(" %lums/%dms (status:%d)\n", millis() - startTime, maxWaitMs, WiFi.status());
+        }
+    }
+    Serial.println();
+    
+    return (WiFi.status() == WL_CONNECTED);
+}
+
 void setupWiFiAndUDP() {
     Serial.println("\n╔════════════════════════════════════╗");
     Serial.println("║   CONNECTING TO MASTER (WiFi UDP)  ║");
@@ -505,55 +541,22 @@ void setupWiFiAndUDP() {
     Serial.printf("  Master IP: %s\n", masterIP);
     Serial.printf("  UDP Port: %d\n", udpPort);
     
-    // PASO 1: Escanear redes WiFi disponibles
-    Serial.println("\n[1/3] Scanning WiFi networks...");
-    int n = WiFi.scanNetworks();
-    Serial.printf("  Found %d networks:\n", n);
+    // PASO 1: Conectar al MASTER directamente (sin scan previo = 3-5 seg más rápido)
+    // El scan es innecesario porque ya conocemos el SSID
+    Serial.println("\n[1/2] Connecting to MASTER...");
     
-    bool masterFound = false;
-    for (int i = 0; i < n; i++) {
-        String foundSSID = WiFi.SSID(i);
-        int32_t rssi = WiFi.RSSI(i);
-        Serial.printf("    %d: %s (RSSI: %d)%s\n", 
-                     i + 1, foundSSID.c_str(), rssi,
-                     (foundSSID == ssid) ? " ← MASTER!" : "");
-        if (foundSSID == ssid) {
-            masterFound = true;
-            Serial.printf("  ✓ MASTER '%s' is visible! Signal: %d dBm\n", ssid, rssi);
-        }
-    }
+    bool connected = attemptWiFiConnect(12000);  // 12 segundos timeout
     
-    if (!masterFound) {
-        Serial.printf("  ✗ WARNING: MASTER '%s' NOT FOUND in scan!\n", ssid);
-        Serial.println("    Check if MASTER is powered on and AP is active.");
-    }
-    
-    // PASO 2: Intentar conectar al MASTER
-    Serial.println("\n[2/3] Connecting to MASTER...");
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, password);
-    
-    // Esperar hasta 15 segundos (30 intentos x 500ms)
-    int attempts = 0;
-    int maxAttempts = 16;  // 8 segundos total (arranque más rápido)
-    while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
-        delay(500);
-        Serial.print(".");
-        if (attempts % 10 == 9) {
-            Serial.printf(" %d/%ds\n", (attempts + 1) / 2, maxAttempts / 2);
-        }
-        attempts++;
-    }
-    
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\n✓ WiFi connected!");
+    if (connected) {
+        Serial.println("✓ WiFi connected!");
         Serial.print("  IP Address: ");
         Serial.println(WiFi.localIP());
         Serial.printf("  Signal strength: %d dBm\n", WiFi.RSSI());
+        Serial.printf("  Channel: %d\n", WiFi.channel());
         Serial.printf("  MAC Address: %s\n", WiFi.macAddress().c_str());
         
-        // PASO 3: Inicializar UDP y enviar hello
-        Serial.println("\n[3/3] Initializing UDP communication...");
+        // PASO 2: Inicializar UDP y enviar hello
+        Serial.println("\n[2/2] Initializing UDP communication...");
         udp.begin(udpPort);
         udpConnected = true;
         diagnostic.udpConnected = true;
@@ -566,41 +569,96 @@ void setupWiFiAndUDP() {
         
         Serial.println("✓ UDP initialized - Ready to send commands");
         
-        // Sonido de confirmación al conectar: reproducir 3 samples rápidos
-        for (int i = 0; i < 3; i++) {
-            // Enviar comando para reproducir CLAP (sample 4)
+        // Sonido de confirmación (1 solo trigger, no 3 con delays)
+        {
             JsonDocument triggerDoc;
             triggerDoc["cmd"] = "trigger";
             triggerDoc["track"] = 4;  // CLAP
             sendUDPCommand(triggerDoc);
-            delay(100);
         }
         Serial.println("♪ Connection confirmed with audio feedback");
         
         // Solicitar patrón actual al MASTER automáticamente
-        delay(100);  // Dar tiempo al MASTER para procesar hello
+        delay(50);
         requestPatternFromMaster();
         Serial.println("► Auto-requesting pattern from MASTER...");
     } else {
-        Serial.println("\n✗ WiFi connection FAILED");
-        Serial.printf("  Attempts: %d/%d (%.1f seconds)\n", attempts, maxAttempts, attempts * 0.5);
+        Serial.println("✗ WiFi connection FAILED");
         Serial.printf("  WiFi Status: %d\n", WiFi.status());
+        
+        // Hacer scan SOLO si falló, para diagnóstico
+        Serial.println("  Scanning networks for diagnostics...");
+        int n = WiFi.scanNetworks(false, false, false, 300);  // Scan rápido 300ms/canal
+        bool masterFound = false;
+        for (int i = 0; i < n; i++) {
+            String foundSSID = WiFi.SSID(i);
+            Serial.printf("    %d: %s (RSSI: %d)\n", i + 1, foundSSID.c_str(), WiFi.RSSI(i));
+            if (foundSSID == ssid) masterFound = true;
+        }
+        WiFi.scanDelete();  // Liberar memoria del scan
+        
         Serial.println("\n  TROUBLESHOOTING:");
         if (!masterFound) {
-            Serial.println("    → MASTER not detected in WiFi scan");
-            Serial.println("    → Verify MASTER device is powered ON");
-            Serial.println("    → Check MASTER has WiFi AP active");
+            Serial.println("    -> MASTER not detected in WiFi scan");
+            Serial.println("    -> Verify MASTER device is powered ON");
         } else {
-            Serial.println("    → MASTER detected but connection failed");
-            Serial.println("    → Check WiFi password is correct");
-            Serial.println("    → Try moving devices closer together");
-            Serial.println("    → Check MASTER is not overloaded");
+            Serial.println("    -> MASTER visible but connection failed");
+            Serial.println("    -> Check WiFi password");
+            Serial.println("    -> Try moving devices closer");
         }
-        Serial.println("  Conexión manual desde SETTINGS > S3\n");
+        Serial.println("  Will auto-retry every 10 seconds in background\n");
         udpConnected = false;
         diagnostic.udpConnected = false;
         diagnostic.lastError = masterFound ? "Connection timeout" : "Master not found";
-        lastUdpCheck = millis();  // Iniciar timer de reintento
+        lastUdpCheck = millis();
+    }
+}
+
+// Reconexión automática en background (llamar desde loop)
+void checkWiFiReconnect() {
+    unsigned long now = millis();
+    
+    // Si ya está conectado, verificar que siga vivo
+    if (udpConnected) {
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("✗ WiFi LOST! Marking as disconnected.");
+            udpConnected = false;
+            diagnostic.udpConnected = false;
+            diagnostic.lastError = "WiFi disconnected";
+            lastUdpCheck = now;
+        }
+        return;
+    }
+    
+    // Reintentar cada 10 segundos (no bloquear mucho el loop)
+    if (now - lastUdpCheck < 10000) return;
+    lastUdpCheck = now;
+    
+    Serial.println("\n► Auto-reconnecting to MASTER...");
+    
+    if (attemptWiFiConnect(5000)) {  // 5 seg timeout en reintentos (más corto)
+        Serial.println("✓ Reconnected to MASTER!");
+        Serial.printf("  IP: %s  RSSI: %d dBm\n", 
+                      WiFi.localIP().toString().c_str(), WiFi.RSSI());
+        
+        udp.begin(udpPort);
+        udpConnected = true;
+        diagnostic.udpConnected = true;
+        diagnostic.lastError = "";
+        
+        // Enviar hello
+        JsonDocument doc;
+        doc["cmd"] = "hello";
+        doc["device"] = "SURFACE";
+        sendUDPCommand(doc);
+        
+        // Solicitar patrón
+        delay(50);
+        requestPatternFromMaster();
+        
+        needsHeaderUpdate = true;
+    } else {
+        Serial.printf("  Retry failed (status: %d). Next retry in 10s\n", WiFi.status());
     }
 }
 
@@ -1141,6 +1199,9 @@ void loop() {
     if (udpConnected) {
         receiveUDPData();
     }
+    
+    // Auto-reconexión WiFi si se perdió o falló en boot
+    checkWiFiReconnect();
     
     updateAudioVisualization();
     
