@@ -101,8 +101,8 @@ namespace Config {
 
 // Rotary Encoder
 #ifndef ENCODER_CLK
-  #define ENCODER_CLK 12   // Cambiado de 15 para test
-  #define ENCODER_DT  14   // Cambiado de 16 para test
+  #define ENCODER_CLK 15   // GPIO15 - libre y seguro para WiFi
+  #define ENCODER_DT  14
   #define ENCODER_SW  13
 #endif
 
