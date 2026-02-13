@@ -300,6 +300,8 @@ int savedSeqVolume = -1;    // -1 = no guardado
 int savedPadVolume = -1;
 int savedBPM = -1;
 unsigned long potGraceUntil = 0;  // Ignorar pots hasta este timestamp
+bool potAlignmentActive = false;  // Pantalla de alineación de pots activa
+bool potAlignmentDrawn = false;   // Pantalla dibujada (evitar redibujado completo)
 
 // Lectura ADC compartida (una sola lectura por loop para todos los handlers)
 int currentADCValue = 0;
@@ -406,6 +408,7 @@ void drawDiagnosticsScreen();
 void drawPatternsScreen();
 void drawVolumesScreen();  // Pantalla de volúmenes
 void drawFiltersScreen();  // Pantalla de filtros FX
+void drawPotAlignmentScreen();  // Pantalla de alineación de pots post-FILTERS
 void drawFilterPanel(int fx, bool isSelected, uint8_t params[3]);  // Panel individual
 void drawFilterTitleBar();  // Barra de título FILTERS
 void handleFilterPots();   // Control de filtros via potenciómetros
@@ -1237,7 +1240,10 @@ void loop() {
     handleBackButton();
     
     if (currentTime - lastVolumeRead > 100) {
-        if (currentScreen == SCREEN_FILTERS) {
+        if (potAlignmentActive) {
+            // Pantalla de alineación: leer pots y comprobar si coinciden
+            drawPotAlignmentScreen();
+        } else if (currentScreen == SCREEN_FILTERS) {
             handleFilterPots();  // En FILTERS, los pots controlan parámetros FX
         } else if (currentTime > potGraceUntil) {
             // Solo leer vol/BPM si pasó el período de gracia post-FILTERS
@@ -1941,7 +1947,17 @@ void handleBackButton() {
         }
         // Desde cualquier otra pantalla: volver al menú
         else {
-            changeScreen(SCREEN_MENU);
+            // Desde FILTERS: activar pantalla de alineación de pots
+            if (currentScreen == SCREEN_FILTERS && savedSeqVolume >= 0) {
+                potAlignmentActive = true;
+                potAlignmentDrawn = false;
+                currentScreen = SCREEN_MENU;  // Marcar como menú para evitar handleFilterPots
+                tm1.displayText("ALIGN   ");
+                tm2.displayText("  POTS  ");
+                Serial.println("► POT ALIGNMENT: Move pots to saved positions");
+            } else {
+                changeScreen(SCREEN_MENU);
+            }
         }
     }
     lastBackPressed = backPressed;
@@ -4339,6 +4355,225 @@ void sendFilterUDP(int track, int filterType) {
     }
 }
 
+// ============================================
+// POT ALIGNMENT SCREEN - Alinear pots tras salir de FILTERS
+// ============================================
+void drawPotAlignmentScreen() {
+    // Cache para evitar redibujados innecesarios
+    static int lastCur[3] = {-999, -999, -999};
+    static bool lastAligned[3] = {false, false, false};
+    static int lastRemaining = -1;
+    
+    // Leer valores actuales de los 3 pots (promedio 3 lecturas)
+    int rawSeq = (analogRead(ROTARY_ANGLE_PIN) + analogRead(ROTARY_ANGLE_PIN) + analogRead(ROTARY_ANGLE_PIN)) / 3;
+    int rawPad = (analogRead(ROTARY_ANGLE_PIN2) + analogRead(ROTARY_ANGLE_PIN2) + analogRead(ROTARY_ANGLE_PIN2)) / 3;
+    int rawBpm = (analogRead(BPM_POT_PIN) + analogRead(BPM_POT_PIN) + analogRead(BPM_POT_PIN)) / 3;
+    
+    int curSeq = map(rawSeq, 0, 4095, MAX_VOLUME, 0);
+    int curPad = map(rawPad, 0, 4095, MAX_VOLUME, 0);
+    int curBpm = map(rawBpm, 0, 4095, MAX_BPM, MIN_BPM);
+    curBpm = constrain(curBpm, MIN_BPM, MAX_BPM);
+    
+    // Tolerancia para considerar "alineado"
+    const int VOL_TOLERANCE = 2;
+    const int BPM_TOLERANCE = 2;
+    
+    bool seqOk = abs(curSeq - savedSeqVolume) <= VOL_TOLERANCE;
+    bool padOk = abs(curPad - savedPadVolume) <= VOL_TOLERANCE;
+    bool bpmOk = abs(curBpm - savedBPM) <= BPM_TOLERANCE;
+    
+    int currents[] = {curSeq, curPad, curBpm};
+    bool aligned[] = {seqOk, padOk, bpmOk};
+    
+    // Primera vez: dibujar pantalla completa
+    if (!potAlignmentDrawn) {
+        potAlignmentDrawn = true;
+        lastCur[0] = lastCur[1] = lastCur[2] = -999;
+        lastAligned[0] = lastAligned[1] = lastAligned[2] = false;
+        lastRemaining = -1;
+        
+        tft.fillScreen(COLOR_BG);
+        
+        // Header
+        tft.fillRect(0, 0, 480, 48, COLOR_NAVY);
+        tft.drawFastHLine(0, 48, 480, COLOR_ACCENT);
+        tft.setTextSize(3);
+        tft.setTextColor(COLOR_TEXT);
+        tft.setCursor(60, 10);
+        tft.print("ALIGN POTS");
+        
+        // Subtítulo
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_WARNING);
+        tft.setCursor(100, 56);
+        tft.print("Move potentiometers to match saved positions");
+        
+        // Labels + targets (estáticos, solo una vez)
+        const char* potNames[] = {"SEQ VOLUME", "PAD VOLUME", "BPM"};
+        const int labelY[] = {85, 155, 225};
+        const int potY[] = {108, 178, 248};
+        int targets[] = {savedSeqVolume, savedPadVolume, savedBPM};
+        
+        for (int p = 0; p < 3; p++) {
+            tft.setTextSize(2);
+            tft.setTextColor(COLOR_TEXT);
+            tft.setCursor(20, labelY[p]);
+            tft.print(potNames[p]);
+            
+            // Target value (estático)
+            tft.setTextSize(1);
+            tft.setTextColor(COLOR_TEXT);
+            tft.setCursor(20 + 440 - 80, potY[p] + 24 + 3);
+            if (p < 2) {
+                tft.printf("TARGET: %d%%", targets[p]);
+            } else {
+                tft.printf("TARGET: %d", targets[p]);
+            }
+            
+            // Borde de barra (estático)
+            tft.fillRoundRect(20, potY[p], 440, 24, 4, COLOR_NAVY);
+            tft.drawRoundRect(20, potY[p], 440, 24, 4, COLOR_BORDER);
+            
+            // Marcador del target (estático)
+            int targetPos = map(targets[p], (p < 2 ? 0 : (int)MIN_BPM), (p < 2 ? (int)MAX_VOLUME : (int)MAX_BPM), 0, 436);
+            targetPos = constrain(targetPos, 0, 436);
+            tft.fillRect(22 + targetPos - 1, potY[p] - 2, 3, 28, COLOR_TEXT);
+        }
+        
+        // Footer estático
+        tft.fillRect(0, 288, 480, 32, COLOR_PRIMARY);
+        tft.fillRect(0, 288, 480, 2, COLOR_ACCENT);
+    }
+    
+    // === ACTUALIZACIÓN PARCIAL: solo lo que cambió ===
+    const int barX = 20;
+    const int barW = 440;
+    const int barH = 24;
+    const int potY[] = {108, 178, 248};
+    const uint16_t potColors[] = {COLOR_ACCENT2, COLOR_INST_TOMHI, COLOR_WARNING};
+    int targets[] = {savedSeqVolume, savedPadVolume, savedBPM};
+    int maxVals[] = {(int)MAX_VOLUME, (int)MAX_VOLUME, (int)MAX_BPM};
+    int minVals[] = {0, 0, (int)MIN_BPM};
+    
+    for (int p = 0; p < 3; p++) {
+        // Solo redibujar si el valor cambió (histéresis ±1)
+        if (abs(currents[p] - lastCur[p]) < 2 && aligned[p] == lastAligned[p]) continue;
+        
+        lastCur[p] = currents[p];
+        bool stateChanged = (aligned[p] != lastAligned[p]);
+        lastAligned[p] = aligned[p];
+        
+        int targetPos = map(targets[p], minVals[p], maxVals[p], 0, barW - 4);
+        int currentPos = map(currents[p], minVals[p], maxVals[p], 0, barW - 4);
+        targetPos = constrain(targetPos, 0, barW - 4);
+        currentPos = constrain(currentPos, 0, barW - 4);
+        
+        // Interior de la barra (rellenar + limpiar)
+        uint16_t barColor = aligned[p] ? COLOR_SUCCESS : potColors[p];
+        if (currentPos > 0) {
+            tft.fillRect(barX + 2, potY[p] + 2, currentPos, barH - 4, barColor);
+        }
+        if (currentPos < barW - 4) {
+            tft.fillRect(barX + 2 + currentPos, potY[p] + 2, barW - 4 - currentPos, barH - 4, COLOR_NAVY);
+        }
+        
+        // Re-dibujar marcador target (puede haber sido tapado por la barra)
+        int targetX = barX + 2 + targetPos;
+        tft.fillRect(targetX - 1, potY[p] - 2, 3, barH + 4, COLOR_TEXT);
+        
+        // Borde de barra (solo si cambió estado)
+        if (stateChanged) {
+            tft.drawRoundRect(barX, potY[p], barW, barH, 4, aligned[p] ? COLOR_SUCCESS : COLOR_BORDER);
+        }
+        
+        // Valor numérico NOW (limpiar zona + escribir)
+        tft.fillRect(barX, potY[p] + barH + 2, 120, 14, COLOR_BG);
+        tft.setTextSize(1);
+        tft.setTextColor(aligned[p] ? COLOR_SUCCESS : potColors[p]);
+        tft.setCursor(barX, potY[p] + barH + 3);
+        if (p < 2) {
+            tft.printf("NOW: %d%%", currents[p]);
+        } else {
+            tft.printf("NOW: %d BPM", currents[p]);
+        }
+        
+        // Indicador OK/MOVE (solo si cambió estado)
+        if (stateChanged) {
+            tft.fillRect(barX + barW - 90, potY[p] - 25, 90, 20, COLOR_BG);
+            tft.setTextSize(2);
+            if (aligned[p]) {
+                tft.setTextColor(COLOR_SUCCESS);
+                tft.setCursor(barX + barW - 40, potY[p] - 23);
+                tft.print("OK");
+            } else {
+                tft.setTextColor(COLOR_ERROR);
+                tft.setCursor(barX + barW - 80, potY[p] - 23);
+                tft.print("MOVE");
+            }
+        }
+    }
+    
+    // Status global (solo si cambió el conteo)
+    int remaining = (!seqOk ? 1 : 0) + (!padOk ? 1 : 0) + (!bpmOk ? 1 : 0);
+    if (remaining != lastRemaining) {
+        lastRemaining = remaining;
+        tft.fillRect(0, 290, 480, 28, COLOR_PRIMARY);
+        tft.setTextSize(2);
+        if (remaining == 0) {
+            tft.setTextColor(COLOR_SUCCESS);
+            tft.setCursor(120, 298);
+            tft.print("ALL ALIGNED!");
+        } else {
+            tft.setTextColor(COLOR_WARNING);
+            tft.setCursor(60, 298);
+            tft.printf("ALIGN %d POT%s TO CONTINUE", remaining, remaining > 1 ? "S" : "");
+        }
+    }
+    
+    // Si todos alineados → restaurar valores y saltar al menú
+    if (seqOk && padOk && bpmOk) {
+        delay(400);  // Breve pausa para que el usuario vea "ALL ALIGNED!"
+        
+        // Restaurar valores exactos guardados
+        sequencerVolume = savedSeqVolume;
+        lastSequencerVolume = savedSeqVolume;
+        livePadsVolume = savedPadVolume;
+        lastLivePadsVolume = savedPadVolume;
+        tempo = savedBPM;
+        calculateStepInterval();
+        
+        // Re-enviar al MASTER
+        if (udpConnected) {
+            JsonDocument doc;
+            doc["cmd"] = "setSequencerVolume";
+            doc["value"] = sequencerVolume;
+            sendUDPCommand(doc);
+            doc.clear();
+            doc["cmd"] = "setLiveVolume";
+            doc["value"] = min((int)(livePadsVolume * 1.25), (int)MAX_VOLUME);
+            sendUDPCommand(doc);
+            doc.clear();
+            doc["cmd"] = "tempo";
+            doc["value"] = tempo;
+            sendUDPCommand(doc);
+        }
+        
+        Serial.printf("► ALIGNED! Restored SeqVol=%d%% PadVol=%d%% BPM=%d\n",
+                      sequencerVolume, livePadsVolume, tempo);
+        
+        // Limpiar estado
+        savedSeqVolume = -1;
+        savedPadVolume = -1;
+        savedBPM = -1;
+        potAlignmentActive = false;
+        potAlignmentDrawn = false;
+        potGraceUntil = millis() + 500;  // Pequeña gracia extra
+        
+        // Ir al menú
+        changeScreen(SCREEN_MENU);
+    }
+}
+
 void drawSyncingScreen() {
     // Pantalla de sincronización estilo RED808
     tft.fillScreen(COLOR_BG);
@@ -4502,41 +4737,8 @@ void changeScreen(Screen newScreen) {
         }
     }
     
-    // Si SALIMOS de FILTERS, restaurar valores guardados
-    if (newScreen != SCREEN_FILTERS && savedSeqVolume >= 0) {
-        sequencerVolume = savedSeqVolume;
-        lastSequencerVolume = savedSeqVolume;
-        livePadsVolume = savedPadVolume;
-        lastLivePadsVolume = savedPadVolume;
-        tempo = savedBPM;
-        calculateStepInterval();
-        
-        // Re-enviar valores restaurados al MASTER
-        if (udpConnected) {
-            JsonDocument doc;
-            doc["cmd"] = "setSequencerVolume";
-            doc["value"] = sequencerVolume;
-            sendUDPCommand(doc);
-            doc.clear();
-            doc["cmd"] = "setLiveVolume";
-            doc["value"] = min((int)(livePadsVolume * 1.25), (int)MAX_VOLUME);
-            sendUDPCommand(doc);
-            doc.clear();
-            doc["cmd"] = "tempo";
-            doc["value"] = tempo;
-            sendUDPCommand(doc);
-        }
-        
-        Serial.printf("► FX EXIT: Restored SeqVol=%d%% PadVol=%d%% BPM=%d\n",
-                      sequencerVolume, livePadsVolume, tempo);
-        savedSeqVolume = -1;  // Marcar como ya restaurado
-        savedPadVolume = -1;
-        savedBPM = -1;
-        
-        // Período de gracia: ignorar pots 1 segundo para que no sobreescriban
-        potGraceUntil = millis() + 1000;
-        needsHeaderUpdate = true;
-    }
+    // NOTA: La restauración de vol/BPM al salir de FILTERS ahora se hace
+    // en drawPotAlignmentScreen() tras alinear los pots físicamente.
     
     // Resetear flag de volúmenes al salir
     if (newScreen != SCREEN_VOLUMES) {
