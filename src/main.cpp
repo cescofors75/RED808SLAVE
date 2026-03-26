@@ -143,6 +143,15 @@ const ColorTheme* activeTheme = &THEME_RED808;
 #define COLOR_INST_TOMLO   0x07E0  // Verde - Tom Low
 #define COLOR_INST_TOMHI   0x3E7F  // Verde agua - Tom High
 #define COLOR_INST_CYMBAL  0x4A7F  // Azul claro - Cymbal
+// Colores para tracks 9-16
+#define COLOR_INST_PERC1   0xFC00  // Naranja oscuro - Percussion 1
+#define COLOR_INST_PERC2   0xAFE0  // Lima - Percussion 2
+#define COLOR_INST_SHAKER  0x5BFF  // Azul medio - Shaker
+#define COLOR_INST_COWBELL 0xFBE0  // Dorado - Cowbell
+#define COLOR_INST_RIDE    0x9C1F  // Púrpura claro - Ride
+#define COLOR_INST_CONGA   0xFB80  // Salmón - Conga
+#define COLOR_INST_BONGO   0x4FE0  // Verde lima - Bongo
+#define COLOR_INST_EXTRA   0xBDFF  // Celeste - Extra
 
 // ============================================
 // ENUMS (moved to system_state.h)
@@ -189,7 +198,10 @@ struct DiagnosticInfo {
 TFT_eSPI tft = TFT_eSPI();
 TM1638plus tm1(TM1638_1_STB, TM1638_1_CLK, TM1638_1_DIO, true);
 TM1638plus tm2(TM1638_2_STB, TM1638_2_CLK, TM1638_2_DIO, true);
-M5ROTATE8 m5encoder(Config::M5_ENCODER_ADDR);  // M5 8ENCODER module
+M5ROTATE8 m5encoders[Config::M5_ENCODER_MODULES] = {
+    M5ROTATE8(Config::M5_ENCODER_ADDR_1),
+    M5ROTATE8(Config::M5_ENCODER_ADDR_2)
+};
 // RotaryEncoder encoder(ENCODER_CLK, ENCODER_DT, RotaryEncoder::LatchMode::TWO03);
 
 // GLOBAL VARIABLES
@@ -227,7 +239,7 @@ volatile bool encoderChanged = false;
 EncoderMode encoderMode = ENC_MODE_VOLUME;
 
 // Audio State
-int trackVolumes[MAX_TRACKS] = {100, 100, 100, 100, 100, 100, 100, 100};
+int trackVolumes[MAX_TRACKS] = {100,100,100,100,100,100,100,100,100,100,100,100,100,100,100,100};
 bool trackMuted[MAX_TRACKS] = {false};
 
 // Network State
@@ -254,10 +266,13 @@ static uint8_t encoderState = 0;
 static const int8_t encoderStates[] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
 
 // M5 8ENCODER variables
-bool m5encoderConnected = false;
-uint8_t encoderLEDColors[8][3] = {{0}};  // RGB colors for each encoder LED
+bool m5encoderConnected = false;  // Compatibilidad: true si al menos un módulo está conectado
+bool m5encoderModuleConnected[Config::M5_ENCODER_MODULES] = {false, false};
+uint8_t encoderLEDColors[MAX_TRACKS][3] = {{0}};  // RGB de cada track (0-15)
 unsigned long lastEncoderRead = 0;
-unsigned long lastM5ButtonTime[8] = {0};  // Debounce para botones de encoders
+unsigned long lastM5ButtonTime[MAX_TRACKS] = {0};  // Debounce por track
+bool lastM5SwitchState[Config::M5_ENCODER_MODULES] = {false, false};
+unsigned long lastM5SwitchTime[Config::M5_ENCODER_MODULES] = {0};
 
 // Volume control - DUAL MODE (Sequencer / Live Pads)
 // enum VolumeMode definido en system_state.h
@@ -272,18 +287,19 @@ unsigned long lastVolumeRead = 0;
 // Variables para optimizar pantalla VOLUMES (evitar parpadeo)
 int lastSeqVolDisplay = -1;
 int lastLiveVolDisplay = -1;
-int lastTrackVolDisplay[8] = {-1,-1,-1,-1,-1,-1,-1,-1};
-bool lastTrackMuteDisplay[8] = {false,false,false,false,false,false,false,false};
+int lastTrackVolDisplay[MAX_TRACKS] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+bool lastTrackMuteDisplay[MAX_TRACKS] = {false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false};
 VolumeMode lastVolModeDisplay = VOL_SEQUENCER;
 bool volumesScreenInitialized = false;  // Flag para saber si ya se dibujó todo
 unsigned long lastVolumesUpdate = 0;    // Throttling temporal
+int volumesPage = 0;                    // 0 = tracks 1-8, 1 = tracks 9-16
 
 // ============================================
 // FILTER FX STATE
 // ============================================
 TrackFilter trackFilters[MAX_TRACKS];  // Filtros por track
 TrackFilter masterFilter;             // Filtro para MASTER OUT (salida global)
-int filterSelectedTrack = -1;         // -1 = MASTER OUT, 0-7 = tracks individuales
+int filterSelectedTrack = -1;         // -1 = MASTER OUT, 0-15 = tracks individuales
 int filterSelectedFX = 0;             // Filtro FX seleccionado (0=DELAY, 1=FLANGER, 2=COMPRESSOR)
 bool filterScreenInitialized = false; // Flag para primer dibujo
 bool needsFilterBarsUpdate = false;   // Flag para actualizar SOLO barras (sin full redraw)
@@ -304,12 +320,12 @@ unsigned long potGraceUntil = 0;  // Ignorar pots hasta este timestamp
 // Lectura ADC compartida (una sola lectura por loop para todos los handlers)
 int currentADCValue = 0;
 
-unsigned long ledOffTime[8] = {0};  // 8 LEDs (simplificado)
-bool ledActive[8] = {false};         // 8 LEDs (simplificado)
+unsigned long ledOffTime[16] = {0};  // 16 LEDs (2 x TM1638)
+bool ledActive[16] = {false};         // 16 LEDs
 
-int audioLevels[8] = {0};
-bool padPressed[8] = {false};  // 8 pads presionados (simplificado)
-unsigned long padPressTime[8] = {0};  // Tiempo de presión para tremolo (8 pads)
+int audioLevels[16] = {0};
+bool padPressed[16] = {false};  // 16 pads presionados
+unsigned long padPressTime[16] = {0};  // Tiempo de presión para tremolo (16 pads)
 unsigned long lastVizUpdate = 0;
 
 DisplayMode currentDisplayMode = DISPLAY_BPM;
@@ -319,10 +335,13 @@ unsigned long instrumentDisplayTime = 0;
 
 SequencerView sequencerView = SEQ_VIEW_GRID;
 
-// Variables para manejo de botones (8 botones)
+// Variables para manejo de botones (16 botones)
 uint16_t lastButtonState = 0;
-unsigned long buttonPressTime[8] = {0};
-unsigned long lastRepeatTime[8] = {0};
+unsigned long buttonPressTime[16] = {0};
+unsigned long lastRepeatTime[16] = {0};
+
+// Paginación del sequencer (auto-scroll al navegar tracks)
+int sequencerPage = 0;  // 0 = tracks 0-7, 1 = tracks 8-15
 
 // ============================================
 // DATA
@@ -335,7 +354,9 @@ const char* kitNames[MAX_KITS] = {
 
 const char* trackNames[MAX_TRACKS] = {
     "BD", "SD", "CH", "OH",
-    "CL", "T1", "T2", "CY"
+    "CL", "T1", "T2", "CY",
+    "P1", "P2", "SH", "CB",
+    "RD", "CG", "BG", "EX"
 };
 
 const char* instrumentNames[MAX_TRACKS] = {
@@ -346,7 +367,15 @@ const char* instrumentNames[MAX_TRACKS] = {
     "CLAP    ",
     "TOM-LO  ",
     "TOM-HI  ",
-    "CYMBAL  "
+    "CYMBAL  ",
+    "PERC-1  ",
+    "PERC-2  ",
+    "SHAKER  ",
+    "COWBELL ",
+    "RIDE    ",
+    "CONGA   ",
+    "BONGO   ",
+    "EXTRA   "
 };
 
 const char* menuItems[] = {
@@ -360,14 +389,22 @@ const char* menuItems[] = {
 
 // Colores por instrumento (BD=KICK, SD=SNARE, CH=CL-HAT, OH=OP-HAT, CL=CLAP, T1=TOM-LO, T2=TOM-HI, CY=CYMBAL)
 const uint16_t instrumentColors[MAX_TRACKS] = {
-    COLOR_INST_KICK,   // BD (Bass Drum = KICK)
-    COLOR_INST_SNARE,  // SD (Snare Drum = SNARE)
-    COLOR_INST_CLHAT,  // CH (Closed Hi-Hat = CL-HAT)
-    COLOR_INST_OPHAT,  // OH (Open Hi-Hat = OP-HAT)
-    COLOR_INST_CLAP,   // CL (Clap = CLAP)
-    COLOR_INST_TOMLO,  // T1 (Tom Low = TOM-LO)
-    COLOR_INST_TOMHI,  // T2 (Tom High = TOM-HI)
-    COLOR_INST_CYMBAL  // CY (Cymbal = CYMBAL)
+    COLOR_INST_KICK,    // BD (Bass Drum = KICK)
+    COLOR_INST_SNARE,   // SD (Snare Drum = SNARE)
+    COLOR_INST_CLHAT,   // CH (Closed Hi-Hat = CL-HAT)
+    COLOR_INST_OPHAT,   // OH (Open Hi-Hat = OP-HAT)
+    COLOR_INST_CLAP,    // CL (Clap = CLAP)
+    COLOR_INST_TOMLO,   // T1 (Tom Low = TOM-LO)
+    COLOR_INST_TOMHI,   // T2 (Tom High = TOM-HI)
+    COLOR_INST_CYMBAL,  // CY (Cymbal = CYMBAL)
+    COLOR_INST_PERC1,   // P1 (Percussion 1)
+    COLOR_INST_PERC2,   // P2 (Percussion 2)
+    COLOR_INST_SHAKER,  // SH (Shaker)
+    COLOR_INST_COWBELL, // CB (Cowbell)
+    COLOR_INST_RIDE,    // RD (Ride)
+    COLOR_INST_CONGA,   // CG (Conga)
+    COLOR_INST_BONGO,   // BG (Bongo)
+    COLOR_INST_EXTRA    // EX (Extra)
 };
 
 // ============================================
@@ -433,6 +470,9 @@ void showVolumeOnTM1638();
 void setLED(int ledIndex, bool state);
 void setAllLEDs(uint16_t pattern);
 uint16_t readAllButtons();
+bool getM5EncoderRoute(int track, int& moduleIndex, int& encoderIndex);
+void writeM5EncoderRGBForTrack(int track, uint8_t r, uint8_t g, uint8_t b);
+void updateTrackEncoderLED(int track);
 
 // ============================================
 // TM1638 HELPERS
@@ -463,6 +503,43 @@ uint16_t getInstrumentColor(int track) {
         return instrumentColors[track];
     }
     return COLOR_ACCENT;
+}
+
+bool getM5EncoderRoute(int track, int& moduleIndex, int& encoderIndex) {
+    if (track < 0 || track >= MAX_TRACKS) return false;
+
+    moduleIndex = track / Config::ENCODERS_PER_MODULE;
+    encoderIndex = track % Config::ENCODERS_PER_MODULE;
+
+    if (moduleIndex < 0 || moduleIndex >= Config::M5_ENCODER_MODULES) return false;
+    if (!m5encoderModuleConnected[moduleIndex]) return false;
+
+    return true;
+}
+
+void writeM5EncoderRGBForTrack(int track, uint8_t r, uint8_t g, uint8_t b) {
+    int moduleIndex = 0;
+    int encoderIndex = 0;
+    if (!getM5EncoderRoute(track, moduleIndex, encoderIndex)) return;
+    m5encoders[moduleIndex].writeRGB(encoderIndex, r, g, b);
+}
+
+void updateTrackEncoderLED(int track) {
+    if (track < 0 || track >= MAX_TRACKS) return;
+    int moduleIndex = 0;
+    int encoderIndex = 0;
+    if (!getM5EncoderRoute(track, moduleIndex, encoderIndex)) return;
+
+    if (trackMuted[track]) {
+        m5encoders[moduleIndex].writeRGB(encoderIndex, 30, 0, 0);  // Rojo tenue = muteado
+        return;
+    }
+
+    uint8_t brightness = map(trackVolumes[track], 0, MAX_VOLUME, 10, 255);
+    uint8_t r = (encoderLEDColors[track][0] * brightness) / 255;
+    uint8_t g = (encoderLEDColors[track][1] * brightness) / 255;
+    uint8_t b = (encoderLEDColors[track][2] * brightness) / 255;
+    m5encoders[moduleIndex].writeRGB(encoderIndex, r, g, b);
 }
 
 // ============================================
@@ -1070,81 +1147,73 @@ void setup() {
     Wire.begin(I2C_SDA, I2C_SCL);
     Serial.println("OK");
     
-    // M5 8ENCODER Init
-    Serial.print("► M5 8ENCODER Init... ");
-    if (m5encoder.begin()) {
-        m5encoderConnected = true;
-        Serial.println("OK");
-        Serial.printf("   Firmware version: %d\n", m5encoder.getVersion());
-        
-        // ===== ANIMACIÓN DE BOOT CON LEDS =====
-        Serial.println("   Running LED boot sequence...");
-        
-        // 1. Apagar todos los LEDs
-        m5encoder.allOff();
-        delay(200);
-        
-        // 2. Todos en ROJO brillante
-        for (int i = 0; i < 9; i++) {
-            m5encoder.writeRGB(i, 255, 0, 0);  // Rojo brillante
+    // M5 8ENCODER Init (hasta 2 módulos en el mismo bus I2C)
+    Serial.println("► M5 8ENCODER Init (multi-module)...");
+    int connectedModules = 0;
+
+    for (int module = 0; module < Config::M5_ENCODER_MODULES; module++) {
+        const int moduleAddr = (module == 0) ? Config::M5_ENCODER_ADDR_1 : Config::M5_ENCODER_ADDR_2;
+        Serial.printf("   Module %d @ 0x%02X... ", module + 1, moduleAddr);
+
+        if (m5encoders[module].begin()) {
+            m5encoderModuleConnected[module] = true;
+            connectedModules++;
+            Serial.println("OK");
+            Serial.printf("      Firmware version: %d\n", m5encoders[module].getVersion());
+        } else {
+            m5encoderModuleConnected[module] = false;
+            Serial.println("NOT FOUND");
         }
-        delay(500);
-        
-        // 3. Secuencia de onda (chase) en rojo
-        for (int loop = 0; loop < 2; loop++) {
-            for (int i = 0; i < 8; i++) {
-                // Apagar todos
-                m5encoder.allOff();
-                // Encender actual en rojo brillante
-                m5encoder.writeRGB(i, 255, 0, 0);
-                delay(80);
-            }
-        }
-        
-        // 4. Efecto de respiración (fade in/out) todos en rojo
-        for (int brightness = 0; brightness <= 255; brightness += 15) {
+    }
+
+    m5encoderConnected = (connectedModules > 0);
+    diagnostic.m5encoderOk = m5encoderConnected;
+
+    if (m5encoderConnected) {
+        Serial.printf("   %d/%d modules connected. Running LED boot sequence...\n",
+                      connectedModules, Config::M5_ENCODER_MODULES);
+
+        for (int module = 0; module < Config::M5_ENCODER_MODULES; module++) {
+            if (!m5encoderModuleConnected[module]) continue;
+
+            // 1. Apagar todos los LEDs del módulo
+            m5encoders[module].allOff();
+            delay(120);
+
+            // 2. Todos en rojo
             for (int i = 0; i < 9; i++) {
-                m5encoder.writeRGB(i, brightness, 0, 0);
+                m5encoders[module].writeRGB(i, 255, 0, 0);
             }
-            delay(30);
-        }
-        for (int brightness = 255; brightness >= 0; brightness -= 15) {
-            for (int i = 0; i < 9; i++) {
-                m5encoder.writeRGB(i, brightness, 0, 0);
+            delay(220);
+
+            // 3. Transición a colores de instrumentos para tracks de este módulo
+            const int trackStart = module * Config::ENCODERS_PER_MODULE;
+            const int trackEnd = min(trackStart + (int)Config::ENCODERS_PER_MODULE, (int)MAX_TRACKS);
+            for (int track = trackStart; track < trackEnd; track++) {
+                const int localEncoder = track - trackStart;
+                uint16_t color = instrumentColors[track];
+
+                // Convertir RGB565 a RGB888
+                uint8_t r = ((color >> 11) & 0x1F) << 3;
+                uint8_t g = ((color >> 5) & 0x3F) << 2;
+                uint8_t b = (color & 0x1F) << 3;
+
+                m5encoders[module].writeRGB(localEncoder, r, g, b);
+                encoderLEDColors[track][0] = r;
+                encoderLEDColors[track][1] = g;
+                encoderLEDColors[track][2] = b;
+
+                m5encoders[module].setAbsCounter(localEncoder, 100);  // Volumen inicial
+                delay(40);
             }
-            delay(30);
+
+            // LED extra (switch) apagado
+            m5encoders[module].writeRGB(8, 0, 0, 0);
         }
-        
-        // 5. Encender todos en rojo nuevamente
-        for (int i = 0; i < 9; i++) {
-            m5encoder.writeRGB(i, 255, 0, 0);
-        }
-        delay(300);
-        
-        // 6. Transición a colores de instrumentos uno por uno
-        for (int i = 0; i < 8; i++) {
-            uint16_t color = instrumentColors[i];
-            // Convertir color RGB565 a RGB888
-            uint8_t r = ((color >> 11) & 0x1F) << 3;
-            uint8_t g = ((color >> 5) & 0x3F) << 2;
-            uint8_t b = (color & 0x1F) << 3;
-            m5encoder.writeRGB(i, r, g, b);
-            encoderLEDColors[i][0] = r;
-            encoderLEDColors[i][1] = g;
-            encoderLEDColors[i][2] = b;
-            // Inicializar valores de encoder
-            m5encoder.setAbsCounter(i, 100);  // Empezar en volumen 100
-            delay(100);
-        }
-        
-        // LED 9 (extra) apagado
-        m5encoder.writeRGB(8, 0, 0, 0);
-        diagnostic.m5encoderOk = true;
+
         Serial.println("   LED boot sequence complete!");
     } else {
-        m5encoderConnected = false;
-        diagnostic.m5encoderOk = false;
-        Serial.println("NOT FOUND (optional)");
+        Serial.println("   No M5 8ENCODER modules found (optional)");
     }
     
     // Boot estilo consola UNIX
@@ -1179,8 +1248,8 @@ void setup() {
     setupPatterns();
     calculateStepInterval();
     
-    // LED test rápido (8 LEDs)
-    for (int i = 0; i < 8; i++) {
+    // LED test rápido (16 LEDs)
+    for (int i = 0; i < 16; i++) {
         setLED(i, true);
         delay(30);
     }
@@ -1411,27 +1480,23 @@ void handleButtons() {
     // Procesar nuevas presiones (16 botones en total)
     for (int i = 0; i < 16; i++) {
         if (newPress & (1 << i)) {
-            if (i < 8) {
-                buttonPressTime[i] = currentTime;
-                lastRepeatTime[i] = currentTime;
-            }
+            buttonPressTime[i] = currentTime;
+            lastRepeatTime[i] = currentTime;
             
             if (currentScreen == SCREEN_LIVE) {
-                // S1-S8: Enviar trigger al MASTER
-                if (i < 8) {
-                    triggerDrum(i);
-                    setLED(i, true);
-                    ledActive[i] = true;
-                    ledOffTime[i] = currentTime + 150;
-                    padPressed[i] = true;
-                    padPressTime[i] = currentTime;
-                    
-                    // Redibujar pad con efecto neón
-                    drawLivePad(i, true);
-                    
-                    if (needsFullRedraw) {
-                        drawLiveScreen();
-                    }
+                // S1-S16: Enviar trigger al MASTER (16 pads)
+                triggerDrum(i);
+                setLED(i, true);
+                ledActive[i] = true;
+                ledOffTime[i] = currentTime + 150;
+                padPressed[i] = true;
+                padPressTime[i] = currentTime;
+                
+                // Redibujar pad con efecto neón
+                drawLivePad(i, true);
+                
+                if (needsFullRedraw) {
+                    drawLiveScreen();
                 }
             } else if (currentScreen == SCREEN_SETTINGS) {
                 if (i == 0 || i == 1) {
@@ -1461,6 +1526,17 @@ void handleButtons() {
                     toggleStep(selectedTrack, i);
                     updateStepLEDsForTrack(selectedTrack);
                     needsGridUpdate = true;  // Solo actualizar grid, no full redraw
+                }
+            } else if (currentScreen == SCREEN_VOLUMES) {
+                // S1-S16: seleccionar track directo para editar volumen/mute con encoder8
+                if (i >= 0 && i < MAX_TRACKS) {
+                    selectedTrack = i;
+                    volumesPage = selectedTrack / Config::TRACKS_PER_PAGE;
+                    sequencerPage = volumesPage;
+                    needsFullRedraw = true;
+                    showInstrumentOnTM1638(selectedTrack);
+                    Serial.printf("► VOLUME Track select: %d/%d (%s) Page:%d\n",
+                                  selectedTrack + 1, MAX_TRACKS, trackNames[selectedTrack], volumesPage + 1);
                 }
             } else if (currentScreen == SCREEN_FILTERS) {
                 // S1-S3: Seleccionar tipo de filtro FX
@@ -1500,31 +1576,32 @@ void handleButtons() {
                         Serial.printf("► MASTER FX: %s\n", masterFilter.enabled ? "ON" : "OFF");
                     }
                 }
-                // S5-S12: Seleccionar track 1-8, o toggle ON/OFF si ya seleccionado
-                else if (i >= 4 && i < 4 + MAX_TRACKS) {
+                // S5-S16: Seleccionar track 1-12, o toggle ON/OFF si ya seleccionado
+                else if (i >= 4 && i < 16) {
                     int newTrack = i - 4;
-                    if (filterSelectedTrack != newTrack) {
-                        // Primera pulsación: seleccionar track
-                        filterSelectedTrack = newTrack;
-                        needsFilterPanelsRedraw = true;
-                        tm1.displayText(trackNames[filterSelectedTrack]);
-                        char fxStr[9];
-                        snprintf(fxStr, sizeof(fxStr), "FX TR %d ", filterSelectedTrack + 1);
-                        tm2.displayText(fxStr);
-                        setAllLEDs(0x0000);
-                        setLED(filterSelectedTrack, true);
-                        Serial.printf("► Target: Track %d (%s)\n", filterSelectedTrack + 1, trackNames[filterSelectedTrack]);
-                    } else {
-                        // Ya seleccionado: toggle ON/OFF
-                        trackFilters[newTrack].enabled = !trackFilters[newTrack].enabled;
-                        sendFilterUDP(newTrack, filterSelectedFX);
-                        tm1.displayText(trackNames[newTrack]);
-                        tm2.displayText(trackFilters[newTrack].enabled ? "  ON    " : "  OFF   ");
-                        needsFilterBarsUpdate = true;
-                        Serial.printf("► Track %d FX: %s\n", newTrack + 1, trackFilters[newTrack].enabled ? "ON" : "OFF");
+                    if (newTrack < MAX_TRACKS) {
+                        if (filterSelectedTrack != newTrack) {
+                            // Primera pulsación: seleccionar track
+                            filterSelectedTrack = newTrack;
+                            needsFilterPanelsRedraw = true;
+                            tm1.displayText(trackNames[filterSelectedTrack]);
+                            char fxStr[9];
+                            snprintf(fxStr, sizeof(fxStr), "FX TR%2d ", filterSelectedTrack + 1);
+                            tm2.displayText(fxStr);
+                            setAllLEDs(0x0000);
+                            setLED(filterSelectedTrack, true);
+                            Serial.printf("► Target: Track %d (%s)\n", filterSelectedTrack + 1, trackNames[filterSelectedTrack]);
+                        } else {
+                            // Ya seleccionado: toggle ON/OFF
+                            trackFilters[newTrack].enabled = !trackFilters[newTrack].enabled;
+                            sendFilterUDP(newTrack, filterSelectedFX);
+                            tm1.displayText(trackNames[newTrack]);
+                            tm2.displayText(trackFilters[newTrack].enabled ? "  ON    " : "  OFF   ");
+                            needsFilterBarsUpdate = true;
+                            Serial.printf("► Track %d FX: %s\n", newTrack + 1, trackFilters[newTrack].enabled ? "ON" : "OFF");
+                        }
                     }
                 }
-                // S13-S16: reservados (no acción)
             } else if (currentScreen == SCREEN_PATTERNS) {
                 // S1-S6: Seleccionar patrón (máximo 6 patrones)
                 if (i < 6) {
@@ -1673,12 +1750,19 @@ void handleEncoder() {
                     }
                     
                 } else if (currentScreen == SCREEN_SEQUENCER) {
-                    // En sequencer: navegación entre 8 tracks (sin páginas)
+                    // En sequencer: navegación entre 16 tracks con auto-paginación
                     int delta = rawDelta / 2;
                     if (delta != 0) {
                         selectedTrack += delta;
                         if (selectedTrack < 0) selectedTrack = MAX_TRACKS - 1;
                         if (selectedTrack >= MAX_TRACKS) selectedTrack = 0;
+                        
+                        // Auto-paginación: cambiar página si el track sale del rango visible
+                        int newPage = selectedTrack / Config::TRACKS_PER_PAGE;
+                        if (newPage != sequencerPage) {
+                            sequencerPage = newPage;
+                            needsFullRedraw = true;  // Redibujar toda la pantalla al cambiar página
+                        }
                         
                         // Mostrar instrumento en TM1638
                         showInstrumentOnTM1638(selectedTrack);
@@ -1689,7 +1773,27 @@ void handleEncoder() {
                         }
                         
                         needsHeaderUpdate = true;
-                        Serial.printf("► Track: %d (%s)\n", selectedTrack, trackNames[selectedTrack]);
+                        needsGridUpdate = true;
+                        Serial.printf("► Track: %d/%d (%s) Page:%d\n", selectedTrack + 1, MAX_TRACKS, trackNames[selectedTrack], sequencerPage + 1);
+                    }
+                } else if (currentScreen == SCREEN_VOLUMES) {
+                    // En volúmenes: navegar tracks 1..16 y auto-cambiar página
+                    int delta = rawDelta / 2;
+                    if (delta != 0) {
+                        selectedTrack += delta;
+                        if (selectedTrack < 0) selectedTrack = MAX_TRACKS - 1;
+                        if (selectedTrack >= MAX_TRACKS) selectedTrack = 0;
+
+                        int newPage = selectedTrack / Config::TRACKS_PER_PAGE;
+                        if (newPage != volumesPage) {
+                            volumesPage = newPage;
+                        }
+
+                        sequencerPage = volumesPage;
+                        needsFullRedraw = true;
+                        showInstrumentOnTM1638(selectedTrack);
+                        Serial.printf("► VOLUME NAV Track: %d/%d (%s) Page:%d\n",
+                                      selectedTrack + 1, MAX_TRACKS, trackNames[selectedTrack], volumesPage + 1);
                     }
                 }
             }
@@ -1883,15 +1987,7 @@ void handleMuteButton() {
 
                 // Sincronizar LED del M5 8ENCODER
                 if (m5encoderConnected) {
-                    if (trackMuted[selectedTrack]) {
-                        m5encoder.writeRGB(selectedTrack, 30, 0, 0);  // Rojo tenue = muteado
-                    } else {
-                        uint8_t brightness = map(trackVolumes[selectedTrack], 0, MAX_VOLUME, 10, 255);
-                        uint8_t r = (encoderLEDColors[selectedTrack][0] * brightness) / 255;
-                        uint8_t g = (encoderLEDColors[selectedTrack][1] * brightness) / 255;
-                        uint8_t b = (encoderLEDColors[selectedTrack][2] * brightness) / 255;
-                        m5encoder.writeRGB(selectedTrack, r, g, b);
-                    }
+                    updateTrackEncoderLED(selectedTrack);
                 }
                 
                 // Actualizar grid para reflejar mute sin parpadeo
@@ -2132,10 +2228,14 @@ void handleM5Encoders() {
     
     bool anyChange = false;
     
-    // Leer los 8 encoders
-    for (int i = 0; i < 8; i++) {
+    // Leer encoders de todos los módulos disponibles (mapeados a tracks 0-15)
+    for (int track = 0; track < MAX_TRACKS; track++) {
+        int moduleIndex = 0;
+        int encoderIndex = 0;
+        if (!getM5EncoderRoute(track, moduleIndex, encoderIndex)) continue;
+
         // Leer contador relativo (cambio desde última lectura)
-        int32_t delta = m5encoder.getRelCounter(i);
+        int32_t delta = m5encoders[moduleIndex].getRelCounter(encoderIndex);
         
         if (delta != 0) {
             anyChange = true;
@@ -2144,26 +2244,22 @@ void handleM5Encoders() {
             switch (encoderMode) {
                 case ENC_MODE_VOLUME: {
                     // Control de volumen individual del track (0-150)
-                    trackVolumes[i] += (delta * 5);  // Pasos de 5%
-                    if (trackVolumes[i] < 0) trackVolumes[i] = 0;
-                    if (trackVolumes[i] > MAX_VOLUME) trackVolumes[i] = MAX_VOLUME;
+                    trackVolumes[track] += (delta * 5);  // Pasos de 5%
+                    if (trackVolumes[track] < 0) trackVolumes[track] = 0;
+                    if (trackVolumes[track] > MAX_VOLUME) trackVolumes[track] = MAX_VOLUME;
                     
                     // Enviar comando al MASTER
                     JsonDocument doc;
                     doc["cmd"] = "setTrackVolume";
-                    doc["track"] = i;
-                    doc["volume"] = trackVolumes[i];
+                    doc["track"] = track;
+                    doc["volume"] = trackVolumes[track];
                     sendUDPCommand(doc);
                     
                     Serial.printf("► Track %d (%s) Volume: %d%%\n", 
-                                 i + 1, trackNames[i], trackVolumes[i]);
+                                 track + 1, trackNames[track], trackVolumes[track]);
                     
-                    // Actualizar brillo del LED según volumen
-                    uint8_t brightness = map(trackVolumes[i], 0, MAX_VOLUME, 10, 255);
-                    uint8_t r = (encoderLEDColors[i][0] * brightness) / 255;
-                    uint8_t g = (encoderLEDColors[i][1] * brightness) / 255;
-                    uint8_t b = (encoderLEDColors[i][2] * brightness) / 255;
-                    m5encoder.writeRGB(i, r, g, b);
+                    // Actualizar brillo del LED según volumen/mute
+                    updateTrackEncoderLED(track);
                     break;
                 }
                     
@@ -2178,88 +2274,77 @@ void handleM5Encoders() {
             
             // Mostrar en TM1638
             if (currentScreen == SCREEN_SEQUENCER) {
-                tm1.displayText(trackNames[i]);
+                tm1.displayText(trackNames[track]);
                 char volStr[9];
-                snprintf(volStr, sizeof(volStr), "VOL %3d", trackVolumes[i]);
+                snprintf(volStr, sizeof(volStr), "VOL %3d", trackVolumes[track]);
                 tm2.displayText(volStr);
             }
         }
         
         // Leer botones de los encoders como MUTE de track
-        if (m5encoder.getKeyPressed(i)) {
-            if (currentTime - lastM5ButtonTime[i] < 120) {
+        if (m5encoders[moduleIndex].getKeyPressed(encoderIndex)) {
+            if (currentTime - lastM5ButtonTime[track] < 120) {
                 continue;
             }
-            lastM5ButtonTime[i] = currentTime;
-            Serial.printf("► Encoder %d button pressed - Toggle MUTE Track %d\n", i + 1, i + 1);
+            lastM5ButtonTime[track] = currentTime;
+            Serial.printf("► Encoder %d button pressed - Toggle MUTE Track %d\n", track + 1, track + 1);
             
             // Toggle mute del track
-            trackMuted[i] = !trackMuted[i];
-            patterns[currentPattern].muted[i] = trackMuted[i];
+            trackMuted[track] = !trackMuted[track];
+            patterns[currentPattern].muted[track] = trackMuted[track];
             
             // Enviar comando al MASTER
             JsonDocument doc;
             doc["cmd"] = "mute";
-            doc["track"] = i;
-            doc["value"] = trackMuted[i];
+            doc["track"] = track;
+            doc["value"] = trackMuted[track];
             sendUDPCommand(doc);
             
             // Actualizar LED: apagar si está muteado, color normal si no
-            if (trackMuted[i]) {
-                m5encoder.writeRGB(i, 30, 0, 0);  // Rojo tenue = muteado
-            } else {
-                uint8_t brightness = map(trackVolumes[i], 0, MAX_VOLUME, 10, 255);
-                uint8_t r = (encoderLEDColors[i][0] * brightness) / 255;
-                uint8_t g = (encoderLEDColors[i][1] * brightness) / 255;
-                uint8_t b = (encoderLEDColors[i][2] * brightness) / 255;
-                m5encoder.writeRGB(i, r, g, b);
-            }
+            updateTrackEncoderLED(track);
             
             // Mostrar en TM1638
             if (currentScreen == SCREEN_SEQUENCER) {
-                tm1.displayText(trackNames[i]);
+                tm1.displayText(trackNames[track]);
                 char muteStr[9];
-                snprintf(muteStr, sizeof(muteStr), trackMuted[i] ? "  MUTED" : "UNMUTED");
+                snprintf(muteStr, sizeof(muteStr), trackMuted[track] ? "  MUTED" : "UNMUTED");
                 tm2.displayText(muteStr);
                 lastDisplayChange = millis();
             }
 
             // Refrescar visual del sequencer para reflejar mute
             if (currentScreen == SCREEN_SEQUENCER) {
-                if (!isPlaying && i == selectedTrack) {
+                if (!isPlaying && track == selectedTrack) {
                     updateStepLEDsForTrack(selectedTrack);
                 }
                 needsGridUpdate = true;
             }
             
             Serial.printf("   Track %d (%s) is now %s\n", 
-                         i + 1, trackNames[i], trackMuted[i] ? "MUTED" : "UNMUTED");
+                         track + 1, trackNames[track], trackMuted[track] ? "MUTED" : "UNMUTED");
         }
     }
     
-    // Leer switch toggle del módulo
-    // Toggle switch con debounce para evitar spam
-    static bool lastSwitchState = false;
-    static unsigned long lastSwitchTime = 0;
-    uint8_t switchState = m5encoder.inputSwitch();
-    if (switchState && !lastSwitchState && (millis() - lastSwitchTime > 300)) {
-        lastSwitchTime = millis();
-        Serial.println("► M5 Toggle Switch activated");
-        // TODO: Usar para reset general o cambio de modo global
+    // Leer switches toggle de cada módulo con debounce
+    for (int module = 0; module < Config::M5_ENCODER_MODULES; module++) {
+        if (!m5encoderModuleConnected[module]) continue;
+
+        uint8_t switchState = m5encoders[module].inputSwitch();
+        if (switchState && !lastM5SwitchState[module] && (millis() - lastM5SwitchTime[module] > 300)) {
+            lastM5SwitchTime[module] = millis();
+            Serial.printf("► M5 Toggle Switch activated (module %d)\n", module + 1);
+            // TODO: Usar para reset general o cambio de modo global
+        }
+        lastM5SwitchState[module] = (switchState != 0);
     }
-    lastSwitchState = (switchState != 0);
 }
 
 void updateEncoderLEDs() {
     if (!m5encoderConnected) return;
     
     // Actualizar LEDs según el estado actual (puede llamarse desde display)
-    for (int i = 0; i < 8; i++) {
-        uint8_t brightness = map(trackVolumes[i], 0, MAX_VOLUME, 10, 255);
-        uint8_t r = (encoderLEDColors[i][0] * brightness) / 255;
-        uint8_t g = (encoderLEDColors[i][1] * brightness) / 255;
-        uint8_t b = (encoderLEDColors[i][2] * brightness) / 255;
-        m5encoder.writeRGB(i, r, g, b);
+    for (int i = 0; i < MAX_TRACKS; i++) {
+        updateTrackEncoderLED(i);
     }
 }
 
@@ -2383,7 +2468,7 @@ void updateLEDFeedback() {
     
     unsigned long currentTime = millis();
     
-    for (int i = 0; i < 8; i++) {  // Solo 8 LEDs
+    for (int i = 0; i < 16; i++) {  // 16 LEDs (2 x TM1638)
         if (ledActive[i]) {
             if (currentTime >= ledOffTime[i]) {
                 setLED(i, false);
@@ -2399,17 +2484,17 @@ void updateAudioVisualization() {
     if (currentTime - lastVizUpdate > 50) {
         lastVizUpdate = currentTime;
         
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 16; i++) {
             if (audioLevels[i] > 0) {
                 audioLevels[i] -= 15;
                 if (audioLevels[i] < 0) audioLevels[i] = 0;
             }
         }
         
-        // Manejar tremolo y efecto neón en Live Pads
+        // Manejar tremolo y efecto neón en Live Pads (16 pads)
         if (currentScreen == SCREEN_LIVE) {
             uint16_t buttons = readAllButtons();
-            for (int i = 0; i < 8; i++) {  // Solo 8 pads
+            for (int i = 0; i < 16; i++) {  // 16 pads (S1-S16)
                 bool isPressed = buttons & (1 << i);
                 
                 if (isPressed && padPressed[i]) {
@@ -2775,37 +2860,25 @@ void drawLiveScreen() {
     tft.fillScreen(COLOR_BG);
     drawHeader();
     
-    // ========== 8 PADS GRANDES ESTILO AKAI APC MINI ==========
-    // Maximizar tamaño de pads para llenar pantalla 480x320
-    const int padW = 112;  // Ajustado para centrar
-    const int padH = 108;  // Ajustado para centrar
-    const int startX = 10; // Centrado horizontal
-    const int startY = 65;  
+    // ========== 16 PADS ESTILO AKAI APC MINI (4x4) ==========
+    // Layout compacto: 4 columnas x 4 filas para 16 pads
+    const int padW = 112;   // Ancho de cada pad
+    const int padH = 52;    // Alto reducido para 4 filas
+    const int startX = 10;  // Centrado horizontal
+    const int startY = 55;  
     const int spacingX = 4;
-    const int spacingY = 8;
+    const int spacingY = 4;
     
-    // Colores vibrantes estilo AKAI APC (RGB saturados)
-    const uint16_t padColors[8] = {
-        COLOR_INST_KICK,   // BD
-        COLOR_INST_SNARE,  // SD
-        COLOR_INST_CLHAT,  // CH
-        COLOR_INST_OPHAT,  // OH
-        COLOR_INST_CLAP,   // CL
-        COLOR_INST_TOMLO,  // T1
-        COLOR_INST_TOMHI,  // T2
-        COLOR_INST_CYMBAL  // CY
-    };
-    
-    // Dibujar los 8 pads con diseño tipo controlador (4 columnas x 2 filas)
-    for (int i = 0; i < 8; i++) {
+    // Dibujar los 16 pads (4 columnas x 4 filas)
+    for (int i = 0; i < 16; i++) {
         int col = i % 4;
         int row = i / 4;
         int x = startX + col * (padW + spacingX);
         int y = startY + row * (padH + spacingY);
         
-        uint16_t baseColor = padColors[i];
+        uint16_t baseColor = instrumentColors[i];
         
-        // Color atenuado para estado OFF (LED pálido)
+        // Color atenuado para estado OFF
         uint8_t r = ((baseColor >> 11) & 0x1F) * 4;
         uint8_t g = ((baseColor >> 5) & 0x3F) * 2;
         uint8_t b = (baseColor & 0x1F) * 4;
@@ -2819,26 +2892,22 @@ void drawLiveScreen() {
         uint16_t glowColor = tft.color565(rg, gg, bg);
         uint16_t shadowColor = tft.color565(6, 6, 8);
         
-        // Sombras y bisel tipo APC
-        tft.fillRoundRect(x + 2, y + 3, padW, padH, 11, shadowColor);
-        tft.fillRoundRect(x, y, padW, padH, 11, dimColor);
-        tft.fillRoundRect(x + 2, y + 2, padW - 4, padH - 4, 9, softColor);
+        // Sombras y bisel
+        tft.fillRoundRect(x + 1, y + 2, padW, padH, 8, shadowColor);
+        tft.fillRoundRect(x, y, padW, padH, 8, dimColor);
+        tft.fillRoundRect(x + 2, y + 2, padW - 4, padH - 4, 6, softColor);
         
         // Bordes con brillo suave
-        tft.drawRoundRect(x + 1, y + 1, padW - 2, padH - 2, 10, baseColor);
-        tft.drawRoundRect(x + 3, y + 3, padW - 6, padH - 6, 8, glowColor);
+        tft.drawRoundRect(x + 1, y + 1, padW - 2, padH - 2, 7, baseColor);
         
-        // Barra superior LED estilo controlador
-        tft.fillRoundRect(x + 6, y + 6, padW - 12, 10, 4, baseColor);
-        tft.drawRoundRect(x + 5, y + 5, padW - 10, 12, 5, glowColor);
-        tft.drawFastHLine(x + 7, y + 8, padW - 14, TFT_WHITE);
+        // Barra LED superior compacta
+        tft.fillRoundRect(x + 4, y + 4, padW - 8, 6, 3, baseColor);
+        tft.drawFastHLine(x + 5, y + 6, padW - 10, TFT_WHITE);
         
-        // Número del pad (más grande y con fondo)
-        tft.fillCircle(x + 15, y + 26, 9, COLOR_BG);
-        tft.drawCircle(x + 15, y + 26, 10, baseColor);
-        tft.setTextSize(2);
+        // Número del pad (izquierda)
+        tft.setTextSize(1);
         tft.setTextColor(baseColor);
-        tft.setCursor(x + (i < 9 ? 11 : 8), y + 19);
+        tft.setCursor(x + 5, y + 15);
         tft.printf("%d", i + 1);
         
         // Nombre del instrumento (centrado)
@@ -2846,28 +2915,26 @@ void drawLiveScreen() {
         tft.setTextColor(COLOR_TEXT);
         String instName = String(instrumentNames[i]);
         instName.trim();
-        if (instName.length() > 7) {
-            instName = instName.substring(0, 7);
-        }
+        if (instName.length() > 6) instName = instName.substring(0, 6);
         int textWidth = instName.length() * 12;
-        tft.setCursor(x + (padW - textWidth) / 2, y + 50);
+        tft.setCursor(x + (padW - textWidth) / 2, y + 18);
         tft.print(instName);
         
-        // Track name grande abajo
-        tft.setTextSize(2);
+        // Track name abajo-derecha
+        tft.setTextSize(1);
         tft.setTextColor(baseColor);
-        tft.setCursor(x + padW - 32, y + padH - 22);
+        tft.setCursor(x + padW - 20, y + padH - 12);
         tft.print(trackNames[i]);
     }
     
-    // Footer estilo profesional con gradiente simulado
+    // Footer
     tft.fillRect(0, 295, 480, 25, COLOR_PRIMARY);
-    tft.fillRect(0, 295, 480, 2, COLOR_ACCENT);  // Línea superior brillante
+    tft.fillRect(0, 295, 480, 2, COLOR_ACCENT);
     
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT);
     tft.setCursor(15, 304);
-    tft.print("S1-S8:");
+    tft.print("S1-S16:");
     tft.setTextColor(COLOR_ACCENT);
     tft.print(" PLAY");
     
@@ -2898,7 +2965,12 @@ void drawSequencerScreen() {
         tft.fillScreen(COLOR_BG);
         drawHeader();
         
-        // Sin indicador de página (solo hay una página con 8 tracks)
+        // Indicador de página (2 páginas: tracks 1-8 / tracks 9-16)
+        int totalPages = (MAX_TRACKS + Config::TRACKS_PER_PAGE - 1) / Config::TRACKS_PER_PAGE;
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_ACCENT2);
+        tft.setCursor(420, 75);
+        tft.printf("PAG %d/%d", sequencerPage + 1, totalPages);
     }
     
     const int gridX = 8;
@@ -2909,9 +2981,10 @@ void drawSequencerScreen() {
     
     Pattern& pattern = patterns[currentPattern];
     
-    // Mostrar todos los 8 tracks (sin páginas)
-    int trackStart = 0;
-    int trackEnd = MAX_TRACKS;
+    // Mostrar 8 tracks según la página actual (0=tracks 0-7, 1=tracks 8-15)
+    int trackStart = sequencerPage * Config::TRACKS_PER_PAGE;
+    int trackEnd = min(trackStart + (int)Config::TRACKS_PER_PAGE, (int)MAX_TRACKS);
+    int tracksVisible = trackEnd - trackStart;
     
     if (needsFullRedraw) {
         tft.fillRoundRect(gridX - 2, gridY - 2, 468, 210, 8, COLOR_NAVY);
@@ -2925,7 +2998,7 @@ void drawSequencerScreen() {
         }
         
         tft.setTextSize(2);
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < tracksVisible; i++) {
             int t = trackStart + i;  // Track real (0-7 o 8-15)
             int y = gridY + 2 + i * (cellH + 2);
             
@@ -2953,7 +3026,7 @@ void drawSequencerScreen() {
     // Redibujar etiquetas si cambi\u00f3 el grid (por ejemplo, al mutear)
     if (needsGridUpdate) {
         tft.setTextSize(2);
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < tracksVisible; i++) {
             int t = trackStart + i;  // Track real
             int y = gridY + 2 + i * (cellH + 2);
             
@@ -2975,7 +3048,7 @@ void drawSequencerScreen() {
     }
     
     // Dibujar celdas del grid (8 tracks, sin páginas)
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < tracksVisible; i++) {
         int t = trackStart + i;  // Track real (0-7)
         for (int s = 0; s < MAX_STEPS; s++) {
             if (needsFullRedraw || needsGridUpdate || (s == currentStep || s == lastStep)) {
@@ -3517,40 +3590,29 @@ void drawHeader() {
 }
 
 void drawLivePad(int padIndex, bool highlight) {
-    // COORDENADAS IDÉNTICAS A drawLiveScreen
-    const int padW = 112;  // Mismo que drawLiveScreen
-    const int padH = 108;  // Mismo que drawLiveScreen
+    if (padIndex < 0 || padIndex >= 16) return;
+    
+    // COORDENADAS IDÉNTICAS A drawLiveScreen (16 pads, 4x4)
+    const int padW = 112;
+    const int padH = 52;
     const int startX = 10;
-    const int startY = 65; // Mismo que drawLiveScreen
+    const int startY = 55;
     const int spacingX = 4;
-    const int spacingY = 8; // Mismo que drawLiveScreen
+    const int spacingY = 4;
     
     int col = padIndex % 4;
     int row = padIndex / 4;
     int x = startX + col * (padW + spacingX);
     int y = startY + row * (padH + spacingY);
     
-    // Colores vibrantes estilo AKAI (mismos que drawLiveScreen)
-    const uint16_t padColors[8] = {
-        COLOR_INST_KICK,   // BD
-        COLOR_INST_SNARE,  // SD
-        COLOR_INST_CLHAT,  // CH
-        COLOR_INST_OPHAT,  // OH
-        COLOR_INST_CLAP,   // CL
-        COLOR_INST_TOMLO,  // T1
-        COLOR_INST_TOMHI,  // T2
-        COLOR_INST_CYMBAL  // CY
-    };
-    
-    uint16_t baseColor = padColors[padIndex];
+    uint16_t baseColor = instrumentColors[padIndex];
     
     if (highlight) {
-        // Efecto PRESS: sube de tono (más potencia) sin parpadeo
+        // Efecto PRESS: brillo aumentado al 180%
         uint8_t r8 = ((baseColor >> 11) & 0x1F) << 3;
         uint8_t g8 = ((baseColor >> 5) & 0x3F) << 2;
         uint8_t b8 = (baseColor & 0x1F) << 3;
-        
-        int scale = 180; // 180% fijo
+        int scale = 180;
         uint8_t r = min((r8 * scale) / 100, 255);
         uint8_t g = min((g8 * scale) / 100, 255);
         uint8_t b = min((b8 * scale) / 100, 255);
@@ -3558,81 +3620,62 @@ void drawLivePad(int padIndex, bool highlight) {
         uint16_t halo = tft.color565(min(r + 30, 255), min(g + 30, 255), min(b + 30, 255));
         uint16_t shadowColor = tft.color565(6, 6, 8);
         
-        // Corona externa
-        tft.drawRoundRect(x - 2, y - 2, padW + 4, padH + 4, 12, halo);
-        tft.drawRoundRect(x - 1, y - 1, padW + 2, padH + 2, 11, brightColor);
+        // Corona
+        tft.drawRoundRect(x - 1, y - 1, padW + 2, padH + 2, 9, halo);
         
-        // Cuerpo brillante en color
-        tft.fillRoundRect(x + 2, y + 3, padW, padH, 11, shadowColor);
-        tft.fillRoundRect(x, y, padW, padH, 11, brightColor);
-        tft.fillRoundRect(x + 2, y + 2, padW - 4, padH - 4, 9, halo);
+        // Cuerpo brillante
+        tft.fillRoundRect(x + 1, y + 2, padW, padH, 8, shadowColor);
+        tft.fillRoundRect(x, y, padW, padH, 8, brightColor);
+        tft.fillRoundRect(x + 2, y + 2, padW - 4, padH - 4, 6, halo);
+        tft.drawRoundRect(x + 1, y + 1, padW - 2, padH - 2, 7, brightColor);
         
-        // Bordes luminosos
-        tft.drawRoundRect(x + 1, y + 1, padW - 2, padH - 2, 10, brightColor);
-        tft.drawRoundRect(x + 3, y + 3, padW - 6, padH - 6, 8, halo);
+        // Barra LED superior
+        tft.fillRoundRect(x + 4, y + 4, padW - 8, 6, 3, halo);
+        tft.drawFastHLine(x + 5, y + 6, padW - 10, TFT_WHITE);
         
-        // Barra superior ultra brillante
-        tft.fillRoundRect(x + 6, y + 6, padW - 12, 12, 5, halo);
-        tft.drawRoundRect(x + 5, y + 5, padW - 10, 14, 6, brightColor);
-        tft.drawFastHLine(x + 7, y + 8, padW - 14, TFT_WHITE);
-        
-        // Número con fondo claro
-        tft.fillCircle(x + 15, y + 26, 11, halo);
-        tft.drawCircle(x + 15, y + 26, 12, brightColor);
-        tft.setTextSize(2);
+        // Número
+        tft.setTextSize(1);
         tft.setTextColor(COLOR_BG);
-        tft.setCursor(x + (padIndex < 9 ? 11 : 8), y + 19);
+        tft.setCursor(x + 5, y + 15);
         tft.printf("%d", padIndex + 1);
-        
     } else {
-        // Estado NORMAL: estilo controlador
+        // Estado NORMAL
         uint8_t r = ((baseColor >> 11) & 0x1F) * 4;
         uint8_t g = ((baseColor >> 5) & 0x3F) * 2;
         uint8_t b = (baseColor & 0x1F) * 4;
         uint16_t dimColor = tft.color565(r, g, b);
         uint16_t softColor = tft.color565(min((int)r + 10, 255), min((int)g + 8, 255), min((int)b + 10, 255));
-        uint8_t rg = ((baseColor >> 11) & 0x1F) * 6;
-        uint8_t gg = ((baseColor >> 5) & 0x3F) * 3;
-        uint8_t bg = (baseColor & 0x1F) * 6;
-        uint16_t glowColor = tft.color565(rg, gg, bg);
         uint16_t shadowColor = tft.color565(6, 6, 8);
         
-        tft.fillRoundRect(x + 2, y + 3, padW, padH, 11, shadowColor);
-        tft.fillRoundRect(x, y, padW, padH, 11, dimColor);
-        tft.fillRoundRect(x + 2, y + 2, padW - 4, padH - 4, 9, softColor);
+        tft.fillRoundRect(x + 1, y + 2, padW, padH, 8, shadowColor);
+        tft.fillRoundRect(x, y, padW, padH, 8, dimColor);
+        tft.fillRoundRect(x + 2, y + 2, padW - 4, padH - 4, 6, softColor);
+        tft.drawRoundRect(x + 1, y + 1, padW - 2, padH - 2, 7, baseColor);
         
-        tft.drawRoundRect(x + 1, y + 1, padW - 2, padH - 2, 10, baseColor);
-        tft.drawRoundRect(x + 3, y + 3, padW - 6, padH - 6, 8, glowColor);
+        tft.fillRoundRect(x + 4, y + 4, padW - 8, 6, 3, baseColor);
+        tft.drawFastHLine(x + 5, y + 6, padW - 10, TFT_WHITE);
         
-        tft.fillRoundRect(x + 6, y + 6, padW - 12, 10, 4, baseColor);
-        tft.drawRoundRect(x + 5, y + 5, padW - 10, 12, 5, glowColor);
-        tft.drawFastHLine(x + 7, y + 8, padW - 14, TFT_WHITE);
-        
-        // Número con fondo
-        tft.fillCircle(x + 15, y + 26, 9, COLOR_BG);
-        tft.drawCircle(x + 15, y + 26, 10, baseColor);
-        tft.setTextSize(2);
+        // Número
+        tft.setTextSize(1);
         tft.setTextColor(baseColor);
-        tft.setCursor(x + (padIndex < 9 ? 11 : 8), y + 19);
+        tft.setCursor(x + 5, y + 15);
         tft.printf("%d", padIndex + 1);
     }
     
-    // Nombre del instrumento
+    // Nombre del instrumento (centrado)
     tft.setTextSize(2);
     tft.setTextColor(highlight ? COLOR_BG : COLOR_TEXT);
     String instName = String(instrumentNames[padIndex]);
     instName.trim();
-    if (instName.length() > 7) {
-        instName = instName.substring(0, 7);
-    }
+    if (instName.length() > 6) instName = instName.substring(0, 6);
     int textWidth = instName.length() * 12;
-    tft.setCursor(x + (padW - textWidth) / 2, y + 50);
+    tft.setCursor(x + (padW - textWidth) / 2, y + 18);
     tft.print(instName);
     
     // Track name
-    tft.setTextSize(2);
+    tft.setTextSize(1);
     tft.setTextColor(highlight ? COLOR_BG : baseColor);
-    tft.setCursor(x + padW - 32, y + padH - 22);
+    tft.setCursor(x + padW - 20, y + padH - 12);
     tft.print(trackNames[padIndex]);
 }
 
@@ -3730,6 +3773,7 @@ void drawVolumesScreen() {
     
     // Solo dibujar elementos estáticos la PRIMERA VEZ
     if (forceUpdate) {
+        volumesPage = selectedTrack / Config::TRACKS_PER_PAGE;
         tft.fillScreen(COLOR_BG);
         drawHeader();
         
@@ -3761,7 +3805,7 @@ void drawVolumesScreen() {
         lastSeqVolDisplay = -1;
         lastLiveVolDisplay = -1;
         lastVolModeDisplay = (VolumeMode)-1;
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < MAX_TRACKS; i++) {
             lastTrackVolDisplay[i] = -1;
             lastTrackMuteDisplay[i] = false;
         }
@@ -3807,29 +3851,30 @@ void drawVolumesScreen() {
     }
     lastVolModeDisplay = volumeMode;
     
-    // ========== TRACK VOLUMES (8 sliders estilo mezcladora) ==========
+    // ========== TRACK VOLUMES (paginado: 8 por página, total 16) ==========
     int sliderStartY = 165;
     int sliderH = 100;
     int sliderW = 46;
     int spacing = 7;
     int startX = 16;
+
+    int trackStart = volumesPage * Config::TRACKS_PER_PAGE;
+    int trackEnd = min(trackStart + (int)Config::TRACKS_PER_PAGE, (int)MAX_TRACKS);
+    int tracksVisible = trackEnd - trackStart;
+
+    // Indicador de página
+    int totalPages = (MAX_TRACKS + Config::TRACKS_PER_PAGE - 1) / Config::TRACKS_PER_PAGE;
+    tft.fillRect(372, 56, 100, 14, COLOR_BG);
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_ACCENT2);
+    tft.setCursor(374, 58);
+    tft.printf("TRACKS %d/%d", volumesPage + 1, totalPages);
     
-    // Colores por track (mismo esquema que LIVE pads)
-    const uint16_t trackColors[8] = {
-        COLOR_INST_KICK,   // BD - Rojo
-        COLOR_INST_SNARE,  // SD - Naranja
-        COLOR_INST_CLHAT,  // CH - Amarillo
-        COLOR_INST_OPHAT,  // OH - Cian
-        COLOR_INST_CLAP,   // CL - Magenta
-        COLOR_INST_TOMLO,  // T1 - Verde
-        COLOR_INST_TOMHI,  // T2 - Verde agua
-        COLOR_INST_CYMBAL  // CY - Azul
-    };
-    
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < tracksVisible; i++) {
+        int trackIndex = trackStart + i;
         int x = startX + i * (sliderW + spacing);
-        uint16_t trackColor = trackColors[i];
-        int volPercent = trackVolumes[i];
+        uint16_t trackColor = getInstrumentColor(trackIndex);
+        int volPercent = trackVolumes[trackIndex];
         
         // PRIMERA VEZ: dibujar marco, fondo y labels (SOLO UNA VEZ)
         if (!volumesScreenInitialized || needsFullRedraw) {
@@ -3843,7 +3888,12 @@ void drawVolumesScreen() {
             tft.setTextSize(2);
             tft.setTextColor(trackColor);
             tft.setCursor(x + (sliderW - 24) / 2, sliderStartY + sliderH + 5);
-            tft.print(trackNames[i]);
+            tft.print(trackNames[trackIndex]);
+
+            // Track seleccionado en esta página
+            if (trackIndex == selectedTrack) {
+                tft.drawRoundRect(x - 2, sliderStartY - 2, sliderW + 4, sliderH + 4, 6, COLOR_ACCENT);
+            }
             
             // Limpiar área del indicador de mute antiguo (ya no se usa)
             const int muteX = x + sliderW / 2;
@@ -3853,7 +3903,7 @@ void drawVolumesScreen() {
         }
         
         // ACTUALIZAR SOLO SI CAMBIÓ - MODO INCREMENTAL SIN BORRAR TODO
-        if (lastTrackVolDisplay[i] != volPercent || lastTrackMuteDisplay[i] != trackMuted[i]) {
+        if (lastTrackVolDisplay[trackIndex] != volPercent || lastTrackMuteDisplay[trackIndex] != trackMuted[trackIndex]) {
             // Calcular alturas
             int newFillH = map(volPercent, 0, MAX_VOLUME, 0, sliderH - 8);
             
@@ -3865,7 +3915,7 @@ void drawVolumesScreen() {
             uint16_t color2 = tft.color565(r, g, b);
             uint16_t barOuterColor = color2;
             uint16_t barInnerColor = trackColor;
-            if (trackMuted[i]) {
+            if (trackMuted[trackIndex]) {
                 barOuterColor = tft.color565(130, 130, 130);
                 barInnerColor = tft.color565(170, 170, 170);
             }
@@ -3885,7 +3935,7 @@ void drawVolumesScreen() {
             }
             
             // Si cambió mute, limpiar área del indicador (ya no se usa)
-            if (lastTrackMuteDisplay[i] != trackMuted[i] || forceUpdate) {
+            if (lastTrackMuteDisplay[trackIndex] != trackMuted[trackIndex] || forceUpdate) {
                 const int muteX = x + sliderW / 2;
                 const int muteY = sliderStartY - 10;
                 const int muteR = 7;
@@ -3893,16 +3943,16 @@ void drawVolumesScreen() {
             }
             
             // Valor numérico - actualizar SOLO si cambió
-            if (lastTrackVolDisplay[i] != volPercent || lastTrackMuteDisplay[i] != trackMuted[i]) {
+            if (lastTrackVolDisplay[trackIndex] != volPercent || lastTrackMuteDisplay[trackIndex] != trackMuted[trackIndex]) {
                 tft.fillRect(x + 4, sliderStartY + sliderH + 22, sliderW - 8, 8, COLOR_BG);
                 tft.setTextSize(1);
-                tft.setTextColor(trackMuted[i] ? COLOR_TEXT_DIM : COLOR_TEXT_DIM);
+                tft.setTextColor(trackMuted[trackIndex] ? COLOR_TEXT_DIM : COLOR_TEXT_DIM);
                 tft.setCursor(x + (volPercent < 100 ? 12 : 8), sliderStartY + sliderH + 22);
                 tft.printf("%d%%", volPercent);
             }
             
-            lastTrackVolDisplay[i] = volPercent;
-            lastTrackMuteDisplay[i] = trackMuted[i];
+            lastTrackVolDisplay[trackIndex] = volPercent;
+            lastTrackMuteDisplay[trackIndex] = trackMuted[trackIndex];
         }
     }
 }
@@ -4508,6 +4558,7 @@ void changeScreen(Screen newScreen) {
     
     // Si entramos al sequencer, mostrar LEDs del track seleccionado y solicitar patrón
     if (newScreen == SCREEN_SEQUENCER && !isPlaying) {
+        sequencerPage = selectedTrack / Config::TRACKS_PER_PAGE;
         updateStepLEDsForTrack(selectedTrack);
         showInstrumentOnTM1638(selectedTrack);
         
@@ -4515,6 +4566,11 @@ void changeScreen(Screen newScreen) {
         if (udpConnected) {
             requestPatternFromMaster();
         }
+    }
+
+    // Si entramos a VOLUMES, sincronizar página con track seleccionado
+    if (newScreen == SCREEN_VOLUMES) {
+        volumesPage = selectedTrack / Config::TRACKS_PER_PAGE;
     }
     
     // Si entramos a FILTERS, guardar valores y inicializar pantalla

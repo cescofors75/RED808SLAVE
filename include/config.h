@@ -23,7 +23,8 @@ namespace Config {
     // SECUENCIADOR
     // ============================================
     constexpr uint8_t MAX_STEPS = 16;       ///< Número de pasos por patrón
-    constexpr uint8_t MAX_TRACKS = 8;       ///< Número de tracks/instrumentos
+    constexpr uint8_t MAX_TRACKS = 16;      ///< Número de tracks/instrumentos (2 páginas x 8)
+    constexpr uint8_t TRACKS_PER_PAGE = 8;  ///< Tracks visibles por página en sequencer
     constexpr uint8_t MAX_PATTERNS = 16;    ///< Número de patrones almacenables
     constexpr uint8_t MAX_KITS = 3;         ///< Número de kits de sonido
     
@@ -39,7 +40,7 @@ namespace Config {
     // ============================================
     constexpr uint8_t DEFAULT_VOLUME = 75;      ///< Volumen por defecto (0-150)
     constexpr uint8_t MAX_VOLUME = 150;         ///< Volumen máximo ampliado
-    constexpr uint8_t MAX_SAMPLES = 8;          ///< Número de live pads
+    constexpr uint8_t MAX_SAMPLES = 16;         ///< Número de live pads
     constexpr uint8_t DEFAULT_TRACK_VOLUME = 100; ///< Volumen por defecto de cada track
     
     // ============================================
@@ -67,7 +68,10 @@ namespace Config {
     // ============================================
     // HARDWARE I2C
     // ============================================
-    constexpr uint8_t M5_ENCODER_ADDR = 0x41;  ///< Dirección I2C del M5 8ENCODER
+    constexpr uint8_t M5_ENCODER_MODULES = 2;       ///< Cantidad de módulos M5 8ENCODER esperados
+    constexpr uint8_t ENCODERS_PER_MODULE = 8;      ///< Encoders por cada módulo M5 8ENCODER
+    constexpr uint8_t M5_ENCODER_ADDR_1 = 0x41;     ///< Dirección I2C módulo Encoder8 #1
+    constexpr uint8_t M5_ENCODER_ADDR_2 = 0x42;     ///< Dirección I2C módulo Encoder8 #2
     
 } // namespace Config
 
