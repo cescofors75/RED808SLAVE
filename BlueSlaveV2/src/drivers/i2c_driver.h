@@ -4,7 +4,13 @@
 #pragma once
 
 #include <Wire.h>
+#include <freertos/semphr.h>
 #include "config.h"
+
+// Global I2C mutex - MUST be used by ALL Wire operations across all cores
+extern SemaphoreHandle_t i2c_bus_mutex;
+bool i2c_lock(int timeout_ms = 50);
+void i2c_unlock();
 
 void i2c_init();
 bool i2c_write_byte(uint8_t addr, uint8_t reg, uint8_t data);

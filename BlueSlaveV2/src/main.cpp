@@ -621,7 +621,6 @@ void setup() {
 
     // 3. LCD panel
     Serial.println("[LCD] Initializing RGB panel...");
-    io_ext_lcd_reset();
     lcd_panel = rgb_lcd_init();
     if (!lcd_panel) {
         Serial.println("[LCD] FATAL: Panel init failed!");
