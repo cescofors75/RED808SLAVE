@@ -59,10 +59,10 @@ namespace Config {
     constexpr uint16_t UDP_PORT = 8888;                  ///< Puerto UDP para comunicación
     
     // ============================================
-    // DISPLAY
+    // DISPLAY (Waveshare ESP32-S3-Touch-LCD-7, RGB 1024x600)
     // ============================================
-    constexpr uint16_t SCREEN_WIDTH = 480;   ///< Ancho de pantalla TFT
-    constexpr uint16_t SCREEN_HEIGHT = 320;  ///< Alto de pantalla TFT
+    constexpr uint16_t SCREEN_WIDTH = 1024;  ///< Ancho de pantalla LCD
+    constexpr uint16_t SCREEN_HEIGHT = 600;  ///< Alto de pantalla LCD
     constexpr uint8_t MENU_ITEMS = 6;        ///< Número de items en menú principal
     
     // ============================================
@@ -107,81 +107,33 @@ namespace Config {
 } // namespace Config
 
 // ============================================
-// PIN DEFINITIONS (mantener como #define por requerimientos del compilador)
+// PIN DEFINITIONS - Waveshare ESP32-S3-Touch-LCD-7
+// ============================================
+// NOTE: LCD uses RGB parallel (GPIO 0,1,2,3,5,7,10,14,17,18,21,38,39,40,41,42,45,46,47,48)
+//       Touch INT = GPIO 4
+//       I2C = GPIO 8, 9
+//       USB = GPIO 19, 20
+//       PSRAM = GPIO 33-37
+//       Free GPIOs: 6, 11, 12, 13, 15, 16
 // ============================================
 
-// TFT Display (SPI)
-#ifndef TFT_CS
-  #define TFT_CS   5
-  #define TFT_DC   2
-  #define TFT_RST  4
-  #define TFT_MOSI 23
-  #define TFT_SCK  18
-  #define TFT_MISO 19
+// I2C Pins (shared bus: CH422G, GT911, PCA9548A, M5ROTATE8, DFRobot)
+#ifndef I2C_SDA
+  #define I2C_SDA 8
+  #define I2C_SCL 9
 #endif
 
-// TM1638 Module 1 (Steps 1-8)
-#ifndef TM1638_1_STB
-  #define TM1638_1_STB 33
-  #define TM1638_1_CLK 25
-  #define TM1638_1_DIO 26
-#endif
-
-// TM1638 Module 2 (Steps 9-16)
-#ifndef TM1638_2_STB
-  #define TM1638_2_STB 32
-  #define TM1638_2_CLK 25
-  #define TM1638_2_DIO 27
-#endif
-
-// Rotary Encoder
+// Rotary Encoder (optional, if connected)
 #ifndef ENCODER_CLK
-  #define ENCODER_CLK 15   // GPIO15 - libre y seguro para WiFi
-  #define ENCODER_DT  14
+  #define ENCODER_CLK 15
+  #define ENCODER_DT  16
   #define ENCODER_SW  13
 #endif
 
-// Analog Buttons (3-button keypad on single ADC pin)
-#ifndef ANALOG_BUTTONS_PIN
-  #define ANALOG_BUTTONS_PIN 34
-  #define BTN_COUNT          3
-  
-  // Rangos ADC - CALIBRADOS con serial monitor (valores medidos reales)
-  // Botón 1: PLAY/STOP (medido: 593-609)
-  #define BTN_PLAY_STOP_MIN  350
-  #define BTN_PLAY_STOP_MAX  750
-  // Botón 2: MUTE (click) / CLEAR (hold) (medido: 1383-1389)
-  #define BTN_MUTE_MIN       1250
-  #define BTN_MUTE_MAX       1500
-  // Botón 3: BACK (medido: 2146-2154)
-  #define BTN_BACK_MIN       2000
-  #define BTN_BACK_MAX       2300
-  // Sin botón presionado
-  #define BTN_NONE_THRESHOLD 300
-#endif
-
-// Rotary Angle Potentiometer
-#ifndef ROTARY_ANGLE_PIN
-  #define ROTARY_ANGLE_PIN 35
-#endif
-
-// Rotary Angle Potentiometer 2 (Live Pads Volume)
-// NOTA: Debe ser ADC1 (GPIO 32-39) porque ADC2 no funciona con WiFi activo
-// GPIO 39 = pin VN en ESP32 DevKit (input-only, perfecto para pot)
-#ifndef ROTARY_ANGLE_PIN2
-  #define ROTARY_ANGLE_PIN2 39
-#endif
-
-// Rotary Angle Potentiometer 3 (BPM Control)
-// GPIO 36 = pin VP/SVP en ESP32 DevKit (ADC1_CH0, input-only)
-#ifndef BPM_POT_PIN
-  #define BPM_POT_PIN 36
-#endif
-
-// I2C Pins
-#ifndef I2C_SDA
-  #define I2C_SDA 21
-  #define I2C_SCL 22
+// Analog input (only GPIO 6 available as ADC1 - all others used by LCD)
+// Can be used for one potentiometer or analog button set
+#ifndef ANALOG_INPUT_PIN
+  #define ANALOG_INPUT_PIN 6
 #endif
 
 #endif // CONFIG_H
