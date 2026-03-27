@@ -27,7 +27,8 @@ enum Screen {
     SCREEN_DIAGNOSTICS,
     SCREEN_PATTERNS,
     SCREEN_VOLUMES,
-    SCREEN_FILTERS
+    SCREEN_FILTERS,
+    SCREEN_ENCODER_TEST
 };
 
 enum DisplayMode {

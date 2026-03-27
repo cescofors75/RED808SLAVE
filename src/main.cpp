@@ -3,6 +3,7 @@
 #include <TFT_eSPI.h>
 #include <TM1638plus.h>
 #include <M5ROTATE8.h>
+#include <DFRobot_VisualRotaryEncoder.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
@@ -202,6 +203,15 @@ M5ROTATE8 m5encoders[Config::M5_ENCODER_MODULES] = {
     M5ROTATE8(Config::M5_ENCODER_ADDR_1),
     M5ROTATE8(Config::M5_ENCODER_ADDR_2)
 };
+
+// DFRobot Visual Rotary Encoders (6 unidades)
+DFRobot_VisualRotaryEncoder_I2C* dfEncoders[Config::DFROBOT_ENCODER_COUNT] = {nullptr};
+bool dfEncoderConnected[Config::DFROBOT_ENCODER_COUNT] = {false};
+uint8_t dfEncoderConnectedCount = 0;
+uint16_t dfEncoderValues[Config::DFROBOT_ENCODER_COUNT] = {0};
+bool dfEncoderButtons[Config::DFROBOT_ENCODER_COUNT] = {false};
+unsigned long lastDFEncoderRead = 0;
+
 // RotaryEncoder encoder(ENCODER_CLK, ENCODER_DT, RotaryEncoder::LatchMode::TWO03);
 
 // GLOBAL VARIABLES
@@ -268,6 +278,13 @@ static const int8_t encoderStates[] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
 // M5 8ENCODER variables
 bool m5encoderConnected = false;  // Compatibilidad: true si al menos un módulo está conectado
 bool m5encoderModuleConnected[Config::M5_ENCODER_MODULES] = {false, false};
+bool i2cHubDetected = false;  // Auto-detectado en setup: true si hub I2C responde en I2C_HUB_ADDR
+uint8_t i2cDevicesFound[32];  // Direcciones de dispositivos I2C encontrados en el scan
+uint8_t i2cDeviceCount = 0;   // Cantidad de dispositivos I2C encontrados
+
+// Canales auto-detectados del PCA9548A (0xFF = no encontrado)
+uint8_t m5HubChannel[Config::M5_ENCODER_MODULES] = {0xFF, 0xFF};
+uint8_t dfRobotHubChannel[Config::DFROBOT_ENCODER_COUNT] = {0xFF, 0xFF};
 uint8_t encoderLEDColors[MAX_TRACKS][3] = {{0}};  // RGB de cada track (0-15)
 unsigned long lastEncoderRead = 0;
 unsigned long lastM5ButtonTime[MAX_TRACKS] = {0};  // Debounce por track
@@ -440,6 +457,7 @@ void drawLiveScreen();
 void drawSequencerScreen();
 void drawSettingsScreen();
 void drawDiagnosticsScreen();
+void drawEncoderTestScreen();
 void drawPatternsScreen();
 void drawVolumesScreen();  // Pantalla de volúmenes
 void drawFiltersScreen();  // Pantalla de filtros FX
@@ -471,8 +489,15 @@ void setLED(int ledIndex, bool state);
 void setAllLEDs(uint16_t pattern);
 uint16_t readAllButtons();
 bool getM5EncoderRoute(int track, int& moduleIndex, int& encoderIndex);
+bool selectI2CHubChannel(uint8_t channel);
+void deselectI2CHub();
+bool selectM5EncoderModule(int moduleIndex);
+bool selectDFRobotEncoder(int index);
+void scanI2CBus();
 void writeM5EncoderRGBForTrack(int track, uint8_t r, uint8_t g, uint8_t b);
 void updateTrackEncoderLED(int track);
+void initDFRobotEncoders();
+void handleDFRobotEncoders();
 
 // ============================================
 // TM1638 HELPERS
@@ -517,10 +542,244 @@ bool getM5EncoderRoute(int track, int& moduleIndex, int& encoderIndex) {
     return true;
 }
 
+bool selectI2CHubChannel(uint8_t channel) {
+    if (!i2cHubDetected) return true;  // Sin hub: acceso directo al bus
+    if (channel > 7) return false;
+
+    Wire.beginTransmission(Config::I2C_HUB_ADDR);
+    Wire.write(1 << channel);
+    return (Wire.endTransmission() == 0);
+}
+
+// Desactivar todos los canales del hub (evitar crosstalk entre lecturas)
+void deselectI2CHub() {
+    if (!i2cHubDetected) return;
+    Wire.beginTransmission(Config::I2C_HUB_ADDR);
+    Wire.write(0);
+    Wire.endTransmission();
+}
+
+bool selectM5EncoderModule(int moduleIndex) {
+    if (moduleIndex < 0 || moduleIndex >= Config::M5_ENCODER_MODULES) return false;
+    if (!i2cHubDetected) return true;  // Sin hub: acceso directo
+
+    uint8_t ch = m5HubChannel[moduleIndex];
+    if (ch == 0xFF) return false;  // No auto-detectado
+    return selectI2CHubChannel(ch);
+}
+
+bool selectDFRobotEncoder(int index) {
+    if (index < 0 || index >= Config::DFROBOT_ENCODER_COUNT) return false;
+    if (!i2cHubDetected) return true;  // Sin hub: acceso directo
+
+    uint8_t ch = dfRobotHubChannel[index];
+    if (ch == 0xFF) return false;  // No auto-detectado
+    return selectI2CHubChannel(ch);
+}
+
+void scanI2CBus() {
+    Serial.println("► I2C scan:");
+    i2cDeviceCount = 0;
+
+    // Reset auto-detect arrays
+    for (int i = 0; i < Config::M5_ENCODER_MODULES; i++) m5HubChannel[i] = 0xFF;
+    for (int i = 0; i < Config::DFROBOT_ENCODER_COUNT; i++) dfRobotHubChannel[i] = 0xFF;
+
+    Wire.flush();
+    delay(10);
+
+    // Auto-detectar hub I2C activo
+    Wire.beginTransmission(Config::I2C_HUB_ADDR);
+    i2cHubDetected = (Wire.endTransmission() == 0);
+
+    if (i2cHubDetected) {
+        Serial.printf("   Hub ACTIVO (PCA9548A) @ 0x%02X\n", Config::I2C_HUB_ADDR);
+
+        int m5Found = 0;
+        int dfFound = 0;
+
+        for (uint8_t ch = 0; ch < 8; ch++) {
+            if (!selectI2CHubChannel(ch)) continue;
+            delay(2);
+
+            // Buscar M5 Encoder8 (0x41)
+            Wire.beginTransmission(Config::M5_ENCODER_ADDR_1);
+            if (Wire.endTransmission() == 0) {
+                if (i2cDeviceCount < 32) i2cDevicesFound[i2cDeviceCount++] = Config::M5_ENCODER_ADDR_1;
+                if (m5Found < Config::M5_ENCODER_MODULES) {
+                    m5HubChannel[m5Found] = ch;
+                    Serial.printf("   - CH%d: 0x%02X [M5 Encoder8 #%d]\n", ch, Config::M5_ENCODER_ADDR_1, m5Found + 1);
+                    m5Found++;
+                }
+            }
+
+            // Buscar DFRobot SEN0502 (0x54-0x57)
+            for (uint8_t addr = 0x54; addr <= 0x57; addr++) {
+                Wire.beginTransmission(addr);
+                if (Wire.endTransmission() == 0) {
+                    if (i2cDeviceCount < 32) i2cDevicesFound[i2cDeviceCount++] = addr;
+                    if (dfFound < Config::DFROBOT_ENCODER_COUNT) {
+                        dfRobotHubChannel[dfFound] = ch;
+                        Serial.printf("   - CH%d: 0x%02X [DFRobot SEN0502 #%d]\n", ch, addr, dfFound + 1);
+                        dfFound++;
+                    }
+                }
+            }
+
+            delay(1);
+        }
+        deselectI2CHub();
+
+        // Resumen auto-detect
+        Serial.printf("   Auto-detect: %d M5, %d DFRobot\n", m5Found, dfFound);
+        for (int i = 0; i < Config::M5_ENCODER_MODULES; i++) {
+            if (m5HubChannel[i] != 0xFF)
+                Serial.printf("   → M5 #%d → CH%d\n", i + 1, m5HubChannel[i]);
+        }
+        for (int i = 0; i < Config::DFROBOT_ENCODER_COUNT; i++) {
+            if (dfRobotHubChannel[i] != 0xFF)
+                Serial.printf("   → DFRobot #%d → CH%d\n", i + 1, dfRobotHubChannel[i]);
+        }
+    } else {
+        Serial.printf("   Hub PASIVO (sin TCA9548A @ 0x%02X)\n", Config::I2C_HUB_ADDR);
+        const uint8_t knownAddrs[] = {0x41, 0x42, 0x54, 0x55, 0x56, 0x57};
+        for (uint8_t k = 0; k < 6; k++) {
+            Wire.beginTransmission(knownAddrs[k]);
+            if (Wire.endTransmission() == 0) {
+                if (i2cDeviceCount < 32) i2cDevicesFound[i2cDeviceCount++] = knownAddrs[k];
+                Serial.printf("   - 0x%02X\n", knownAddrs[k]);
+            }
+            delay(2);
+        }
+    }
+    Serial.printf("   Total: %d dispositivos encontrados\n", i2cDeviceCount);
+}
+
+// ============================================
+// DFROBOT VISUAL ROTARY ENCODER FUNCTIONS
+// ============================================
+void initDFRobotEncoders() {
+    Serial.println("► DFRobot Visual Rotary Encoder Init...");
+    dfEncoderConnectedCount = 0;
+
+    for (int i = 0; i < Config::DFROBOT_ENCODER_COUNT; i++) {
+        uint8_t addr = Config::DFROBOT_ENCODER_ADDRS[i];
+
+        // Con hub pasivo: evitar duplicados (misma dirección = mismo dispositivo)
+        // Con hub activo: cada encoder tiene su propio canal, duplicados OK
+        if (!i2cHubDetected) {
+            bool addrAlreadyUsed = false;
+            for (int j = 0; j < i; j++) {
+                if (dfEncoderConnected[j] && Config::DFROBOT_ENCODER_ADDRS[j] == addr) {
+                    addrAlreadyUsed = true;
+                    break;
+                }
+            }
+            if (addrAlreadyUsed) {
+                dfEncoderConnected[i] = false;
+                Serial.printf("   DFRobot #%d @ 0x%02X: SKIP (misma dir sin hub activo)\n", i + 1, addr);
+                continue;
+            }
+        }
+
+        // Seleccionar canal del hub antes de inicializar
+        if (!selectDFRobotEncoder(i)) {
+            dfEncoderConnected[i] = false;
+            Serial.printf("   DFRobot #%d @ 0x%02X: HUB CH ERROR\n", i + 1, addr);
+            continue;
+        }
+
+        dfEncoders[i] = new DFRobot_VisualRotaryEncoder_I2C(addr, &Wire);
+        delay(5);
+        if (dfEncoders[i]->begin() == 0) {
+            dfEncoderConnected[i] = true;
+            dfEncoderConnectedCount++;
+            dfEncoders[i]->setGainCoefficient(51);
+            dfEncoderValues[i] = dfEncoders[i]->getEncoderValue();
+            Serial.printf("   DFRobot #%d @ 0x%02X (CH%d): OK (val=%d)\n", 
+                         i + 1, addr, dfRobotHubChannel[i], dfEncoderValues[i]);
+        } else {
+            dfEncoderConnected[i] = false;
+            delete dfEncoders[i];
+            dfEncoders[i] = nullptr;
+            Serial.printf("   DFRobot #%d @ 0x%02X (CH%d): NOT FOUND\n", 
+                         i + 1, addr, dfRobotHubChannel[i]);
+        }
+        deselectI2CHub();
+    }
+    Serial.printf("   %d/%d DFRobot encoders connected\n", dfEncoderConnectedCount, Config::DFROBOT_ENCODER_COUNT);
+}
+
+void handleDFRobotEncoders() {
+    if (dfEncoderConnectedCount == 0) return;
+
+    unsigned long now = millis();
+    if (now - lastDFEncoderRead < Config::ENCODER_READ_INTERVAL) return;
+    lastDFEncoderRead = now;
+
+    for (int i = 0; i < Config::DFROBOT_ENCODER_COUNT; i++) {
+        if (!dfEncoderConnected[i] || !dfEncoders[i]) continue;
+
+        // Seleccionar canal del hub antes de leer
+        if (!selectDFRobotEncoder(i)) continue;
+
+        uint16_t newVal = dfEncoders[i]->getEncoderValue();
+        bool btn = dfEncoders[i]->detectButtonDown();
+
+        deselectI2CHub();  // Liberar bus después de leer
+
+        if (newVal != dfEncoderValues[i]) {
+            int16_t delta = (int16_t)newVal - (int16_t)dfEncoderValues[i];
+            dfEncoderValues[i] = newVal;
+
+            Serial.printf("► DFRobot #%d: val=%d delta=%d\n", i + 1, newVal, delta);
+
+            // Todos son infinitos ahora (DFROBOT_FINITE_COUNT == 0)
+            if (i == 0) {
+                // Infinito #1: ajuste fino de BPM
+                tempo = constrain(tempo + delta, MIN_BPM, MAX_BPM);
+                calculateStepInterval();
+                if (udpConnected) {
+                    JsonDocument doc;
+                    doc["cmd"] = "tempo";
+                    doc["value"] = tempo;
+                    sendUDPCommand(doc);
+                }
+                showBPMOnTM1638();
+                needsHeaderUpdate = true;
+            } else {
+                // Infinito #2: navegar patrones
+                changePattern(delta > 0 ? 1 : -1);
+            }
+        }
+
+        // Ambos infinitos tienen switch
+        if (btn != dfEncoderButtons[i]) {
+            dfEncoderButtons[i] = btn;
+            if (btn) {
+                Serial.printf("► DFRobot #%d BTN pressed\n", i + 1);
+                if (i == 0) {
+                    // Infinito #1 btn: tap tempo feedback
+                    if (udpConnected) {
+                        JsonDocument doc;
+                        doc["cmd"] = "trigger";
+                        doc["track"] = 4;
+                        sendUDPCommand(doc);
+                    }
+                } else {
+                    // Infinito #2 btn: reset al patrón 0
+                    changePattern(-currentPattern);
+                }
+            }
+        }
+    }
+}
+
 void writeM5EncoderRGBForTrack(int track, uint8_t r, uint8_t g, uint8_t b) {
     int moduleIndex = 0;
     int encoderIndex = 0;
     if (!getM5EncoderRoute(track, moduleIndex, encoderIndex)) return;
+    if (!selectM5EncoderModule(moduleIndex)) return;
     m5encoders[moduleIndex].writeRGB(encoderIndex, r, g, b);
 }
 
@@ -529,6 +788,7 @@ void updateTrackEncoderLED(int track) {
     int moduleIndex = 0;
     int encoderIndex = 0;
     if (!getM5EncoderRoute(track, moduleIndex, encoderIndex)) return;
+    if (!selectM5EncoderModule(moduleIndex)) return;
 
     if (trackMuted[track]) {
         m5encoders[moduleIndex].writeRGB(encoderIndex, 30, 0, 0);  // Rojo tenue = muteado
@@ -1145,7 +1405,10 @@ void setup() {
     // I2C Init para M5 8ENCODER
     Serial.print("► I2C Init (SDA:21, SCL:22)... ");
     Wire.begin(I2C_SDA, I2C_SCL);
+    Wire.setTimeOut(100);  // 100ms timeout para evitar cuelgues I2C
+    Wire.setClock(100000);  // 100kHz - más estable con hubs pasivos y cables largos
     Serial.println("OK");
+    scanI2CBus();
     
     // M5 8ENCODER Init (hasta 2 módulos en el mismo bus I2C)
     Serial.println("► M5 8ENCODER Init (multi-module)...");
@@ -1154,6 +1417,12 @@ void setup() {
     for (int module = 0; module < Config::M5_ENCODER_MODULES; module++) {
         const int moduleAddr = (module == 0) ? Config::M5_ENCODER_ADDR_1 : Config::M5_ENCODER_ADDR_2;
         Serial.printf("   Module %d @ 0x%02X... ", module + 1, moduleAddr);
+
+        if (!selectM5EncoderModule(module)) {
+            m5encoderModuleConnected[module] = false;
+            Serial.println("HUB CH ERROR");
+            continue;
+        }
 
         if (m5encoders[module].begin()) {
             m5encoderModuleConnected[module] = true;
@@ -1175,6 +1444,7 @@ void setup() {
 
         for (int module = 0; module < Config::M5_ENCODER_MODULES; module++) {
             if (!m5encoderModuleConnected[module]) continue;
+            if (!selectM5EncoderModule(module)) continue;
 
             // 1. Apagar todos los LEDs del módulo
             m5encoders[module].allOff();
@@ -1215,6 +1485,9 @@ void setup() {
     } else {
         Serial.println("   No M5 8ENCODER modules found (optional)");
     }
+    
+    // DFRobot Visual Rotary Encoders Init
+    initDFRobotEncoders();
     
     // Boot estilo consola UNIX
     drawConsoleBootScreen();
@@ -1297,6 +1570,9 @@ void loop() {
     // M5 8ENCODER: Leer encoders rotativos para control de tracks
     handleM5Encoders();
     
+    // DFRobot Visual Rotary Encoders
+    handleDFRobotEncoders();
+    
     // Lectura única ADC para botonera analógica (3 botones)
     readKeypad();
     
@@ -1356,6 +1632,9 @@ void loop() {
             case SCREEN_FILTERS:
                 drawFiltersScreen();
                 break;
+            case SCREEN_ENCODER_TEST:
+                drawEncoderTestScreen();
+                break;
             default:
                 break;
         }
@@ -1371,6 +1650,9 @@ void loop() {
         }
         if (currentScreen == SCREEN_FILTERS) {
             drawFiltersScreen();
+        }
+        if (currentScreen == SCREEN_ENCODER_TEST) {
+            drawEncoderTestScreen();
         }
         
         if (needsHeaderUpdate && currentScreen != SCREEN_MENU) {
@@ -1864,6 +2146,9 @@ void handleEncoder() {
                     updateStepLEDsForTrack(selectedTrack);
                 }
                 needsFullRedraw = true;
+            } else if (currentScreen == SCREEN_DIAGNOSTICS) {
+                // En diagnostics: ENTER abre test de encoders
+                changeScreen(SCREEN_ENCODER_TEST);
             }
         }
     }
@@ -2035,6 +2320,10 @@ void handleBackButton() {
         else if (currentScreen == SCREEN_PATTERNS) {
             changeScreen(SCREEN_MENU);
         }
+        // Desde ENCODER_TEST: volver a DIAGNOSTICS
+        else if (currentScreen == SCREEN_ENCODER_TEST) {
+            changeScreen(SCREEN_DIAGNOSTICS);
+        }
         // Desde cualquier otra pantalla: volver al menú
         else {
             // Desde FILTERS: restaurar valores guardados y salir con gracia
@@ -2123,16 +2412,20 @@ void handleVolume() {
     
     // --- POT 1: Sequencer Volume (pin 35) ---
     int rawSeq = analogRead(ROTARY_ANGLE_PIN);
-    adcSeqReadings[adcSeqIndex] = rawSeq;
-    adcSeqIndex = (adcSeqIndex + 1) % 5;
+    if (rawSeq >= 10) {  // Descartar lecturas espurias ADC
+        adcSeqReadings[adcSeqIndex] = rawSeq;
+        adcSeqIndex = (adcSeqIndex + 1) % 5;
+    }
     int seqSum = 0;
     for (int i = 0; i < 5; i++) seqSum += adcSeqReadings[i];
     int newSeqVol = map(seqSum / 5, 0, 4095, MAX_VOLUME, 0);
     
-    // --- POT 2: Live Pads Volume (pin 36) ---
+    // --- POT 2: Live Pads Volume (pin 39) ---
     int rawPad = analogRead(ROTARY_ANGLE_PIN2);
-    adcPadReadings[adcPadIndex] = rawPad;
-    adcPadIndex = (adcPadIndex + 1) % 5;
+    if (rawPad >= 10) {  // Descartar lecturas espurias ADC
+        adcPadReadings[adcPadIndex] = rawPad;
+        adcPadIndex = (adcPadIndex + 1) % 5;
+    }
     int padSum = 0;
     for (int i = 0; i < 5; i++) padSum += adcPadReadings[i];
     int newPadVol = map(padSum / 5, 0, 4095, MAX_VOLUME, 0);
@@ -2187,6 +2480,10 @@ void handleBPMPot() {
     static int adcBpmIndex = 0;
     
     int rawBpm = analogRead(BPM_POT_PIN);
+    
+    // Descartar lecturas espurias del ADC (ESP32 devuelve raw:0 esporádicamente)
+    if (rawBpm < 10) return;
+    
     adcBpmReadings[adcBpmIndex] = rawBpm;
     adcBpmIndex = (adcBpmIndex + 1) % 5;
     
@@ -2233,6 +2530,7 @@ void handleM5Encoders() {
         int moduleIndex = 0;
         int encoderIndex = 0;
         if (!getM5EncoderRoute(track, moduleIndex, encoderIndex)) continue;
+        if (!selectM5EncoderModule(moduleIndex)) continue;
 
         // Leer contador relativo (cambio desde última lectura)
         int32_t delta = m5encoders[moduleIndex].getRelCounter(encoderIndex);
@@ -2260,6 +2558,30 @@ void handleM5Encoders() {
                     
                     // Actualizar brillo del LED según volumen/mute
                     updateTrackEncoderLED(track);
+
+                    // En pantallas de edición, seguir el track movido para que se vea el cambio
+                    if (currentScreen == SCREEN_VOLUMES || currentScreen == SCREEN_SEQUENCER) {
+                        if (selectedTrack != track) {
+                            selectedTrack = track;
+                            int newPage = selectedTrack / Config::TRACKS_PER_PAGE;
+
+                            if (currentScreen == SCREEN_VOLUMES) {
+                                if (newPage != volumesPage) {
+                                    volumesPage = newPage;
+                                    needsFullRedraw = true;
+                                } else {
+                                    needsHeaderUpdate = true;
+                                }
+                            } else {
+                                if (newPage != sequencerPage) {
+                                    sequencerPage = newPage;
+                                    needsFullRedraw = true;
+                                } else {
+                                    needsGridUpdate = true;
+                                }
+                            }
+                        }
+                    }
                     break;
                 }
                     
@@ -2328,6 +2650,7 @@ void handleM5Encoders() {
     // Leer switches toggle de cada módulo con debounce
     for (int module = 0; module < Config::M5_ENCODER_MODULES; module++) {
         if (!m5encoderModuleConnected[module]) continue;
+        if (!selectM5EncoderModule(module)) continue;
 
         uint8_t switchState = m5encoders[module].inputSwitch();
         if (switchState && !lastM5SwitchState[module] && (millis() - lastM5SwitchTime[module] > 300)) {
@@ -2337,6 +2660,7 @@ void handleM5Encoders() {
         }
         lastM5SwitchState[module] = (switchState != 0);
     }
+    deselectI2CHub();
 }
 
 void updateEncoderLEDs() {
@@ -2459,6 +2783,9 @@ void updateTM1638Displays() {
                      diagnostic.tm1638_2_Ok && diagnostic.encoderOk;
         tm1.displayText(allOk ? "ALL  OK " : " ERROR  ");
         tm2.displayText(diagnostic.udpConnected ? "UDP  OK " : "NO  UDP ");
+    } else if (currentScreen == SCREEN_ENCODER_TEST) {
+        tm1.displayText("ENC TEST");
+        tm2.displayText("  LIVE  ");
     }
 }
 
@@ -2965,57 +3292,54 @@ void drawSequencerScreen() {
         tft.fillScreen(COLOR_BG);
         drawHeader();
         
-        // Indicador de página (2 páginas: tracks 1-8 / tracks 9-16)
-        int totalPages = (MAX_TRACKS + Config::TRACKS_PER_PAGE - 1) / Config::TRACKS_PER_PAGE;
+        // Indicador: 16 tracks visibles
         tft.setTextSize(1);
         tft.setTextColor(COLOR_ACCENT2);
-        tft.setCursor(420, 75);
-        tft.printf("PAG %d/%d", sequencerPage + 1, totalPages);
+        tft.setCursor(400, 75);
+        tft.print("16 TRACKS");
     }
     
     const int gridX = 8;
     const int gridY = 88;
     const int cellW = 27;
-    const int cellH = 24;
-    const int labelW = 38;
+    const int cellH = 12;       // Compacto: 12px por track para ver 16
+    const int cellGap = 1;
+    const int labelW = 22;      // Label estrecho para textSize 1
     
     Pattern& pattern = patterns[currentPattern];
     
-    // Mostrar 8 tracks según la página actual (0=tracks 0-7, 1=tracks 8-15)
-    int trackStart = sequencerPage * Config::TRACKS_PER_PAGE;
-    int trackEnd = min(trackStart + (int)Config::TRACKS_PER_PAGE, (int)MAX_TRACKS);
-    int tracksVisible = trackEnd - trackStart;
+    // Mostrar TODOS los 16 tracks (sin paginación)
+    const int trackStart = 0;
+    const int tracksVisible = MAX_TRACKS;
     
     if (needsFullRedraw) {
-        tft.fillRoundRect(gridX - 2, gridY - 2, 468, 210, 8, COLOR_NAVY);
+        int gridH = tracksVisible * (cellH + cellGap) + 4;
+        tft.fillRoundRect(gridX - 2, gridY - 2, 468, gridH, 6, COLOR_NAVY);
         
         tft.setTextSize(1);
         for (int s = 0; s < MAX_STEPS; s++) {
             int x = gridX + labelW + s * (cellW + 1);
             tft.setTextColor((s % 4 == 0) ? COLOR_ACCENT : COLOR_TEXT_DIM);
-            tft.setCursor(x + 6, gridY - 10);
+            tft.setCursor(x + 8, gridY - 10);
             tft.printf("%d", (s + 1) % 10);
         }
         
-        tft.setTextSize(2);
+        tft.setTextSize(1);
         for (int i = 0; i < tracksVisible; i++) {
-            int t = trackStart + i;  // Track real (0-7 o 8-15)
-            int y = gridY + 2 + i * (cellH + 2);
+            int t = trackStart + i;
+            int y = gridY + 2 + i * (cellH + cellGap);
             
-            // Resaltar track seleccionado con fondo
             if (t == selectedTrack) {
-                tft.fillRect(gridX, y - 1, labelW - 2, cellH + 2, COLOR_PRIMARY);
+                tft.fillRect(gridX, y, labelW - 2, cellH, COLOR_PRIMARY);
             }
             
-            // Mostrar MUTED con indicador visual claro
             if (pattern.muted[t]) {
                 tft.setTextColor(COLOR_ERROR);
                 tft.setCursor(gridX + 2, y + 2);
-                tft.print("[M]");
+                tft.print("M");
             } else {
-                // Usar color único por instrumento
                 tft.setTextColor(t == selectedTrack ? TFT_WHITE : getInstrumentColor(t));
-                tft.setCursor(gridX + 4, y + 2);
+                tft.setCursor(gridX + 2, y + 2);
                 tft.print(trackNames[t]);
             }
         }
@@ -3025,55 +3349,49 @@ void drawSequencerScreen() {
     
     // Redibujar etiquetas si cambi\u00f3 el grid (por ejemplo, al mutear)
     if (needsGridUpdate) {
-        tft.setTextSize(2);
+        tft.setTextSize(1);
         for (int i = 0; i < tracksVisible; i++) {
-            int t = trackStart + i;  // Track real
-            int y = gridY + 2 + i * (cellH + 2);
+            int t = trackStart + i;
+            int y = gridY + 2 + i * (cellH + cellGap);
             
-            // Limpiar \u00e1rea de etiqueta
-            tft.fillRect(gridX, y - 1, labelW - 2, cellH + 2, 
+            tft.fillRect(gridX, y, labelW - 2, cellH, 
                         (t == selectedTrack) ? COLOR_PRIMARY : COLOR_NAVY);
             
-            // Redibujar etiqueta con estado actualizado
             if (pattern.muted[t]) {
                 tft.setTextColor(COLOR_ERROR);
                 tft.setCursor(gridX + 2, y + 2);
-                tft.print("[M]");
+                tft.print("M");
             } else {
                 tft.setTextColor(t == selectedTrack ? TFT_WHITE : getInstrumentColor(t));
-                tft.setCursor(gridX + 4, y + 2);
+                tft.setCursor(gridX + 2, y + 2);
                 tft.print(trackNames[t]);
             }
         }
     }
     
-    // Dibujar celdas del grid (8 tracks, sin páginas)
+    // Dibujar celdas del grid (16 tracks, sin paginación)
     for (int i = 0; i < tracksVisible; i++) {
-        int t = trackStart + i;  // Track real (0-7)
+        int t = trackStart + i;
         for (int s = 0; s < MAX_STEPS; s++) {
             if (needsFullRedraw || needsGridUpdate || (s == currentStep || s == lastStep)) {
                 int x = gridX + labelW + s * (cellW + 1);
-                int y = gridY + 2 + i * (cellH + 2);  // Usar 'i' para posición visual
+                int y = gridY + 2 + i * (cellH + cellGap);
                 
                 uint16_t color;
                 uint16_t border = COLOR_NAVY;
-                
-                // Si el track está muteado, oscurecer todo
                 bool isMuted = pattern.muted[t];
                 
                 if (isPlaying && s == currentStep) {
-                    // Durante reproducción, usar color del instrumento si está activo
                     if (isMuted) {
-                        color = pattern.steps[t][s] ? 0x2104 : COLOR_NAVY;  // Gris oscuro si muted
+                        color = pattern.steps[t][s] ? 0x2104 : COLOR_NAVY;
                         border = COLOR_ERROR;
                     } else {
                         color = pattern.steps[t][s] ? getInstrumentColor(t) : COLOR_NAVY_LIGHT;
                         border = pattern.steps[t][s] ? getInstrumentColor(t) : COLOR_WARNING;
                     }
                 } else if (pattern.steps[t][s]) {
-                    // Step activo: usar color del instrumento o gris si muted
                     if (isMuted) {
-                        color = 0x3186;  // Gris medio para indicar muted
+                        color = 0x3186;
                         border = COLOR_ERROR;
                     } else {
                         color = getInstrumentColor(t);
@@ -3083,13 +3401,14 @@ void drawSequencerScreen() {
                     color = COLOR_NAVY_LIGHT;
                 }
                 
-                tft.fillRoundRect(x, y, cellW, cellH, 3, color);
+                tft.fillRect(x, y, cellW, cellH, color);
                 if (border != COLOR_NAVY) {
-                    tft.drawRoundRect(x, y, cellW, cellH, 3, border);
+                    tft.drawRect(x, y, cellW, cellH, border);
                 }
                 
                 if (s % 4 == 0 && needsFullRedraw) {
-                    tft.drawFastVLine(x - 1, gridY, 200, COLOR_ACCENT);
+                    int gridH = tracksVisible * (cellH + cellGap);
+                    tft.drawFastVLine(x - 1, gridY, gridH, COLOR_ACCENT);
                 }
             }
         }
@@ -3452,8 +3771,295 @@ void drawDiagnosticsScreen() {
     
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TEXT_DIM);
-    tft.setCursor(180, 305);
-    tft.println("BACK: MENU");
+    tft.setCursor(120, 305);
+    tft.print("ENTER: ENC TEST");
+    tft.setTextColor(COLOR_TEXT_DIM);
+    tft.print("  |  ");
+    tft.setTextColor(COLOR_TEXT_DIM);
+    tft.print("BACK: MENU");
+}
+
+// ============================================
+// PANTALLA TEST ENCODERS/ROTARYS - Lectura en vivo
+// ============================================
+void drawEncoderTestScreen() {
+    static unsigned long lastTestUpdate = 0;
+    static int lastPotValues[3] = {-1, -1, -1};
+    static int lastEncPos = -9999;
+    static bool lastEncBtn = false;
+    static int32_t lastM5Counters[MAX_TRACKS];
+    static bool lastM5Buttons[MAX_TRACKS];
+    static uint16_t lastDFValues[Config::DFROBOT_ENCODER_COUNT];
+    static bool lastDFButtons[Config::DFROBOT_ENCODER_COUNT];
+    static bool testScreenInit = false;
+
+    unsigned long now = millis();
+    bool forceUpdate = needsFullRedraw;
+
+    if (!forceUpdate && (now - lastTestUpdate < 80)) return;
+    lastTestUpdate = now;
+
+    if (forceUpdate) {
+        testScreenInit = false;
+        tft.fillScreen(COLOR_BG);
+        drawHeader();
+
+        // Título
+        tft.fillRoundRect(120, 55, 240, 28, 6, COLOR_PRIMARY);
+        tft.drawRoundRect(120, 55, 240, 28, 6, COLOR_ACCENT);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_TEXT);
+        tft.setCursor(130, 60);
+        tft.print("ENCODER TEST");
+
+        // --- Sección 1: Potenciómetros analógicos ---
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_ACCENT2);
+        tft.setCursor(10, 92);
+        tft.print("ANALOG POTS (ADC)");
+
+        const char* potLabels[] = {"SEQ VOL (35)", "PAD VOL (39)", "BPM POT (36)"};
+        for (int i = 0; i < 3; i++) {
+            int y = 105 + i * 18;
+            tft.fillRoundRect(10, y, 220, 16, 3, COLOR_NAVY);
+            tft.setTextSize(1);
+            tft.setTextColor(COLOR_TEXT_DIM);
+            tft.setCursor(14, y + 4);
+            tft.print(potLabels[i]);
+        }
+
+        // --- Sección 2: Encoder mecánico ---
+        tft.setTextColor(COLOR_ACCENT2);
+        tft.setCursor(10, 162);
+        tft.print("ROTARY ENCODER (GPIO 15/14/13)");
+
+        tft.fillRoundRect(10, 175, 220, 16, 3, COLOR_NAVY);
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.setCursor(14, 179);
+        tft.print("POS:");
+
+        tft.fillRoundRect(10, 193, 220, 16, 3, COLOR_NAVY);
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.setCursor(14, 197);
+        tft.print("BTN:");
+
+        // --- Sección 3: I2C Bus scan ---
+        tft.setTextColor(COLOR_ACCENT2);
+        tft.setCursor(10, 218);
+        tft.printf("I2C BUS (%s)", i2cHubDetected ? "HUB ACTIVO" : "PASIVO");
+
+        tft.fillRoundRect(10, 230, 220, 28, 3, COLOR_NAVY);
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.setCursor(14, 234);
+        if (i2cDeviceCount > 0) {
+            tft.printf("%d dev:", i2cDeviceCount);
+            for (uint8_t i = 0; i < i2cDeviceCount && i < 10; i++) {
+                tft.printf(" %02X", i2cDevicesFound[i]);
+            }
+        } else {
+            tft.print("No devices found");
+        }
+        // Second line: Module connection status
+        tft.setCursor(14, 246);
+        tft.setTextColor(m5encoderModuleConnected[0] ? COLOR_SUCCESS : COLOR_ERROR);
+        tft.printf("M5#1:%s", m5encoderModuleConnected[0] ? "OK" : "--");
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.print(" ");
+        tft.setTextColor(m5encoderModuleConnected[1] ? COLOR_SUCCESS : COLOR_ERROR);
+        tft.printf("M5#2:%s", m5encoderModuleConnected[1] ? "OK" : "--");
+        if (i2cHubDetected) {
+            tft.setTextColor(COLOR_ACCENT);
+            tft.print(" HUB");
+        }
+
+        // --- Sección 3b: DFRobot Visual Rotary Encoders ---
+        tft.setTextColor(COLOR_ACCENT2);
+        tft.setCursor(10, 264);
+        tft.printf("DFROBOT ENC (%d/%d)", dfEncoderConnectedCount, Config::DFROBOT_ENCODER_COUNT);
+
+        for (int i = 0; i < Config::DFROBOT_ENCODER_COUNT; i++) {
+            int col = i;
+            int x = 10 + col * 37;
+            int y = 275;
+            tft.fillRoundRect(x, y, 35, 16, 2, COLOR_NAVY);
+            tft.setTextSize(1);
+            tft.setTextColor(dfEncoderConnected[i] ? COLOR_SUCCESS : COLOR_ERROR);
+            tft.setCursor(x + 2, y + 4);
+            tft.printf("%02X%s", Config::DFROBOT_ENCODER_ADDRS[i], dfEncoderConnected[i] ? "" : "--");
+        }
+
+        // --- Sección 4: M5 8ENCODER módulos ---
+        tft.setTextColor(COLOR_ACCENT2);
+        tft.setCursor(248, 92);
+        tft.printf("M5 8ENC (%s)", i2cHubDetected ? "HUB" : "DIRECTO");
+
+        // Dibujar grid de 16 encoders: 2 filas de 8
+        for (int m = 0; m < Config::M5_ENCODER_MODULES; m++) {
+            int baseY = 105 + m * 90;
+            tft.setTextSize(1);
+            tft.setTextColor(m5encoderModuleConnected[m] ? COLOR_SUCCESS : COLOR_ERROR);
+            tft.setCursor(248, baseY);
+            tft.printf("MOD%d @0x%02X %s", m + 1,
+                (m == 0) ? Config::M5_ENCODER_ADDR_1 : Config::M5_ENCODER_ADDR_2,
+                m5encoderModuleConnected[m] ? "OK" : "--");
+
+            for (int e = 0; e < Config::ENCODERS_PER_MODULE; e++) {
+                int track = m * Config::ENCODERS_PER_MODULE + e;
+                int col = e;
+                int x = 248 + col * 28;
+                int y = baseY + 12;
+                tft.fillRoundRect(x, y, 26, 30, 3, COLOR_NAVY);
+                tft.setTextSize(1);
+                tft.setTextColor(getInstrumentColor(track));
+                tft.setCursor(x + 3, y + 2);
+                tft.print(trackNames[track]);
+            }
+        }
+
+        // Footer
+        tft.fillRect(0, 295, 480, 25, COLOR_PRIMARY);
+        tft.fillRect(0, 295, 480, 2, COLOR_ACCENT);
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_TEXT);
+        tft.setCursor(80, 305);
+        tft.print("LIVE READINGS");
+        tft.setTextColor(COLOR_TEXT_DIM);
+        tft.print("  |  Move encoders/pots to test  |  ");
+        tft.setTextColor(COLOR_ACCENT2);
+        tft.print("BACK");
+
+        // Reset cache
+        for (int i = 0; i < 3; i++) lastPotValues[i] = -1;
+        lastEncPos = -9999;
+        lastEncBtn = false;
+        for (int i = 0; i < MAX_TRACKS; i++) {
+            lastM5Counters[i] = -9999;
+            lastM5Buttons[i] = false;
+        }
+        for (int i = 0; i < Config::DFROBOT_ENCODER_COUNT; i++) {
+            lastDFValues[i] = 0xFFFF;
+            lastDFButtons[i] = false;
+        }
+        testScreenInit = true;
+    }
+
+    // ========== ACTUALIZACIÓN EN VIVO ==========
+
+    // 1. Potenciómetros
+    int potPins[] = {ROTARY_ANGLE_PIN, ROTARY_ANGLE_PIN2, BPM_POT_PIN};
+    for (int i = 0; i < 3; i++) {
+        int raw = analogRead(potPins[i]);
+        int pct = map(raw, 0, 4095, 0, 100);
+        if (lastPotValues[i] != pct) {
+            int y = 105 + i * 18;
+            // Valor numérico
+            tft.fillRect(150, y + 1, 78, 14, COLOR_NAVY);
+            tft.setTextSize(1);
+            tft.setTextColor(COLOR_ACCENT);
+            tft.setCursor(152, y + 4);
+            tft.printf("%4d (%3d%%)", raw, pct);
+            lastPotValues[i] = pct;
+        }
+    }
+
+    // 2. Encoder mecánico
+    int curPos = encoderPos;
+    if (curPos != lastEncPos) {
+        tft.fillRect(50, 176, 178, 14, COLOR_NAVY);
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_WARNING);
+        tft.setCursor(52, 179);
+        tft.printf("%d", curPos);
+        lastEncPos = curPos;
+    }
+    bool curBtn = (digitalRead(ENCODER_SW) == HIGH);
+    if (curBtn != lastEncBtn) {
+        tft.fillRect(50, 194, 178, 14, COLOR_NAVY);
+        tft.setTextSize(1);
+        tft.setTextColor(curBtn ? COLOR_SUCCESS : COLOR_TEXT_DIM);
+        tft.setCursor(52, 197);
+        tft.print(curBtn ? "PRESSED" : "released");
+        lastEncBtn = curBtn;
+    }
+
+    // 3. M5 8ENCODER módulos
+    for (int m = 0; m < Config::M5_ENCODER_MODULES; m++) {
+        if (!m5encoderModuleConnected[m]) continue;
+        if (!selectM5EncoderModule(m)) continue;
+
+        int baseY = 105 + m * 90;
+        for (int e = 0; e < Config::ENCODERS_PER_MODULE; e++) {
+            int track = m * Config::ENCODERS_PER_MODULE + e;
+            int x = 248 + e * 28;
+            int y = baseY + 12;
+
+            // Leer contador absoluto
+            int32_t cnt = m5encoders[m].getAbsCounter(e);
+            if (cnt != lastM5Counters[track]) {
+                tft.fillRect(x + 1, y + 12, 24, 8, COLOR_NAVY);
+                tft.setTextSize(1);
+                tft.setTextColor(COLOR_ACCENT);
+                tft.setCursor(x + 2, y + 13);
+                tft.printf("%d", (int)(cnt % 1000));
+                lastM5Counters[track] = cnt;
+            }
+
+            // Leer botón
+            bool btn = m5encoders[m].getKeyPressed(e);
+            if (btn != lastM5Buttons[track]) {
+                tft.fillRect(x + 1, y + 21, 24, 8, COLOR_NAVY);
+                tft.setTextSize(1);
+                tft.setTextColor(btn ? COLOR_SUCCESS : COLOR_NAVY);
+                tft.setCursor(x + 5, y + 22);
+                tft.print(btn ? "ON" : "");
+                lastM5Buttons[track] = btn;
+                // Flash LED on press
+                if (btn) {
+                    m5encoders[m].writeRGB(e, 255, 255, 255);
+                } else {
+                    uint16_t c = instrumentColors[track];
+                    uint8_t r = ((c >> 11) & 0x1F) << 3;
+                    uint8_t g = ((c >> 5) & 0x3F) << 2;
+                    uint8_t b = (c & 0x1F) << 3;
+                    m5encoders[m].writeRGB(e, r, g, b);
+                }
+            }
+        }
+        deselectI2CHub();
+    }
+
+    // 4. DFRobot Visual Rotary Encoders
+    for (int i = 0; i < Config::DFROBOT_ENCODER_COUNT; i++) {
+        if (!dfEncoderConnected[i] || !dfEncoders[i]) continue;
+
+        // Seleccionar canal del hub antes de leer
+        if (!selectDFRobotEncoder(i)) continue;
+        uint16_t val = dfEncoders[i]->getEncoderValue();
+        bool btn = dfEncoders[i]->detectButtonDown();
+        deselectI2CHub();
+
+        int x = 10 + i * 37;
+        int y = 275;
+
+        if (val != lastDFValues[i]) {
+            // Mostrar valor debajo del label
+            tft.fillRect(x + 1, y + 1, 33, 14, COLOR_NAVY);
+            tft.setTextSize(1);
+            tft.setTextColor(btn ? COLOR_SUCCESS : COLOR_ACCENT);
+            tft.setCursor(x + 2, y + 4);
+            tft.printf("%4d", val);
+            lastDFValues[i] = val;
+        }
+
+        if (btn != lastDFButtons[i]) {
+            // Flash bordercolor on button
+            tft.drawRoundRect(x, y, 35, 16, 2, btn ? COLOR_SUCCESS : COLOR_NAVY);
+            lastDFButtons[i] = btn;
+        }
+    }
 }
 
 // Cache para evitar redibujar si no cambió nada
@@ -3574,6 +4180,8 @@ void drawHeader() {
         tft.print("PATTERNS");
     } else if (currentScreen == SCREEN_FILTERS) {
         tft.print("FILTERS FX");
+    } else if (currentScreen == SCREEN_ENCODER_TEST) {
+        tft.print("ENC TEST");
     }
     hdr_lastScreen = currentScreen;
     
@@ -3773,7 +4381,6 @@ void drawVolumesScreen() {
     
     // Solo dibujar elementos estáticos la PRIMERA VEZ
     if (forceUpdate) {
-        volumesPage = selectedTrack / Config::TRACKS_PER_PAGE;
         tft.fillScreen(COLOR_BG);
         drawHeader();
         
@@ -3851,63 +4458,50 @@ void drawVolumesScreen() {
     }
     lastVolModeDisplay = volumeMode;
     
-    // ========== TRACK VOLUMES (paginado: 8 por página, total 16) ==========
-    int sliderStartY = 165;
-    int sliderH = 100;
-    int sliderW = 46;
-    int spacing = 7;
-    int startX = 16;
+    // ========== TRACK VOLUMES (16 tracks en 2 filas de 8) ==========
+    const int sliderH = 55;
+    const int sliderW = 46;
+    const int spacing = 7;
+    const int startX = 16;
+    const int rowGap = 18;  // Espacio entre filas (label + gap)
+    const int sliderStartY1 = 158;  // Fila 1: tracks 1-8
+    const int sliderStartY2 = sliderStartY1 + sliderH + rowGap;  // Fila 2: tracks 9-16
 
-    int trackStart = volumesPage * Config::TRACKS_PER_PAGE;
-    int trackEnd = min(trackStart + (int)Config::TRACKS_PER_PAGE, (int)MAX_TRACKS);
-    int tracksVisible = trackEnd - trackStart;
-
-    // Indicador de página
-    int totalPages = (MAX_TRACKS + Config::TRACKS_PER_PAGE - 1) / Config::TRACKS_PER_PAGE;
+    // Indicador 16 tracks
     tft.fillRect(372, 56, 100, 14, COLOR_BG);
     tft.setTextSize(1);
     tft.setTextColor(COLOR_ACCENT2);
     tft.setCursor(374, 58);
-    tft.printf("TRACKS %d/%d", volumesPage + 1, totalPages);
+    tft.print("16 TRACKS");
     
-    for (int i = 0; i < tracksVisible; i++) {
-        int trackIndex = trackStart + i;
-        int x = startX + i * (sliderW + spacing);
+    for (int trackIndex = 0; trackIndex < MAX_TRACKS; trackIndex++) {
+        int row = trackIndex / 8;
+        int col = trackIndex % 8;
+        int x = startX + col * (sliderW + spacing);
+        int sliderY = (row == 0) ? sliderStartY1 : sliderStartY2;
         uint16_t trackColor = getInstrumentColor(trackIndex);
         int volPercent = trackVolumes[trackIndex];
         
-        // PRIMERA VEZ: dibujar marco, fondo y labels (SOLO UNA VEZ)
+        // PRIMERA VEZ: dibujar marco, fondo y labels
         if (!volumesScreenInitialized || needsFullRedraw) {
-            // Fondo interno
-            tft.fillRoundRect(x + 1, sliderStartY + 1, sliderW - 2, sliderH - 2, 3, COLOR_NAVY);
+            tft.fillRoundRect(x + 1, sliderY + 1, sliderW - 2, sliderH - 2, 3, COLOR_NAVY);
+            tft.drawRoundRect(x, sliderY, sliderW, sliderH, 4, COLOR_BORDER);
             
-            // Marco del fader
-            tft.drawRoundRect(x, sliderStartY, sliderW, sliderH, 4, COLOR_BORDER);
-            
-            // Label del track (abajo)
-            tft.setTextSize(2);
+            // Label del track (abajo del slider)
+            tft.setTextSize(1);
             tft.setTextColor(trackColor);
-            tft.setCursor(x + (sliderW - 24) / 2, sliderStartY + sliderH + 5);
+            tft.setCursor(x + (sliderW - 12) / 2, sliderY + sliderH + 3);
             tft.print(trackNames[trackIndex]);
 
-            // Track seleccionado en esta página
             if (trackIndex == selectedTrack) {
-                tft.drawRoundRect(x - 2, sliderStartY - 2, sliderW + 4, sliderH + 4, 6, COLOR_ACCENT);
+                tft.drawRoundRect(x - 2, sliderY - 2, sliderW + 4, sliderH + 4, 6, COLOR_ACCENT);
             }
-            
-            // Limpiar área del indicador de mute antiguo (ya no se usa)
-            const int muteX = x + sliderW / 2;
-            const int muteY = sliderStartY - 10;
-            const int muteR = 7;
-            tft.fillCircle(muteX, muteY, muteR + 1, COLOR_BG);
         }
         
-        // ACTUALIZAR SOLO SI CAMBIÓ - MODO INCREMENTAL SIN BORRAR TODO
+        // ACTUALIZAR SOLO SI CAMBIÓ
         if (lastTrackVolDisplay[trackIndex] != volPercent || lastTrackMuteDisplay[trackIndex] != trackMuted[trackIndex]) {
-            // Calcular alturas
             int newFillH = map(volPercent, 0, MAX_VOLUME, 0, sliderH - 8);
             
-            // Colores (si está muteado: tono pastel gris)
             uint16_t color1 = trackColor;
             uint8_t r = ((color1 >> 11) & 0x1F) * 5;
             uint8_t g = ((color1 >> 5) & 0x3F) * 2;
@@ -3920,35 +4514,16 @@ void drawVolumesScreen() {
                 barInnerColor = tft.color565(170, 170, 170);
             }
             
-            // Limpiar SOLO el área de la barra (no todo el fader)
-            int barAreaY = sliderStartY + 3;
+            int barAreaY = sliderY + 3;
             int barAreaH = sliderH - 8;
             tft.fillRect(x + 4, barAreaY, sliderW - 8, barAreaH, COLOR_NAVY);
             
-            // Barra completa (evita líneas negras al subir)
             if (newFillH > 0) {
-                int barY = sliderStartY + sliderH - 5 - newFillH;
+                int barY = sliderY + sliderH - 5 - newFillH;
                 tft.fillRect(x + 4, barY, sliderW - 8, newFillH, barOuterColor);
                 if (newFillH > 2) {
                     tft.fillRect(x + 5, barY + 1, sliderW - 10, newFillH - 2, barInnerColor);
                 }
-            }
-            
-            // Si cambió mute, limpiar área del indicador (ya no se usa)
-            if (lastTrackMuteDisplay[trackIndex] != trackMuted[trackIndex] || forceUpdate) {
-                const int muteX = x + sliderW / 2;
-                const int muteY = sliderStartY - 10;
-                const int muteR = 7;
-                tft.fillCircle(muteX, muteY, muteR + 1, COLOR_BG);
-            }
-            
-            // Valor numérico - actualizar SOLO si cambió
-            if (lastTrackVolDisplay[trackIndex] != volPercent || lastTrackMuteDisplay[trackIndex] != trackMuted[trackIndex]) {
-                tft.fillRect(x + 4, sliderStartY + sliderH + 22, sliderW - 8, 8, COLOR_BG);
-                tft.setTextSize(1);
-                tft.setTextColor(trackMuted[trackIndex] ? COLOR_TEXT_DIM : COLOR_TEXT_DIM);
-                tft.setCursor(x + (volPercent < 100 ? 12 : 8), sliderStartY + sliderH + 22);
-                tft.printf("%d%%", volPercent);
             }
             
             lastTrackVolDisplay[trackIndex] = volPercent;

@@ -71,7 +71,39 @@ namespace Config {
     constexpr uint8_t M5_ENCODER_MODULES = 2;       ///< Cantidad de módulos M5 8ENCODER esperados
     constexpr uint8_t ENCODERS_PER_MODULE = 8;      ///< Encoders por cada módulo M5 8ENCODER
     constexpr uint8_t M5_ENCODER_ADDR_1 = 0x41;     ///< Dirección I2C módulo Encoder8 #1
-    constexpr uint8_t M5_ENCODER_ADDR_2 = 0x42;     ///< Dirección I2C módulo Encoder8 #2
+    constexpr uint8_t M5_ENCODER_ADDR_2 = 0x41;     ///< Dirección I2C módulo Encoder8 #2 (misma dir, diferente canal hub)
+
+    // ============================================
+    // DFROBOT VISUAL ROTARY ENCODERS
+    // ============================================
+    // Infinitos (SEN0502): corona LED, switch, DIP 0x54 (ambos iguales, separados por canal hub)
+    // Finitos (SEN0156): analógicos, no I2C — pendiente ADS1115
+    constexpr uint8_t DFROBOT_ENCODER_COUNT = 2;     ///< Solo infinitos por ahora (SEN0502)
+    constexpr uint8_t DFROBOT_INFINITE_COUNT = 2;    ///< Rotarys infinitos con switch
+    constexpr uint8_t DFROBOT_FINITE_COUNT = 0;      ///< Rotarys finitos (analógicos, no I2C)
+    constexpr uint8_t DFROBOT_ENCODER_ADDRS[2] = {
+        0x54,  // Infinito #1 (DIP: 0,0) — Hub CH2
+        0x54   // Infinito #2 (DIP: 0,0) — Hub CH3 (misma dir, diferente canal)
+    };
+
+    // ============================================
+    // HUB I2C PCA9548A (auto-detectado en runtime)
+    // ============================================
+    // Hub pasivo: todos comparten bus (direcciones deben ser únicas)
+    // Hub activo (PCA9548A): auto-detectado en runtime, permite misma dirección en canales diferentes
+    //
+    // ASIGNACIÓN DE CANALES PCA9548A:
+    //   CH0: M5 Encoder8 #1 (0x41)
+    //   CH1: M5 Encoder8 #2 (0x41) — misma dirección, canal diferente
+    //   CH2: DFRobot SEN0502 #1 infinito (0x54)
+    //   CH3: DFRobot SEN0502 #2 infinito (0x54)
+    //   CH4-CH7: libres para expansión (finitos con ADS1115, etc.)
+    constexpr uint8_t I2C_HUB_ADDR = 0x70;          ///< Dirección del hub PCA9548A
+    constexpr uint8_t M5_ENCODER_HUB_CH_1 = 0;      ///< Canal hub para Encoder8 #1
+    constexpr uint8_t M5_ENCODER_HUB_CH_2 = 1;      ///< Canal hub para Encoder8 #2
+    constexpr uint8_t DFROBOT_HUB_CH_1 = 2;         ///< Canal hub para DFRobot infinito #1
+    constexpr uint8_t DFROBOT_HUB_CH_2 = 3;         ///< Canal hub para DFRobot infinito #2
+    constexpr uint8_t DFROBOT_HUB_CHANNELS[2] = {DFROBOT_HUB_CH_1, DFROBOT_HUB_CH_2};
     
 } // namespace Config
 
