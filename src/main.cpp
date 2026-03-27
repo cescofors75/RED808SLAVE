@@ -296,6 +296,7 @@ unsigned long lastM5SwitchTime[Config::M5_ENCODER_MODULES] = {0};
 VolumeMode volumeMode = VOL_SEQUENCER;  // Modo por defecto
 int sequencerVolume = DEFAULT_VOLUME;  // 75%
 int livePadsVolume = 100;  // 100% - más fuerte para tocar en vivo
+
 int lastSequencerVolume = DEFAULT_VOLUME;
 int lastLivePadsVolume = 100;
 // lastVolumeRead ahora está en audioState
@@ -734,40 +735,42 @@ void handleDFRobotEncoders() {
 
             Serial.printf("► DFRobot #%d: val=%d delta=%d\n", i + 1, newVal, delta);
 
-            // Todos son infinitos ahora (DFROBOT_FINITE_COUNT == 0)
             if (i == 0) {
-                // Infinito #1: ajuste fino de BPM
-                tempo = constrain(tempo + delta, MIN_BPM, MAX_BPM);
-                calculateStepInterval();
-                if (udpConnected) {
-                    JsonDocument doc;
-                    doc["cmd"] = "tempo";
-                    doc["value"] = tempo;
-                    sendUDPCommand(doc);
+                // #1: FX — ajustar parámetro principal del FX seleccionado
+                TrackFilter& f = (filterSelectedTrack == -1) ? masterFilter : trackFilters[filterSelectedTrack];
+                uint8_t* param;
+                const char* fxName;
+                switch (filterSelectedFX) {
+                    case FILTER_DELAY:      param = &f.delayMix;      fxName = "DELAY";    break;
+                    case FILTER_FLANGER:    param = &f.flangerRate;   fxName = "FLANGER";  break;
+                    default:                param = &f.compThreshold; fxName = "COMPRESS"; break;
                 }
-                showBPMOnTM1638();
+                int newVal2 = constrain((int)*param + delta * 2, 0, 127);
+                *param = (uint8_t)newVal2;
+                sendFilterUDP(filterSelectedTrack, filterSelectedFX);
+                Serial.printf("► FX %s param: %d\n", fxName, newVal2);
+                needsFilterBarsUpdate = true;
                 needsHeaderUpdate = true;
             } else {
-                // Infinito #2: navegar patrones
+                // #2: Pattern select
                 changePattern(delta > 0 ? 1 : -1);
             }
         }
 
-        // Ambos infinitos tienen switch
+        // Todos los SEN0502 tienen switch
         if (btn != dfEncoderButtons[i]) {
             dfEncoderButtons[i] = btn;
             if (btn) {
                 Serial.printf("► DFRobot #%d BTN pressed\n", i + 1);
                 if (i == 0) {
-                    // Infinito #1 btn: tap tempo feedback
-                    if (udpConnected) {
-                        JsonDocument doc;
-                        doc["cmd"] = "trigger";
-                        doc["track"] = 4;
-                        sendUDPCommand(doc);
-                    }
+                    // #1 btn: ciclar FX (DELAY → FLANGER → COMPRESSOR)
+                    filterSelectedFX = (filterSelectedFX + 1) % FILTER_COUNT;
+                    const char* fxNames[] = {"DELAY   ", "FLANGER ", "COMPRESS"};
+                    tm1.displayText(fxNames[filterSelectedFX]);
+                    Serial.printf("► FX changed to: %s\n", fxNames[filterSelectedFX]);
+                    needsFilterBarsUpdate = true;
                 } else {
-                    // Infinito #2 btn: reset al patrón 0
+                    // #2 btn: reset al patrón 0
                     changePattern(-currentPattern);
                 }
             }
