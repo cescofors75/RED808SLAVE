@@ -5,7 +5,7 @@
 
 #include <Wire.h>
 #include <freertos/semphr.h>
-#include "config.h"
+#include "../../include/config.h"
 
 // Global I2C mutex - MUST be used by ALL Wire operations across all cores
 extern SemaphoreHandle_t i2c_bus_mutex;

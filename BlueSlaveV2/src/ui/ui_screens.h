@@ -31,6 +31,7 @@ void ui_update_volumes();
 void ui_update_filters();
 void ui_update_diagnostics();
 void ui_update_header();
+void ui_update_menu_status();
 
 // Header bar (shared across screens)
 void ui_create_header(lv_obj_t* parent);

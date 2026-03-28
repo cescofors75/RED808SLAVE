@@ -101,6 +101,8 @@ extern int currentKit;
 extern int sequencerVolume;
 extern int livePadsVolume;
 extern int trackVolumes[];
+extern bool trackMuted[];
+extern int pendingLivePadTrigger;
 extern VolumeMode volumeMode;
 
 // Filters
@@ -118,6 +120,7 @@ extern bool hubDetected;
 // Connection
 extern bool udpConnected;
 extern bool wifiConnected;
+extern bool masterConnected;
 
 // Diagnostic
 extern DiagnosticInfo diagInfo;

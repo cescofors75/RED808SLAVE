@@ -4,7 +4,7 @@
 #include "lvgl_port.h"
 #include "gt911_touch.h"
 #include "rgb_lcd.h"
-#include "config.h"
+#include "../../include/config.h"
 #include "esp_lcd_panel_rgb.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -17,6 +17,8 @@ static esp_lcd_panel_handle_t lcd_panel = NULL;
 static lv_disp_draw_buf_t draw_buf;
 static lv_disp_drv_t disp_drv;
 static lv_indev_drv_t indev_drv;
+static lv_color_t* draw_buf_1 = NULL;
+static lv_color_t* draw_buf_2 = NULL;
 
 // Display flush callback - direct copy, no blocking wait
 static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
@@ -45,7 +47,7 @@ static void touch_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 static void lvgl_task(void* arg) {
     // Wait until UI is created
     while (!task_started) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(8));
     }
 
     while (true) {
@@ -53,7 +55,7 @@ static void lvgl_task(void* arg) {
             lv_timer_handler();
             lvgl_port_unlock();
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(8));
     }
 }
 
@@ -66,24 +68,26 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     // Init LVGL
     lv_init();
 
-    // Full-screen buffer in PSRAM (for full_refresh mode)
-    size_t buf_size = SCREEN_WIDTH * SCREEN_HEIGHT;
-    lv_color_t* buf1 = (lv_color_t*)heap_caps_malloc(buf_size * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    if (!buf1) {
-        ESP_LOGE(TAG, "Failed to allocate LVGL buffer!");
+    // Partial double buffer in PSRAM to reduce full-screen redraw flicker
+    const size_t buf_lines = 40;
+    const size_t buf_size = SCREEN_WIDTH * buf_lines;
+    draw_buf_1 = (lv_color_t*)heap_caps_malloc(buf_size * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    draw_buf_2 = (lv_color_t*)heap_caps_malloc(buf_size * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    if (!draw_buf_1 || !draw_buf_2) {
+        ESP_LOGE(TAG, "Failed to allocate LVGL draw buffers");
         return;
     }
 
-    lv_disp_draw_buf_init(&draw_buf, buf1, NULL, buf_size);
+    lv_disp_draw_buf_init(&draw_buf, draw_buf_1, draw_buf_2, buf_size);
 
-    // Display driver - full_refresh for minimal flicker with single FB
+    // Display driver - partial refresh minimizes visible redraw artifacts
     lv_disp_drv_init(&disp_drv);
     disp_drv.hor_res = SCREEN_WIDTH;
     disp_drv.ver_res = SCREEN_HEIGHT;
     disp_drv.flush_cb = disp_flush_cb;
     disp_drv.draw_buf = &draw_buf;
     disp_drv.user_data = lcd_panel;
-    disp_drv.full_refresh = 1;
+    disp_drv.full_refresh = 0;
     lv_disp_drv_register(&disp_drv);
 
     // Touch input driver
@@ -95,8 +99,8 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     // Create LVGL task on core 1 with larger stack for UI
     xTaskCreatePinnedToCore(lvgl_task, "lvgl", 16384, NULL, 2, NULL, 1);
 
-    ESP_LOGI(TAG, "LVGL port initialized: %dx%d, full_refresh, single buffer",
-             SCREEN_WIDTH, SCREEN_HEIGHT);
+    ESP_LOGI(TAG, "LVGL port initialized: %dx%d, partial refresh, double partial buffer (%d lines)",
+             SCREEN_WIDTH, SCREEN_HEIGHT, (int)buf_lines);
 }
 
 bool lvgl_port_lock(int timeout_ms) {

@@ -98,7 +98,7 @@
 // =============================================================================
 namespace WiFiConfig {
     constexpr const char* SSID     = "RED808";
-    constexpr const char* PASSWORD = "Red808Esp32";
+    constexpr const char* PASSWORD = "red808esp32";
     constexpr const char* MASTER_IP = "192.168.4.1";
     constexpr uint16_t UDP_PORT    = 8888;
     constexpr uint32_t TIMEOUT_MS  = 20000;
@@ -125,11 +125,32 @@ namespace Config {
     constexpr int DEFAULT_TRACK_VOLUME = 100;
 
     // Timing
-    constexpr uint32_t ENCODER_READ_MS    = 50;
+    constexpr uint32_t ENCODER_READ_MS    = 20;
     constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
     constexpr uint32_t LED_FLASH_MS       = 100;
-    constexpr uint32_t SCREEN_UPDATE_MS   = 16;  // ~60 FPS
+    constexpr uint32_t SCREEN_UPDATE_MS   = 16;  // balanced for smoother, less flicker (~60 FPS)
     constexpr uint32_t UDP_CHECK_MS       = 30000;
+
+    // Touch tuning (Waveshare 7B). Fine tune offsets if hitboxes feel shifted.
+    constexpr bool TOUCH_SWAP_XY = false;
+    constexpr bool TOUCH_INVERT_X = false;
+    constexpr bool TOUCH_INVERT_Y = false;
+    constexpr int TOUCH_X_OFFSET = 0;
+    constexpr int TOUCH_Y_OFFSET = 0;
+    constexpr int TOUCH_X_SCALE_PCT = 100;
+    constexpr int TOUCH_Y_SCALE_PCT = 100;
+    constexpr int TOUCH_JITTER_PX = 3;
+    // Raw touch range calibration (GT911 reported range before transform)
+    constexpr int TOUCH_RAW_MIN_X = 0;
+    constexpr int TOUCH_RAW_MAX_X = 1023;
+    constexpr int TOUCH_RAW_MIN_Y = 0;
+    constexpr int TOUCH_RAW_MAX_Y = 599;
+
+    // DFRobot rotary tuning
+    constexpr int DF_DELTA_CLAMP = 16;
+    constexpr int DF_GLITCH_THRESHOLD = 64;
+    constexpr int DF_FILTER_STEP = 3;
+    constexpr int DF_PATTERN_STEP = 1;
 
     // Menu
     constexpr int MENU_ITEMS = 6;

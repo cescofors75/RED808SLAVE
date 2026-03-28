@@ -12,6 +12,15 @@
 static bool gt911_ok = false;
 static uint8_t gt911_addr = GT911_ADDR;
 
+static int32_t remap_touch_axis(int32_t raw, int32_t raw_min, int32_t raw_max, int32_t screen_max) {
+    if (raw_max <= raw_min || screen_max <= 0) {
+        return constrain(raw, 0, screen_max);
+    }
+
+    raw = constrain(raw, raw_min, raw_max);
+    return ((raw - raw_min) * screen_max) / (raw_max - raw_min);
+}
+
 // All GT911 Wire operations use the global i2c_bus_mutex via i2c_lock/i2c_unlock
 
 static bool gt911_write_reg(uint16_t reg, uint8_t data) {
@@ -140,26 +149,93 @@ TouchPoint gt911_read() {
     uint8_t touchCount = status & 0x0F;
     bool bufferReady = (status & 0x80) != 0;
 
+    static bool prev_valid = false;
+    static int32_t prev_x = 0;
+    static int32_t prev_y = 0;
+    static int32_t smooth_x = 0;
+    static int32_t smooth_y = 0;
+
     if (bufferReady && touchCount > 0 && touchCount <= 5) {
         uint8_t data[7];
         if (gt911_read_reg(GT911_REG_POINT1, data, 7)) {
-            // GT911 on Waveshare board: big-endian byte order
+            // Waveshare GT911 payload observed on this board
             uint16_t raw_x = ((uint16_t)data[1] << 8) | (uint16_t)data[2];
             uint16_t raw_y = ((uint16_t)data[3] << 8) | (uint16_t)data[4];
-            
-            // Clamp to screen bounds
-            if (raw_x < SCREEN_WIDTH && raw_y < SCREEN_HEIGHT) {
-                tp.x = raw_x;
-                tp.y = raw_y;
+
+            int32_t x = raw_x;
+            int32_t y = raw_y;
+            int32_t raw_min_x = Config::TOUCH_RAW_MIN_X;
+            int32_t raw_max_x = Config::TOUCH_RAW_MAX_X;
+            int32_t raw_min_y = Config::TOUCH_RAW_MIN_Y;
+            int32_t raw_max_y = Config::TOUCH_RAW_MAX_Y;
+
+            if (Config::TOUCH_SWAP_XY) {
+                int32_t tmp = x;
+                x = y;
+                y = tmp;
+
+                tmp = raw_min_x;
+                raw_min_x = raw_min_y;
+                raw_min_y = tmp;
+
+                tmp = raw_max_x;
+                raw_max_x = raw_max_y;
+                raw_max_y = tmp;
+            }
+
+            x = remap_touch_axis(x, raw_min_x, raw_max_x, SCREEN_WIDTH - 1);
+            y = remap_touch_axis(y, raw_min_y, raw_max_y, SCREEN_HEIGHT - 1);
+
+            if (Config::TOUCH_INVERT_X) x = (SCREEN_WIDTH - 1) - x;
+            if (Config::TOUCH_INVERT_Y) y = (SCREEN_HEIGHT - 1) - y;
+
+            x = (x * Config::TOUCH_X_SCALE_PCT) / 100 + Config::TOUCH_X_OFFSET;
+            y = (y * Config::TOUCH_Y_SCALE_PCT) / 100 + Config::TOUCH_Y_OFFSET;
+
+            // Reject sudden impossible jumps while finger is still down
+            if (prev_valid) {
+                if (abs((int)(x - prev_x)) > 180 || abs((int)(y - prev_y)) > 180) {
+                    x = prev_x;
+                    y = prev_y;
+                }
+            }
+
+            // Low-pass smoothing to improve button hit accuracy
+            if (!prev_valid) {
+                smooth_x = x;
+                smooth_y = y;
+            } else {
+                smooth_x = (smooth_x * 3 + x) / 4;
+                smooth_y = (smooth_y * 3 + y) / 4;
+                x = smooth_x;
+                y = smooth_y;
+            }
+
+            // Small jitter filter to improve hit stability on buttons
+            if (prev_valid) {
+                if (abs((int)(x - prev_x)) <= Config::TOUCH_JITTER_PX) x = prev_x;
+                if (abs((int)(y - prev_y)) <= Config::TOUCH_JITTER_PX) y = prev_y;
+            }
+
+            if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT) {
+                tp.x = (uint16_t)x;
+                tp.y = (uint16_t)y;
                 tp.pressed = true;
+                prev_x = x;
+                prev_y = y;
+                prev_valid = true;
+            } else {
+                prev_valid = false;
             }
             // Debug: log raw bytes (every 30th touch, remove after verification)
             static uint32_t dbg_cnt = 0;
             if (++dbg_cnt % 30 == 1) {
-                Serial.printf("[TOUCH] raw=[%02X %02X %02X %02X] x=%d y=%d valid=%d\n",
-                    data[1], data[2], data[3], data[4], raw_x, raw_y, tp.pressed);
+                Serial.printf("[TOUCH] raw=[%02X %02X %02X %02X] xy=%d,%d valid=%d\n",
+                    data[1], data[2], data[3], data[4], tp.x, tp.y, tp.pressed);
             }
         }
+    } else {
+        prev_valid = false;
     }
 
     // Clear status register

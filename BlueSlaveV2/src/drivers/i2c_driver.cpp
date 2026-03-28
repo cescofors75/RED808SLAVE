@@ -21,6 +21,7 @@ void i2c_init() {
         i2c_bus_mutex = xSemaphoreCreateMutex();
     }
     Wire.begin(I2C_SDA, I2C_SCL, I2C_FREQ);
+    Wire.setTimeOut(8);
 }
 
 bool i2c_write_byte(uint8_t addr, uint8_t reg, uint8_t data) {

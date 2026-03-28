@@ -4,8 +4,8 @@
 // =============================================================================
 #include "ui_screens.h"
 #include "ui_theme.h"
-#include "system_state.h"
-#include "config.h"
+#include "../../include/system_state.h"
+#include "../../include/config.h"
 #include <Esp.h>
 
 // Screen objects
@@ -23,6 +23,7 @@ static lv_obj_t* lbl_bpm = NULL;
 static lv_obj_t* lbl_pattern = NULL;
 static lv_obj_t* lbl_play = NULL;
 static lv_obj_t* lbl_wifi = NULL;
+static lv_obj_t* lbl_master = NULL;
 
 // Sequencer grid buttons
 static lv_obj_t* seq_grid[Config::MAX_TRACKS][Config::MAX_STEPS];
@@ -32,6 +33,7 @@ static lv_obj_t* lbl_step_indicator = NULL;
 // Volume sliders
 static lv_obj_t* vol_sliders[Config::MAX_TRACKS];
 static lv_obj_t* vol_labels[Config::MAX_TRACKS];
+static lv_obj_t* vol_name_labels[Config::MAX_TRACKS];
 
 // Filter UI
 static lv_obj_t* filter_arcs[3];       // Delay, Flanger, Compressor
@@ -41,13 +43,26 @@ static lv_obj_t* filter_value_labels[3];
 // Live pads
 static lv_obj_t* live_pads[Config::MAX_SAMPLES];
 
+static uint32_t last_nav_ms = 0;
+
+static void nav_to(Screen screen, lv_obj_t* scr) {
+    if (!scr) return;
+    if (currentScreen == screen || lv_scr_act() == scr) return;
+
+    uint32_t now = lv_tick_get();
+    if ((uint32_t)(now - last_nav_ms) < 180) return;
+    last_nav_ms = now;
+
+    currentScreen = screen;
+    lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
+}
+
 // ============================================================================
 // HEADER BAR (shared across screens)
 // ============================================================================
 static void back_btn_cb(lv_event_t* e) {
     (void)e;
-    currentScreen = SCREEN_MENU;
-    lv_scr_load_anim(scr_menu, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+    nav_to(SCREEN_MENU, scr_menu);
 }
 
 void ui_create_header(lv_obj_t* parent) {
@@ -140,12 +155,12 @@ void ui_update_header() {
 static void menu_btn_cb(lv_event_t* e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     switch (idx) {
-        case 0: currentScreen = SCREEN_LIVE; lv_scr_load_anim(scr_live, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false); break;
-        case 1: currentScreen = SCREEN_SEQUENCER; lv_scr_load_anim(scr_sequencer, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false); break;
-        case 2: currentScreen = SCREEN_VOLUMES; lv_scr_load_anim(scr_volumes, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false); break;
-        case 3: currentScreen = SCREEN_FILTERS; lv_scr_load_anim(scr_filters, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false); break;
-        case 4: currentScreen = SCREEN_SETTINGS; lv_scr_load_anim(scr_settings, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false); break;
-        case 5: currentScreen = SCREEN_DIAGNOSTICS; lv_scr_load_anim(scr_diagnostics, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false); break;
+        case 0: nav_to(SCREEN_LIVE, scr_live); break;
+        case 1: nav_to(SCREEN_SEQUENCER, scr_sequencer); break;
+        case 2: nav_to(SCREEN_VOLUMES, scr_volumes); break;
+        case 3: nav_to(SCREEN_FILTERS, scr_filters); break;
+        case 4: nav_to(SCREEN_SETTINGS, scr_settings); break;
+        case 5: nav_to(SCREEN_DIAGNOSTICS, scr_diagnostics); break;
     }
 }
 
@@ -161,6 +176,12 @@ void ui_create_menu_screen() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 56);
+
+    lbl_master = lv_label_create(scr_menu);
+    lv_label_set_text(lbl_master, masterConnected ? "MASTER: ONLINE" : "MASTER: OFFLINE");
+    lv_obj_set_style_text_font(lbl_master, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(lbl_master, masterConnected ? RED808_SUCCESS : RED808_ERROR, 0);
+    lv_obj_align(lbl_master, LV_ALIGN_TOP_MID, 0, 88);
 
     // 3x2 grid of menu buttons
     static const char* menu_names[] = {
@@ -209,8 +230,7 @@ static void live_pad_cb(lv_event_t* e) {
     int pad = (int)(intptr_t)lv_event_get_user_data(e);
     // Flash feedback
     lv_obj_set_style_bg_color(lv_event_get_target(e), lv_color_white(), 0);
-    // TODO: Send UDP trigger
-    (void)pad;
+    pendingLivePadTrigger = pad;
 }
 
 static void live_pad_release_cb(lv_event_t* e) {
@@ -355,6 +375,27 @@ static void vol_slider_cb(lv_event_t* e) {
     }
 }
 
+static void ui_apply_volume_track_style(int track) {
+    if (track < 0 || track >= Config::MAX_TRACKS) return;
+
+    lv_color_t indicator = trackMuted[track] ? RED808_ERROR : inst_colors[track];
+    lv_color_t text_color = trackMuted[track] ? RED808_ERROR : inst_colors[track];
+    lv_opa_t slider_opa = trackMuted[track] ? LV_OPA_40 : LV_OPA_COVER;
+    lv_opa_t knob_opa = trackMuted[track] ? LV_OPA_50 : LV_OPA_COVER;
+
+    if (vol_sliders[track]) {
+        lv_obj_set_style_bg_opa(vol_sliders[track], slider_opa, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(vol_sliders[track], knob_opa, LV_PART_KNOB);
+        lv_obj_set_style_bg_color(vol_sliders[track], indicator, LV_PART_INDICATOR);
+    }
+    if (vol_name_labels[track]) {
+        lv_obj_set_style_text_color(vol_name_labels[track], text_color, 0);
+    }
+    if (vol_labels[track]) {
+        lv_obj_set_style_text_color(vol_labels[track], trackMuted[track] ? RED808_ERROR : RED808_TEXT_DIM, 0);
+    }
+}
+
 void ui_create_volumes_screen() {
     scr_volumes = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_volumes, RED808_BG, 0);
@@ -379,6 +420,7 @@ void ui_create_volumes_screen() {
         lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(name, inst_colors[i], 0);
         lv_obj_set_pos(name, x + 8, 80);
+        vol_name_labels[i] = name;
 
         // Vertical slider
         lv_obj_t* slider = lv_slider_create(scr_volumes);
@@ -399,21 +441,56 @@ void ui_create_volumes_screen() {
         lv_obj_set_style_text_color(val, RED808_TEXT_DIM, 0);
         lv_obj_set_pos(val, x + 10, 515);
         vol_labels[i] = val;
+
+        ui_apply_volume_track_style(i);
     }
 }
 
 void ui_update_volumes() {
-    static int prev_vol[Config::MAX_TRACKS] = {};
+    static int prev_vol[Config::MAX_TRACKS];
+    static bool prev_mute[Config::MAX_TRACKS];
+    static bool initialized = false;
+    static uint32_t last_slider_refresh = 0;
+
+    if (!initialized) {
+        for (int i = 0; i < Config::MAX_TRACKS; i++) {
+            prev_vol[i] = -1;
+            prev_mute[i] = !trackMuted[i];
+        }
+        initialized = true;
+    }
+
+    bool allow_slider_refresh = (lv_tick_get() - last_slider_refresh) >= 40;
     for (int i = 0; i < Config::MAX_TRACKS; i++) {
-        if (trackVolumes[i] != prev_vol[i]) {
+        bool vol_changed = trackVolumes[i] != prev_vol[i];
+        bool mute_changed = trackMuted[i] != prev_mute[i];
+
+        if (mute_changed) {
+            prev_mute[i] = trackMuted[i];
+            ui_apply_volume_track_style(i);
+        }
+
+        if (vol_changed && allow_slider_refresh) {
             prev_vol[i] = trackVolumes[i];
             if (vol_sliders[i]) {
-                lv_slider_set_value(vol_sliders[i], trackVolumes[i], LV_ANIM_ON);
+                lv_slider_set_value(vol_sliders[i], trackVolumes[i], LV_ANIM_OFF);
             }
             if (vol_labels[i]) {
                 lv_label_set_text_fmt(vol_labels[i], "%d", trackVolumes[i]);
             }
         }
+    }
+    if (allow_slider_refresh) {
+        last_slider_refresh = lv_tick_get();
+    }
+}
+
+void ui_update_menu_status() {
+    static int prev_master = -1;
+    if (lbl_master && (int)masterConnected != prev_master) {
+        prev_master = (int)masterConnected;
+        lv_label_set_text(lbl_master, masterConnected ? "MASTER: ONLINE" : "MASTER: OFFLINE");
+        lv_obj_set_style_text_color(lbl_master, masterConnected ? RED808_SUCCESS : RED808_ERROR, 0);
     }
 }
 

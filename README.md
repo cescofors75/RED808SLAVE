@@ -1,34 +1,37 @@
-# Proyecto ESP32 con PlatformIO
+# XboxBLE Workspace
 
-Proyecto para **ESP32 Dev Module** usando el framework Arduino con PlatformIO.
+Este workspace contiene varios restos de scaffolding, pero el firmware activo que debe compilarse y subirse es BlueSlaveV2.
 
 ## Requisitos
 
 - [Visual Studio Code](https://code.visualstudio.com/)
 - [Extensión PlatformIO IDE](https://platformio.org/install/ide?install=vscode)
 
-## Estructura del Proyecto
+## Proyecto activo
+
+- Firmware principal: BlueSlaveV2
+- Entrada principal: BlueSlaveV2/src/main.cpp
+- Configuración PlatformIO usada desde la raíz: platformio.ini
+- Placa objetivo: Waveshare ESP32-S3-Touch-LCD-7B
+
+## Estructura relevante
 
 ```
 XboxBLE/
-├── .github/
-│   └── copilot-instructions.md
-├── include/           # Archivos de cabecera (.h)
-├── lib/              # Librerías privadas
-├── src/              # Código fuente
-│   └── main.cpp      # Archivo principal
-├── test/             # Tests unitarios
-├── platformio.ini    # Configuración del proyecto
-└── README.md         # Este archivo
+├── BlueSlaveV2/
+│   ├── include/
+│   ├── lib/
+│   ├── src/
+│   ├── test/
+│   └── platformio.ini
+├── boards/
+├── platformio.ini
+└── .vscode/
 ```
 
-## Configuración
+## Nota importante
 
-El archivo `platformio.ini` está configurado para:
-- **Plataforma**: Espressif32
-- **Placa**: ESP32 Dev Module
-- **Framework**: Arduino
-- **Velocidad del monitor serial**: 115200
+No uses como referencia el src/main.cpp de la raíz del workspace. La configuración de la raíz ahora redirige la compilación a BlueSlaveV2 para evitar cargar por error una UI distinta.
 
 ## Compilar el Proyecto
 
@@ -67,12 +70,9 @@ Para ver la salida del ESP32:
 platformio device monitor
 ```
 
-## Código de Ejemplo
+## Estado
 
-El proyecto incluye un código básico "Hello World" que:
-- Inicializa la comunicación serial a 115200 baudios
-- Hace parpadear el LED integrado cada segundo
-- Imprime mensajes en el monitor serial
+Las tareas de VS Code y la compilación lanzada desde la raíz deben producir el firmware BlueSlaveV2.
 
 ## Solución de Problemas
 

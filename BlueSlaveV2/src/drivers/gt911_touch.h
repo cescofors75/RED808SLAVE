@@ -4,7 +4,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include "config.h"
+#include "../../include/config.h"
 
 struct TouchPoint {
     uint16_t x;

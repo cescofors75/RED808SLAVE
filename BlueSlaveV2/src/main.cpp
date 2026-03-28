@@ -13,8 +13,8 @@
 #include <DFRobot_VisualRotaryEncoder.h>
 #include "lvgl.h"
 
-#include "config.h"
-#include "system_state.h"
+#include "../include/config.h"
+#include "../include/system_state.h"
 
 // Drivers
 #include "drivers/i2c_driver.h"
@@ -51,6 +51,7 @@ int livePadsVolume = 100;
 int trackVolumes[Config::MAX_TRACKS];
 VolumeMode volumeMode = VOL_SEQUENCER;
 bool trackMuted[Config::MAX_TRACKS];
+int pendingLivePadTrigger = -1;
 
 // Filters
 TrackFilter trackFilters[Config::MAX_TRACKS];
@@ -68,6 +69,7 @@ bool hubDetected = false;
 bool udpConnected = false;
 bool wifiConnected = false;
 bool wifiReconnecting = false;
+bool masterConnected = false;
 
 // Diagnostic
 DiagnosticInfo diagInfo = {};
@@ -109,6 +111,7 @@ unsigned long lastEncoderRead = 0;
 unsigned long lastWiFiCheck = 0;
 unsigned long lastScreenUpdate = 0;
 unsigned long lastUDPCheck = 0;
+unsigned long lastMasterPacketMs = 0;
 int32_t prevM5Counter[Config::MAX_TRACKS];
 uint16_t prevDFValue[DFROBOT_ENCODER_COUNT];
 
@@ -123,6 +126,9 @@ void sendUDPCommand(const char* cmd);
 void sendUDPCommand(JsonDocument& doc);
 void receiveUDPData();
 void requestPatternFromMaster();
+void sendPlayStateCommand(bool shouldPlay);
+void selectPatternOnMaster(int patternIndex);
+void sendLivePadTrigger(int pad, int velocity);
 void sendFilterUDP(int track, int fxType);
 void scanI2CHub();
 void handleM5Encoders();
@@ -210,6 +216,7 @@ void checkWiFiReconnect() {
 
     wifiConnected = false;
     udpConnected = false;
+    masterConnected = false;
     diagInfo.wifiOk = false;
     diagInfo.udpConnected = false;
 
@@ -244,6 +251,34 @@ void requestPatternFromMaster() {
     sendUDPCommand(doc);
 }
 
+void sendPlayStateCommand(bool shouldPlay) {
+    JsonDocument doc;
+    doc["cmd"] = shouldPlay ? "start" : "stop";
+    sendUDPCommand(doc);
+    isPlaying = shouldPlay;
+}
+
+void selectPatternOnMaster(int patternIndex) {
+    currentPattern = constrain(patternIndex, 0, Config::MAX_PATTERNS - 1);
+
+    JsonDocument doc;
+    doc["cmd"] = "selectPattern";
+    doc["index"] = currentPattern;
+    sendUDPCommand(doc);
+
+    requestPatternFromMaster();
+}
+
+void sendLivePadTrigger(int pad, int velocity) {
+    if (pad < 0 || pad >= Config::MAX_SAMPLES) return;
+
+    JsonDocument doc;
+    doc["cmd"] = "trigger";
+    doc["pad"] = pad;
+    doc["vel"] = constrain(velocity, 1, 127);
+    sendUDPCommand(doc);
+}
+
 // =============================================================================
 // UDP RECEIVE
 // =============================================================================
@@ -258,6 +293,10 @@ void receiveUDPData() {
     int len = udp.read(buf, sizeof(buf) - 1);
     if (len <= 0) return;
     buf[len] = '\0';
+
+    lastMasterPacketMs = millis();
+    masterConnected = true;
+    diagInfo.udpConnected = true;
 
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, buf);
@@ -414,7 +453,10 @@ void scanI2CHub() {
                 i2c_hub_select_raw(ch);
                 if (dfEncoders[dfFound]->begin() == 0) {
                     dfEncoderConnected[dfFound] = true;
-                    dfEncoders[dfFound]->setGainCoefficient(1);
+                    dfEncoders[dfFound]->setGainCoefficient(12);
+                    // Stabilize startup: set a known center and baseline to avoid first-read jumps
+                    dfEncoders[dfFound]->setEncoderValue(512);
+                    prevDFValue[dfFound] = 512;
                     Serial.printf("[I2C] DFRobot #%d found on ch %d\n", dfFound + 1, ch);
                 } else {
                     delete dfEncoders[dfFound];
@@ -528,6 +570,8 @@ void handleM5Encoders() {
 // =============================================================================
 
 void handleDFRobotEncoders() {
+    static unsigned long lastBtnMs[DFROBOT_ENCODER_COUNT] = {0, 0};
+
     for (int i = 0; i < DFROBOT_ENCODER_COUNT; i++) {
         if (!dfEncoderConnected[i]) continue;
 
@@ -536,8 +580,15 @@ void handleDFRobotEncoders() {
         if (!i2c_lock(20)) continue;
         i2c_hub_select_raw(ch);
 
-        uint16_t val = dfEncoders[i]->getEncoderValue();
-        int16_t delta = (int16_t)(val - prevDFValue[i]);
+        uint16_t val = dfEncoders[i]->getEncoderValue() & 0x03FF; // 10-bit range: 0..1023
+        int16_t delta = (int16_t)val - (int16_t)(prevDFValue[i] & 0x03FF);
+        if (delta > 512) delta -= 1024;
+        if (delta < -512) delta += 1024;
+        if (delta > Config::DF_DELTA_CLAMP) delta = Config::DF_DELTA_CLAMP;
+        if (delta < -Config::DF_DELTA_CLAMP) delta = -Config::DF_DELTA_CLAMP;
+        if (abs((int)delta) > Config::DF_GLITCH_THRESHOLD) {
+            delta = (delta > 0) ? Config::DF_DELTA_CLAMP : -Config::DF_DELTA_CLAMP;
+        }
         prevDFValue[i] = val;
 
         bool buttonPressed = dfEncoders[i]->detectButtonDown();
@@ -556,31 +607,28 @@ void handleDFRobotEncoders() {
                     case FILTER_COMPRESSOR: param = &f.compAmount;    break;
                 }
                 if (param) {
-                    int newVal = constrain((int)*param + delta, 0, 127);
+                    int newVal = constrain((int)*param + delta * Config::DF_FILTER_STEP, 0, 127);
                     *param = (uint8_t)newVal;
                     f.enabled = (f.delayAmount > 0 || f.flangerAmount > 0 || f.compAmount > 0);
                     sendFilterUDP(filterSelectedTrack, filterSelectedFX);
                 }
             }
-            if (buttonPressed) {
-                filterSelectedFX = (filterSelectedFX + 1) % FILTER_COUNT;
+            if (buttonPressed && (millis() - lastBtnMs[i]) > Config::BUTTON_DEBOUNCE_MS) {
+                lastBtnMs[i] = millis();
+                sendPlayStateCommand(!isPlaying);
             }
         }
         else if (i == 1) {
             if (delta != 0) {
-                int newPat = currentPattern + (delta > 0 ? 1 : -1);
+                int newPat = currentPattern + delta * Config::DF_PATTERN_STEP;
                 newPat = constrain(newPat, 0, Config::MAX_PATTERNS - 1);
                 if (newPat != currentPattern) {
-                    currentPattern = newPat;
-                    requestPatternFromMaster();
+                    selectPatternOnMaster(newPat);
                 }
             }
-            if (buttonPressed) {
-                if (lvgl_port_lock(5)) {
-                    currentScreen = SCREEN_MENU;
-                    lv_scr_load_anim(scr_menu, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
-                    lvgl_port_unlock();
-                }
+            if (buttonPressed && (millis() - lastBtnMs[i]) > Config::BUTTON_DEBOUNCE_MS) {
+                lastBtnMs[i] = millis();
+                requestPatternFromMaster();
             }
         }
     }
@@ -596,6 +644,7 @@ void updateUI() {
     ui_update_header();
 
     switch (currentScreen) {
+        case SCREEN_MENU:      ui_update_menu_status(); break;
         case SCREEN_SEQUENCER: ui_update_sequencer(); break;
         case SCREEN_VOLUMES:   ui_update_volumes();   break;
         case SCREEN_FILTERS:   ui_update_filters();   break;
@@ -704,11 +753,22 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
+    if (masterConnected && (now - lastMasterPacketMs > 3000)) {
+        masterConnected = false;
+    }
+
     // WiFi reconnection check
     checkWiFiReconnect();
 
     // Receive UDP data
     receiveUDPData();
+
+    if (pendingLivePadTrigger >= 0) {
+        int pad = pendingLivePadTrigger;
+        pendingLivePadTrigger = -1;
+        int velocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
+        sendLivePadTrigger(pad, velocity);
+    }
 
     // Encoder polling (50ms interval)
     if (now - lastEncoderRead >= Config::ENCODER_READ_MS) {

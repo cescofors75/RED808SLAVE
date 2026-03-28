@@ -4,7 +4,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include "config.h"
+#include "../../include/config.h"
 
 void io_ext_init();
 void io_ext_output(uint8_t pin, uint8_t value);
