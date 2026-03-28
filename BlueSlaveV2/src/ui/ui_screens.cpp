@@ -6,6 +6,7 @@
 #include "ui_theme.h"
 #include "system_state.h"
 #include "config.h"
+#include <Esp.h>
 
 // Screen objects
 lv_obj_t* scr_menu = NULL;
@@ -43,6 +44,12 @@ static lv_obj_t* live_pads[Config::MAX_SAMPLES];
 // ============================================================================
 // HEADER BAR (shared across screens)
 // ============================================================================
+static void back_btn_cb(lv_event_t* e) {
+    (void)e;
+    currentScreen = SCREEN_MENU;
+    lv_scr_load_anim(scr_menu, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+}
+
 void ui_create_header(lv_obj_t* parent) {
     lv_obj_t* header = lv_obj_create(parent);
     lv_obj_set_size(header, 1024, 48);
@@ -54,6 +61,21 @@ void ui_create_header(lv_obj_t* parent) {
     lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    // Back button (shown on all screens except menu)
+    if (parent != scr_menu) {
+        lv_obj_t* btn_back = lv_btn_create(header);
+        lv_obj_set_size(btn_back, 80, 36);
+        lv_obj_set_style_bg_color(btn_back, RED808_SURFACE, 0);
+        lv_obj_set_style_bg_color(btn_back, RED808_ACCENT, LV_STATE_PRESSED);
+        lv_obj_set_style_radius(btn_back, 6, 0);
+        lv_obj_add_event_cb(btn_back, back_btn_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_t* bl = lv_label_create(btn_back);
+        lv_label_set_text(bl, LV_SYMBOL_LEFT " BACK");
+        lv_obj_set_style_text_font(bl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(bl, RED808_TEXT, 0);
+        lv_obj_center(bl);
+    }
 
     // Logo
     lv_obj_t* logo = lv_label_create(header);
@@ -87,13 +109,26 @@ void ui_create_header(lv_obj_t* parent) {
 }
 
 void ui_update_header() {
-    if (lbl_bpm) lv_label_set_text_fmt(lbl_bpm, "BPM: %d", currentBPM);
-    if (lbl_pattern) lv_label_set_text_fmt(lbl_pattern, "PTN: %d", currentPattern + 1);
-    if (lbl_play) {
+    static int prev_bpm = -1;
+    static int prev_pattern = -1;
+    static int prev_playing = -1;
+    static int prev_wifi = -1;
+
+    if (lbl_bpm && currentBPM != prev_bpm) {
+        prev_bpm = currentBPM;
+        lv_label_set_text_fmt(lbl_bpm, "BPM: %d", currentBPM);
+    }
+    if (lbl_pattern && currentPattern != prev_pattern) {
+        prev_pattern = currentPattern;
+        lv_label_set_text_fmt(lbl_pattern, "PTN: %d", currentPattern + 1);
+    }
+    if (lbl_play && (int)isPlaying != prev_playing) {
+        prev_playing = (int)isPlaying;
         lv_label_set_text(lbl_play, isPlaying ? LV_SYMBOL_PAUSE " PLAY" : LV_SYMBOL_PLAY " STOP");
         lv_obj_set_style_text_color(lbl_play, isPlaying ? RED808_SUCCESS : RED808_ERROR, 0);
     }
-    if (lbl_wifi) {
+    if (lbl_wifi && (int)wifiConnected != prev_wifi) {
+        prev_wifi = (int)wifiConnected;
         lv_label_set_text(lbl_wifi, wifiConnected ? LV_SYMBOL_WIFI " OK" : LV_SYMBOL_CLOSE " OFF");
         lv_obj_set_style_text_color(lbl_wifi, wifiConnected ? RED808_SUCCESS : RED808_TEXT_DIM, 0);
     }
@@ -276,27 +311,36 @@ void ui_create_sequencer_screen() {
 void ui_update_sequencer() {
     if (!scr_sequencer) return;
 
-    // Update step highlight
-    if (lbl_step_indicator) {
+    static int prev_step = -1;
+    static uint8_t prev_grid_state[Config::MAX_TRACKS][Config::MAX_STEPS]; // 0=inactive, 1=active, 2=currentStep+inactive, 3=currentStep+active
+
+    // Update step highlight label only when step changes
+    if (lbl_step_indicator && currentStep != prev_step) {
         lv_label_set_text_fmt(lbl_step_indicator, "Step: %d", currentStep + 1);
     }
 
-    // Update grid state
+    // Update grid state - only changed cells
     for (int t = 0; t < Config::MAX_TRACKS; t++) {
         for (int s = 0; s < Config::MAX_STEPS; s++) {
             if (seq_grid[t][s]) {
                 bool active = patterns[currentPattern].steps[t][s];
                 bool isCurrentStep = (s == currentStep && isPlaying);
-                if (isCurrentStep) {
-                    lv_obj_set_style_bg_color(seq_grid[t][s],
-                        active ? lv_color_white() : RED808_BORDER, 0);
-                } else {
-                    lv_obj_set_style_bg_color(seq_grid[t][s],
-                        active ? inst_colors[t] : RED808_SURFACE, 0);
+                uint8_t state = (isCurrentStep ? 2 : 0) | (active ? 1 : 0);
+
+                if (state != prev_grid_state[t][s]) {
+                    prev_grid_state[t][s] = state;
+                    if (isCurrentStep) {
+                        lv_obj_set_style_bg_color(seq_grid[t][s],
+                            active ? lv_color_white() : RED808_BORDER, 0);
+                    } else {
+                        lv_obj_set_style_bg_color(seq_grid[t][s],
+                            active ? inst_colors[t] : RED808_SURFACE, 0);
+                    }
                 }
             }
         }
     }
+    prev_step = currentStep;
 }
 
 // ============================================================================
@@ -359,12 +403,16 @@ void ui_create_volumes_screen() {
 }
 
 void ui_update_volumes() {
+    static int prev_vol[Config::MAX_TRACKS] = {};
     for (int i = 0; i < Config::MAX_TRACKS; i++) {
-        if (vol_sliders[i]) {
-            lv_slider_set_value(vol_sliders[i], trackVolumes[i], LV_ANIM_ON);
-        }
-        if (vol_labels[i]) {
-            lv_label_set_text_fmt(vol_labels[i], "%d", trackVolumes[i]);
+        if (trackVolumes[i] != prev_vol[i]) {
+            prev_vol[i] = trackVolumes[i];
+            if (vol_sliders[i]) {
+                lv_slider_set_value(vol_sliders[i], trackVolumes[i], LV_ANIM_ON);
+            }
+            if (vol_labels[i]) {
+                lv_label_set_text_fmt(vol_labels[i], "%d", trackVolumes[i]);
+            }
         }
     }
 }
@@ -445,20 +493,26 @@ void ui_create_filters_screen() {
 }
 
 void ui_update_filters() {
+    static uint8_t prev_amounts[3] = {0xFF, 0xFF, 0xFF};
+    static int prev_selectedFX = -1;
     TrackFilter& f = (filterSelectedTrack == -1) ? masterFilter : trackFilters[filterSelectedTrack];
     uint8_t amounts[] = { f.delayAmount, f.flangerAmount, f.compAmount };
 
     for (int i = 0; i < 3; i++) {
-        if (filter_arcs[i]) {
+        bool amountChanged = (amounts[i] != prev_amounts[i]);
+        bool selChanged = (filterSelectedFX != prev_selectedFX);
+        if (filter_arcs[i] && (amountChanged || selChanged)) {
             lv_arc_set_value(filter_arcs[i], amounts[i]);
             bool isSelected = (i == filterSelectedFX);
             lv_obj_set_style_arc_width(filter_arcs[i], isSelected ? 24 : 18, LV_PART_INDICATOR);
         }
-        if (filter_value_labels[i]) {
+        if (filter_value_labels[i] && amountChanged) {
             int pct = amounts[i] * 100 / 127;
             lv_label_set_text_fmt(filter_value_labels[i], "%d%%", pct);
         }
+        prev_amounts[i] = amounts[i];
     }
+    prev_selectedFX = filterSelectedFX;
 }
 
 // ============================================================================
@@ -500,6 +554,10 @@ void ui_create_settings_screen() {
 // ============================================================================
 // DIAGNOSTICS SCREEN
 // ============================================================================
+#define DIAG_ROWS 10
+static lv_obj_t* diag_labels[DIAG_ROWS];
+static lv_obj_t* diag_values[DIAG_ROWS];
+
 void ui_create_diagnostics_screen() {
     scr_diagnostics = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_diagnostics, RED808_BG, 0);
@@ -511,11 +569,62 @@ void ui_create_diagnostics_screen() {
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 56);
 
-    // Will be populated by ui_update_diagnostics()
+    static const char* row_names[] = {
+        "WiFi",  "UDP",  "Touch GT911",  "LCD",  "I2C Hub",
+        "M5 Encoder #1", "M5 Encoder #2", "DFRobot #1", "DFRobot #2", "Memory"
+    };
+
+    int y = 100;
+    for (int i = 0; i < DIAG_ROWS; i++) {
+        diag_labels[i] = lv_label_create(scr_diagnostics);
+        lv_label_set_text(diag_labels[i], row_names[i]);
+        lv_obj_set_style_text_font(diag_labels[i], &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(diag_labels[i], RED808_TEXT, 0);
+        lv_obj_set_pos(diag_labels[i], 60, y);
+
+        diag_values[i] = lv_label_create(scr_diagnostics);
+        lv_label_set_text(diag_values[i], "---");
+        lv_obj_set_style_text_font(diag_values[i], &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(diag_values[i], RED808_TEXT_DIM, 0);
+        lv_obj_set_pos(diag_values[i], 320, y);
+
+        y += 46;
+    }
 }
 
 void ui_update_diagnostics() {
-    // Placeholder: update diagnostic labels with current state
+    if (!scr_diagnostics) return;
+
+    static bool prev_vals[DIAG_ROWS + 1] = {};
+    static uint32_t prev_heap = 0;
+
+    struct { bool val; const char* ok; const char* fail; } rows[] = {
+        { diagInfo.wifiOk,       "Connected",  "Disconnected" },
+        { diagInfo.udpConnected, "Active",     "Inactive" },
+        { diagInfo.touchOk,      "OK (0x5D)",  "NOT FOUND" },
+        { diagInfo.lcdOk,        "OK 1024x600","ERROR" },
+        { diagInfo.i2cHubOk,     "PCA9548A OK","NOT FOUND" },
+        { diagInfo.m5encoder1Ok, "OK",         "Not detected" },
+        { diagInfo.m5encoder2Ok, "OK",         "Not detected" },
+        { diagInfo.dfrobot1Ok,   "OK",         "Not detected" },
+        { diagInfo.dfrobot2Ok,   "OK",         "Not detected" },
+    };
+
+    for (int i = 0; i < 9; i++) {
+        if (rows[i].val != prev_vals[i]) {
+            prev_vals[i] = rows[i].val;
+            lv_label_set_text(diag_values[i], rows[i].val ? rows[i].ok : rows[i].fail);
+            lv_obj_set_style_text_color(diag_values[i], rows[i].val ? RED808_SUCCESS : RED808_ERROR, 0);
+        }
+    }
+
+    uint32_t heap = ESP.getFreeHeap() / 1024;
+    uint32_t psram = ESP.getFreePsram() / 1024;
+    if (heap != prev_heap) {
+        prev_heap = heap;
+        lv_label_set_text_fmt(diag_values[9], "Heap: %luK  PSRAM: %luK", heap, psram);
+        lv_obj_set_style_text_color(diag_values[9], RED808_INFO, 0);
+    }
 }
 
 // ============================================================================

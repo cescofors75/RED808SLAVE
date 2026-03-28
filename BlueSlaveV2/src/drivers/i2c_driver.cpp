@@ -90,3 +90,16 @@ void i2c_hub_deselect() {
     Wire.endTransmission();
     i2c_unlock();
 }
+
+// Raw versions - caller MUST already hold i2c_lock
+void i2c_hub_select_raw(uint8_t channel) {
+    Wire.beginTransmission(I2C_HUB_ADDR);
+    Wire.write(1 << channel);
+    Wire.endTransmission();
+}
+
+void i2c_hub_deselect_raw() {
+    Wire.beginTransmission(I2C_HUB_ADDR);
+    Wire.write(0);
+    Wire.endTransmission();
+}

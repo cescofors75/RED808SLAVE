@@ -143,9 +143,22 @@ TouchPoint gt911_read() {
     if (bufferReady && touchCount > 0 && touchCount <= 5) {
         uint8_t data[7];
         if (gt911_read_reg(GT911_REG_POINT1, data, 7)) {
-            tp.x = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
-            tp.y = (uint16_t)data[3] | ((uint16_t)data[4] << 8);
-            tp.pressed = true;
+            // GT911 on Waveshare board: big-endian byte order
+            uint16_t raw_x = ((uint16_t)data[1] << 8) | (uint16_t)data[2];
+            uint16_t raw_y = ((uint16_t)data[3] << 8) | (uint16_t)data[4];
+            
+            // Clamp to screen bounds
+            if (raw_x < SCREEN_WIDTH && raw_y < SCREEN_HEIGHT) {
+                tp.x = raw_x;
+                tp.y = raw_y;
+                tp.pressed = true;
+            }
+            // Debug: log raw bytes (every 30th touch, remove after verification)
+            static uint32_t dbg_cnt = 0;
+            if (++dbg_cnt % 30 == 1) {
+                Serial.printf("[TOUCH] raw=[%02X %02X %02X %02X] x=%d y=%d valid=%d\n",
+                    data[1], data[2], data[3], data[4], raw_x, raw_y, tp.pressed);
+            }
         }
     }
 

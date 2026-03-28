@@ -20,3 +20,6 @@ bool i2c_read_bytes(uint8_t addr, uint8_t reg, uint8_t* data, size_t len);
 bool i2c_device_present(uint8_t addr);
 void i2c_hub_select(uint8_t channel);
 void i2c_hub_deselect();
+// Raw versions - caller must hold i2c_lock
+void i2c_hub_select_raw(uint8_t channel);
+void i2c_hub_deselect_raw();

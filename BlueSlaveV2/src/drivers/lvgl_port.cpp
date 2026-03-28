@@ -26,14 +26,9 @@ static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t*
 }
 
 // Touch read callback
-static uint32_t touch_debug_counter = 0;
 static void touch_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     if (!gt911_is_ready()) {
         data->state = LV_INDEV_STATE_RELEASED;
-        // Log periodically so we know touch is NOT ready
-        if (++touch_debug_counter % 500 == 0) {
-            Serial.println("[TOUCH] GT911 not ready!");
-        }
         return;
     }
     TouchPoint tp = gt911_read();
@@ -41,7 +36,6 @@ static void touch_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
         data->state = LV_INDEV_STATE_PRESSED;
         data->point.x = tp.x;
         data->point.y = tp.y;
-        Serial.printf("[TOUCH] x=%d y=%d\n", tp.x, tp.y);
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
     }

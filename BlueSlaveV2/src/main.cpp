@@ -226,7 +226,7 @@ void checkWiFiReconnect() {
 
 void sendUDPCommand(const char* cmd) {
     if (!udpConnected) return;
-    udp.beginPacket("192.168.4.1", WiFiConfig::UDP_PORT);
+    udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
     udp.write((const uint8_t*)cmd, strlen(cmd));
     udp.endPacket();
 }
@@ -369,9 +369,8 @@ void sendFilterUDP(int track, int fxType) {
 void scanI2CHub() {
     Serial.println("[I2C] Scanning bus...");
 
-    // Check for PCA9548A hub
-    Wire.beginTransmission(I2C_HUB_ADDR);
-    hubDetected = (Wire.endTransmission() == 0);
+    // Check for PCA9548A hub (with mutex protection)
+    hubDetected = i2c_device_present(I2C_HUB_ADDR);
     diagInfo.i2cHubOk = hubDetected;
 
     if (!hubDetected) {
@@ -392,11 +391,16 @@ void scanI2CHub() {
             m5encoderConnected[m5Found] = true;
             Serial.printf("[I2C] M5 ROTATE8 #%d found on ch %d\n", m5Found + 1, ch);
 
-            if (!m5encoders[m5Found].begin()) {
-                // Set initial counter values
-                for (int e = 0; e < ENCODERS_PER_MODULE; e++) {
-                    m5encoders[m5Found].resetCounter(e);
+            // begin() and resetCounter() do I2C — protect with scoped lock
+            if (i2c_lock(50)) {
+                i2c_hub_select_raw(ch);
+                if (!m5encoders[m5Found].begin()) {
+                    for (int e = 0; e < ENCODERS_PER_MODULE; e++) {
+                        m5encoders[m5Found].resetCounter(e);
+                    }
                 }
+                i2c_hub_deselect_raw();
+                i2c_unlock();
             }
             m5Found++;
         }
@@ -405,13 +409,19 @@ void scanI2CHub() {
         if (dfFound < DFROBOT_ENCODER_COUNT && i2c_device_present(DFROBOT_ENCODER_ADDR)) {
             dfRobotHubChannel[dfFound] = ch;
             dfEncoders[dfFound] = new DFRobot_VisualRotaryEncoder_I2C(DFROBOT_ENCODER_ADDR, &Wire);
-            if (dfEncoders[dfFound]->begin() == 0) {
-                dfEncoderConnected[dfFound] = true;
-                dfEncoders[dfFound]->setGainCoefficient(51);
-                Serial.printf("[I2C] DFRobot #%d found on ch %d\n", dfFound + 1, ch);
-            } else {
-                delete dfEncoders[dfFound];
-                dfEncoders[dfFound] = nullptr;
+            // begin() and setGainCoefficient() do I2C — protect with scoped lock
+            if (i2c_lock(50)) {
+                i2c_hub_select_raw(ch);
+                if (dfEncoders[dfFound]->begin() == 0) {
+                    dfEncoderConnected[dfFound] = true;
+                    dfEncoders[dfFound]->setGainCoefficient(1);
+                    Serial.printf("[I2C] DFRobot #%d found on ch %d\n", dfFound + 1, ch);
+                } else {
+                    delete dfEncoders[dfFound];
+                    dfEncoders[dfFound] = nullptr;
+                }
+                i2c_hub_deselect_raw();
+                i2c_unlock();
             }
             dfFound++;
         }
@@ -438,10 +448,11 @@ void updateTrackEncoderLED(int track) {
 
     int ch = m5HubChannel[moduleIndex];
     if (ch < 0) return;
-    i2c_hub_select(ch);
+    if (!i2c_lock(20)) return;
+    i2c_hub_select_raw(ch);
 
     if (trackMuted[track]) {
-        m5encoders[moduleIndex].writeRGB(encoderIndex, 0x1E, 0, 0); // Dim red
+        m5encoders[moduleIndex].writeRGB(encoderIndex, 0x1E, 0, 0);
     } else {
         uint8_t brightness = map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
         uint8_t r = (encoderLEDColors[track][0] * brightness) / 255;
@@ -450,55 +461,65 @@ void updateTrackEncoderLED(int track) {
         m5encoders[moduleIndex].writeRGB(encoderIndex, r, g, b);
     }
 
-    i2c_hub_deselect();
+    i2c_hub_deselect_raw();
+    i2c_unlock();
 }
 
 void handleM5Encoders() {
-    for (int track = 0; track < Config::MAX_TRACKS; track++) {
-        int moduleIndex = track / ENCODERS_PER_MODULE;
-        int encoderIndex = track % ENCODERS_PER_MODULE;
-        if (!m5encoderConnected[moduleIndex]) continue;
-
-        int ch = m5HubChannel[moduleIndex];
+    for (int mod = 0; mod < M5_ENCODER_MODULES; mod++) {
+        if (!m5encoderConnected[mod]) continue;
+        int ch = m5HubChannel[mod];
         if (ch < 0) continue;
-        i2c_hub_select(ch);
 
-        // Read relative counter
-        int32_t counter = m5encoders[moduleIndex].getAbsCounter(encoderIndex);
-        int32_t delta = counter - prevM5Counter[track];
-        prevM5Counter[track] = counter;
+        if (!i2c_lock(20)) continue;
+        i2c_hub_select_raw(ch);
 
-        if (delta != 0) {
-            // Volume control
-            int newVol = constrain(trackVolumes[track] + delta * 5, 0, Config::MAX_VOLUME);
-            if (newVol != trackVolumes[track]) {
-                trackVolumes[track] = newVol;
+        for (int enc = 0; enc < ENCODERS_PER_MODULE; enc++) {
+            int track = mod * ENCODERS_PER_MODULE + enc;
 
+            int32_t counter = m5encoders[mod].getAbsCounter(enc);
+            int32_t delta = counter - prevM5Counter[track];
+            prevM5Counter[track] = counter;
+
+            if (delta != 0) {
+                int newVol = constrain(trackVolumes[track] + delta * 5, 0, Config::MAX_VOLUME);
+                if (newVol != trackVolumes[track]) {
+                    trackVolumes[track] = newVol;
+                    JsonDocument doc;
+                    doc["cmd"] = "setTrackVolume";
+                    doc["track"] = track;
+                    doc["volume"] = trackVolumes[track];
+                    sendUDPCommand(doc);
+                    // LED update inline (already holding mutex + hub selected)
+                    uint8_t brightness = map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
+                    uint8_t r = (encoderLEDColors[track][0] * brightness) / 255;
+                    uint8_t g = (encoderLEDColors[track][1] * brightness) / 255;
+                    uint8_t b = (encoderLEDColors[track][2] * brightness) / 255;
+                    m5encoders[mod].writeRGB(enc, r, g, b);
+                }
+            }
+
+            if (m5encoders[mod].getKeyPressed(enc)) {
+                trackMuted[track] = !trackMuted[track];
                 JsonDocument doc;
-                doc["cmd"] = "setTrackVolume";
+                doc["cmd"] = "mute";
                 doc["track"] = track;
-                doc["volume"] = trackVolumes[track];
+                doc["value"] = trackMuted[track];
                 sendUDPCommand(doc);
-
-                updateTrackEncoderLED(track);
+                if (trackMuted[track]) {
+                    m5encoders[mod].writeRGB(enc, 0x1E, 0, 0);
+                } else {
+                    uint8_t brightness = map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
+                    uint8_t r = (encoderLEDColors[track][0] * brightness) / 255;
+                    uint8_t g = (encoderLEDColors[track][1] * brightness) / 255;
+                    uint8_t b = (encoderLEDColors[track][2] * brightness) / 255;
+                    m5encoders[mod].writeRGB(enc, r, g, b);
+                }
             }
         }
 
-        // Button press -> mute toggle
-        if (m5encoders[moduleIndex].getKeyPressed(encoderIndex)) {
-            trackMuted[track] = !trackMuted[track];
-
-            JsonDocument doc;
-            doc["cmd"] = "mute";
-            doc["track"] = track;
-            doc["value"] = trackMuted[track];
-            sendUDPCommand(doc);
-
-            updateTrackEncoderLED(track);
-            delay(120); // debounce
-        }
-
-        i2c_hub_deselect();
+        i2c_hub_deselect_raw();
+        i2c_unlock();
     }
 }
 
@@ -512,7 +533,8 @@ void handleDFRobotEncoders() {
 
         int ch = dfRobotHubChannel[i];
         if (ch < 0) continue;
-        i2c_hub_select(ch);
+        if (!i2c_lock(20)) continue;
+        i2c_hub_select_raw(ch);
 
         uint16_t val = dfEncoders[i]->getEncoderValue();
         int16_t delta = (int16_t)(val - prevDFValue[i]);
@@ -520,8 +542,11 @@ void handleDFRobotEncoders() {
 
         bool buttonPressed = dfEncoders[i]->detectButtonDown();
 
+        i2c_hub_deselect_raw();
+        i2c_unlock();
+
+        // Process results outside of I2C lock
         if (i == 0) {
-            // DFRobot #1: FX amount control
             if (delta != 0) {
                 TrackFilter& f = (filterSelectedTrack == -1) ? masterFilter : trackFilters[filterSelectedTrack];
                 uint8_t* param = nullptr;
@@ -531,7 +556,7 @@ void handleDFRobotEncoders() {
                     case FILTER_COMPRESSOR: param = &f.compAmount;    break;
                 }
                 if (param) {
-                    int newVal = constrain((int)*param + delta * 2, 0, 127);
+                    int newVal = constrain((int)*param + delta, 0, 127);
                     *param = (uint8_t)newVal;
                     f.enabled = (f.delayAmount > 0 || f.flangerAmount > 0 || f.compAmount > 0);
                     sendFilterUDP(filterSelectedTrack, filterSelectedFX);
@@ -539,11 +564,9 @@ void handleDFRobotEncoders() {
             }
             if (buttonPressed) {
                 filterSelectedFX = (filterSelectedFX + 1) % FILTER_COUNT;
-                delay(150);
             }
         }
         else if (i == 1) {
-            // DFRobot #2: Pattern navigation
             if (delta != 0) {
                 int newPat = currentPattern + (delta > 0 ? 1 : -1);
                 newPat = constrain(newPat, 0, Config::MAX_PATTERNS - 1);
@@ -553,14 +576,13 @@ void handleDFRobotEncoders() {
                 }
             }
             if (buttonPressed) {
-                // Reset to pattern 0
-                currentPattern = 0;
-                requestPatternFromMaster();
-                delay(150);
+                if (lvgl_port_lock(5)) {
+                    currentScreen = SCREEN_MENU;
+                    lv_scr_load_anim(scr_menu, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+                    lvgl_port_unlock();
+                }
             }
         }
-
-        i2c_hub_deselect();
     }
 }
 
@@ -635,13 +657,19 @@ void setup() {
     diagInfo.touchOk = gt911_is_ready();
     Serial.printf("[Touch] GT911 %s\n", diagInfo.touchOk ? "OK" : "NOT DETECTED");
 
-    // 5. LVGL init + display/touch drivers + FreeRTOS task
+    // 5. LVGL init (task created but NOT started yet - no I2C contention)
     Serial.println("[LVGL] Initializing port...");
     lvgl_port_init(lcd_panel);
-    lvgl_port_task_start();
-    Serial.println("[LVGL] Port initialized, task running");
+    Serial.println("[LVGL] Port initialized (task paused)");
 
-    // 6. Create all UI screens (must be inside LVGL lock)
+    // 6. Scan I2C hub for M5 + DFRobot (before LVGL task starts - no I2C race)
+    scanI2CHub();
+
+    // 7. Now start LVGL task (safe - I2C scanning is done)
+    lvgl_port_task_start();
+    Serial.println("[LVGL] Task started");
+
+    // 8. Create all UI screens (must be inside LVGL lock)
     Serial.println("[UI] Creating screens...");
     if (lvgl_port_lock(1000)) {
         ui_theme_init();
@@ -662,9 +690,6 @@ void setup() {
         lvgl_port_unlock();
         Serial.println("[UI] All screens created");
     }
-
-    // 7. Scan I2C hub for M5 + DFRobot
-    scanI2CHub();
 
     // 8. WiFi + UDP
     setupWiFi();
@@ -700,6 +725,20 @@ void loop() {
 
     // Debug heartbeat every 10s
     static unsigned long lastHeartbeat = 0;
+    static bool firstDiagDone = false;
+    if (!firstDiagDone && now > 5000) {
+        firstDiagDone = true;
+        Serial.println("\n=== RUNTIME DIAGNOSTICS ===");
+        Serial.printf("  GT911 touch: %s\n", gt911_is_ready() ? "OK" : "NOT DETECTED");
+        Serial.printf("  I2C Hub:     %s\n", hubDetected ? "OK" : "NOT FOUND");
+        Serial.printf("  M5 #1:       %s (ch=%d)\n", m5encoderConnected[0] ? "OK" : "NO", m5HubChannel[0]);
+        Serial.printf("  M5 #2:       %s (ch=%d)\n", m5encoderConnected[1] ? "OK" : "NO", m5HubChannel[1]);
+        Serial.printf("  DFRobot #1:  %s (ch=%d)\n", dfEncoderConnected[0] ? "OK" : "NO", dfRobotHubChannel[0]);
+        Serial.printf("  DFRobot #2:  %s (ch=%d)\n", dfEncoderConnected[1] ? "OK" : "NO", dfRobotHubChannel[1]);
+        Serial.printf("  LCD panel:   %s\n", lcd_panel ? "OK" : "FAIL");
+        Serial.printf("  Heap: %d  PSRAM: %d\n", ESP.getFreeHeap(), ESP.getFreePsram());
+        Serial.println("===========================\n");
+    }
     if (now - lastHeartbeat >= 10000) {
         lastHeartbeat = now;
         Serial.printf("[ALIVE] %lus Heap:%d PSRAM:%d\n", now/1000, ESP.getFreeHeap(), ESP.getFreePsram());

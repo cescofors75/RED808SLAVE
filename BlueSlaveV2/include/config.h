@@ -38,11 +38,11 @@
 #define LCD_R6         GPIO_NUM_41
 #define LCD_R7         GPIO_NUM_40
 
-// LCD Timing (ST7262) - ESPHome confirmed values
-#define LCD_HSYNC_PULSE_WIDTH  162
-#define LCD_HSYNC_BACK_PORCH   152
+// LCD Timing (ST7262) - Waveshare official for 1024x600
+#define LCD_HSYNC_PULSE_WIDTH  1
+#define LCD_HSYNC_BACK_PORCH   40
 #define LCD_HSYNC_FRONT_PORCH  48
-#define LCD_VSYNC_PULSE_WIDTH  45
+#define LCD_VSYNC_PULSE_WIDTH  1
 #define LCD_VSYNC_BACK_PORCH   13
 #define LCD_VSYNC_FRONT_PORCH  3
 
@@ -97,8 +97,9 @@
 // WiFi / UDP
 // =============================================================================
 namespace WiFiConfig {
-    constexpr const char* SSID     = "RED808_NET";
-    constexpr const char* PASSWORD = "red808pass";
+    constexpr const char* SSID     = "RED808";
+    constexpr const char* PASSWORD = "Red808Esp32";
+    constexpr const char* MASTER_IP = "192.168.4.1";
     constexpr uint16_t UDP_PORT    = 8888;
     constexpr uint32_t TIMEOUT_MS  = 20000;
     constexpr uint32_t RECONNECT_INTERVAL_MS = 8000;
