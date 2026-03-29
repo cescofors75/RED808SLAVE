@@ -9,6 +9,7 @@
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
+#include "nvs_flash.h"
 #include <M5ROTATE8.h>
 #include <DFRobot_VisualRotaryEncoder.h>
 #include "lvgl.h"
@@ -35,6 +36,7 @@
 Screen currentScreen = SCREEN_BOOT;
 Screen previousScreen = SCREEN_BOOT;
 bool needsFullRedraw = true;
+volatile bool themeJustChanged = false;
 
 // Sequencer
 Pattern patterns[Config::MAX_PATTERNS];
@@ -46,12 +48,14 @@ int currentBPM = Config::DEFAULT_BPM;
 int currentKit = 0;
 
 // Volume
+int masterVolume = Config::DEFAULT_VOLUME;
 int sequencerVolume = Config::DEFAULT_VOLUME;
 int livePadsVolume = 100;
 int trackVolumes[Config::MAX_TRACKS];
 VolumeMode volumeMode = VOL_SEQUENCER;
 bool trackMuted[Config::MAX_TRACKS];
-int pendingLivePadTrigger = -1;
+bool livePadPressed[Config::MAX_SAMPLES];
+volatile uint32_t pendingLivePadTriggerMask = 0;
 
 // Filters
 TrackFilter trackFilters[Config::MAX_TRACKS];
@@ -63,6 +67,7 @@ EncoderMode encoderMode = ENC_MODE_VOLUME;
 // I2C Hub
 int m5HubChannel[M5_ENCODER_MODULES] = {-1, -1};
 int dfRobotHubChannel[DFROBOT_ENCODER_COUNT] = {-1, -1};
+int byteButtonHubChannel = -1;
 bool hubDetected = false;
 
 // Connection
@@ -96,6 +101,7 @@ M5ROTATE8 m5encoders[M5_ENCODER_MODULES];
 bool m5encoderConnected[M5_ENCODER_MODULES] = {false, false};
 DFRobot_VisualRotaryEncoder_I2C* dfEncoders[DFROBOT_ENCODER_COUNT] = {nullptr, nullptr};
 bool dfEncoderConnected[DFROBOT_ENCODER_COUNT] = {false, false};
+bool byteButtonConnected = false;
 esp_lcd_panel_handle_t lcd_panel = NULL;
 
 // Encoder LED colors per track
@@ -114,6 +120,19 @@ unsigned long lastUDPCheck = 0;
 unsigned long lastMasterPacketMs = 0;
 int32_t prevM5Counter[Config::MAX_TRACKS];
 uint16_t prevDFValue[DFROBOT_ENCODER_COUNT];
+unsigned long lastLivePadTriggerMs[Config::MAX_SAMPLES];
+uint8_t prevByteButtonState = 0;
+bool byteButtonLivePressed[BYTEBUTTON_BUTTONS] = {false, false, false, false, false, false, false, false};
+uint32_t byteButtonLedCache[BYTEBUTTON_BUTTONS + 1] = {};
+bool byteButtonLedInitialized = false;
+
+static constexpr uint8_t BYTEBUTTON_STATUS_REG = 0x00;
+static constexpr uint8_t BYTEBUTTON_LED_BRIGHTNESS_REG = 0x10;
+static constexpr uint8_t BYTEBUTTON_LED_SHOW_MODE_REG = 0x19;
+static constexpr uint8_t BYTEBUTTON_LED_RGB888_REG = 0x20;
+static constexpr uint8_t BYTEBUTTON_LED_COUNT = BYTEBUTTON_BUTTONS + 1;
+static constexpr uint8_t BYTEBUTTON_LED_USER_DEFINED = 0;
+static constexpr uint8_t BYTEBUTTON_BRIGHTNESS = 180;
 
 // =============================================================================
 // FORWARD DECLARATIONS
@@ -133,8 +152,140 @@ void sendFilterUDP(int track, int fxType);
 void scanI2CHub();
 void handleM5Encoders();
 void handleDFRobotEncoders();
+void handleByteButton();
+void updateByteButtonLeds();
 void updateTrackEncoderLED(int track);
 void updateUI();
+
+static void requestTrackVolumesFromMaster() {
+    if (!udpConnected) return;
+
+    JsonDocument doc;
+    doc["cmd"] = "getTrackVolumes";
+    sendUDPCommand(doc);
+}
+
+static void requestMasterSync() {
+    if (!udpConnected) return;
+
+    JsonDocument doc;
+    doc["cmd"] = "hello";
+    doc["device"] = "SURFACE";
+    sendUDPCommand(doc);
+    requestPatternFromMaster();
+    requestTrackVolumesFromMaster();
+}
+
+static int quantizeDFDelta(int index, int16_t delta) {
+    static int accumulators[DFROBOT_ENCODER_COUNT] = {0, 0};
+    if (index < 0 || index >= DFROBOT_ENCODER_COUNT) return 0;
+    if (delta == 0) return 0;
+
+    accumulators[index] += delta;
+    int logical_step = 0;
+    while (accumulators[index] >= Config::DF_COUNTS_PER_STEP) {
+        logical_step++;
+        accumulators[index] -= Config::DF_COUNTS_PER_STEP;
+    }
+    while (accumulators[index] <= -Config::DF_COUNTS_PER_STEP) {
+        logical_step--;
+        accumulators[index] += Config::DF_COUNTS_PER_STEP;
+    }
+    return logical_step;
+}
+
+static void handleLivePadTouchMatrix(unsigned long now) {
+    bool new_state[Config::MAX_SAMPLES] = {};
+    if (currentScreen != SCREEN_LIVE || !gt911_is_ready()) {
+        memset(livePadPressed, 0, sizeof(bool) * Config::MAX_SAMPLES);
+        return;
+    }
+
+    TouchPoint points[Config::TOUCH_MAX_POINTS] = {};
+    uint8_t count = gt911_get_points(points, Config::TOUCH_MAX_POINTS);
+
+    for (uint8_t i = 0; i < count; i++) {
+        if (!points[i].pressed) continue;
+        int pad = ui_live_pad_hit_test(points[i].x, points[i].y);
+        if (pad >= 0 && pad < Config::MAX_SAMPLES) {
+            new_state[pad] = true;
+        }
+    }
+
+    for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
+        if (new_state[pad] && !livePadPressed[pad]) {
+            pendingLivePadTriggerMask |= (1UL << pad);
+            lastLivePadTriggerMs[pad] = now;
+        }
+        livePadPressed[pad] = new_state[pad];
+    }
+}
+
+static bool byteButtonWriteBytes(uint8_t reg, const uint8_t* data, uint8_t length) {
+    Wire.beginTransmission(BYTEBUTTON_ADDR);
+    Wire.write(reg);
+    for (uint8_t i = 0; i < length; i++) {
+        Wire.write(data[i]);
+    }
+    return Wire.endTransmission() == 0;
+}
+
+static uint32_t byteButtonColorForPad(int pad) {
+    return theme_pad_color(pad);
+}
+
+static bool byteButtonApplyLedConfigLocked() {
+    uint8_t ledMode = BYTEBUTTON_LED_USER_DEFINED;
+    if (!byteButtonWriteBytes(BYTEBUTTON_LED_SHOW_MODE_REG, &ledMode, 1)) {
+        return false;
+    }
+    for (uint8_t led = 0; led < BYTEBUTTON_LED_COUNT; led++) {
+        uint8_t brightness = BYTEBUTTON_BRIGHTNESS;
+        if (!byteButtonWriteBytes(BYTEBUTTON_LED_BRIGHTNESS_REG + led, &brightness, 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void initByteButtonLeds() {
+    if (!byteButtonConnected || byteButtonHubChannel < 0) return;
+    if (!i2c_lock(30)) return;
+
+    i2c_hub_select_raw(byteButtonHubChannel);
+    bool ok = byteButtonApplyLedConfigLocked();
+    i2c_hub_deselect_raw();
+    i2c_unlock();
+
+    if (ok) {
+        byteButtonLedInitialized = true;
+        memset(byteButtonLedCache, 0xFF, sizeof(byteButtonLedCache));
+    }
+}
+
+static bool navigateToScreen(Screen screen) {
+    if (currentScreen == screen) return true;
+
+    lv_obj_t* target = NULL;
+    switch (screen) {
+        case SCREEN_MENU:        target = scr_menu; break;
+        case SCREEN_LIVE:        target = scr_live; break;
+        case SCREEN_SEQUENCER:   target = scr_sequencer; break;
+        case SCREEN_VOLUMES:     target = scr_volumes; break;
+        case SCREEN_FILTERS:     target = scr_filters; break;
+        case SCREEN_SETTINGS:    target = scr_settings; break;
+        case SCREEN_DIAGNOSTICS: target = scr_diagnostics; break;
+        case SCREEN_PATTERNS:    target = scr_patterns; break;
+        default: break;
+    }
+
+    if (!target) return false;
+    if (!lvgl_port_lock(20)) return false;
+    currentScreen = screen;
+    lv_scr_load(target);
+    lvgl_port_unlock();
+    return true;
+}
 
 // =============================================================================
 // STATE INIT
@@ -146,6 +297,10 @@ void initState() {
         trackMuted[i] = false;
         trackFilters[i] = {false, 0, 0, 0};
     }
+    for (int i = 0; i < Config::MAX_SAMPLES; i++) {
+        livePadPressed[i] = false;
+        lastLivePadTriggerMs[i] = 0;
+    }
     for (int p = 0; p < Config::MAX_PATTERNS; p++) {
         memset(patterns[p].steps, 0, sizeof(patterns[p].steps));
         memset(patterns[p].muted, 0, sizeof(patterns[p].muted));
@@ -153,6 +308,11 @@ void initState() {
     }
     for (int i = 0; i < Config::MAX_TRACKS; i++) prevM5Counter[i] = 0;
     for (int i = 0; i < DFROBOT_ENCODER_COUNT; i++) prevDFValue[i] = 0;
+    prevByteButtonState = 0;
+    pendingLivePadTriggerMask = 0;
+    memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
+    memset(byteButtonLedCache, 0xFF, sizeof(byteButtonLedCache));
+    byteButtonLedInitialized = false;
 }
 
 // =============================================================================
@@ -160,6 +320,15 @@ void initState() {
 // =============================================================================
 
 void setupWiFi() {
+    Serial.println("[WiFi] Initializing NVS...");
+    esp_err_t nvs_err = nvs_flash_init();
+    if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        Serial.println("[WiFi] NVS corrupted, erasing...");
+        nvs_flash_erase();
+        nvs_err = nvs_flash_init();
+    }
+    Serial.printf("[WiFi] NVS init: %s\n", esp_err_to_name(nvs_err));
+
     Serial.println("[WiFi] Connecting...");
     WiFi.disconnect(true);
     delay(100);
@@ -177,39 +346,39 @@ void setupWiFi() {
 
     if (WiFi.status() == WL_CONNECTED) {
         wifiConnected = true;
-        udp.begin(WiFiConfig::UDP_PORT);
-        udpConnected = true;
-        Serial.printf("\n[WiFi] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+        udp.stop();
+        udpConnected = udp.begin(WiFiConfig::UDP_PORT);
+        Serial.printf("\n[WiFi] Connected! IP: %s  UDP: %s\n",
+                      WiFi.localIP().toString().c_str(),
+                      udpConnected ? "OK" : "FALLO");
 
-        // Say hello to master
-        JsonDocument doc;
-        doc["cmd"] = "hello";
-        doc["device"] = "SURFACE_V2";
-        sendUDPCommand(doc);
-
-        requestPatternFromMaster();
+        if (udpConnected) {
+            requestMasterSync();
+        }
     } else {
-        Serial.println("\n[WiFi] Connection failed");
+        Serial.println("\n[WiFi] Initial connect timeout - will retry in background");
         wifiConnected = false;
     }
     diagInfo.wifiOk = wifiConnected;
     diagInfo.udpConnected = udpConnected;
+    lastWiFiCheck = millis();
 }
 
 void checkWiFiReconnect() {
     if (WiFi.status() == WL_CONNECTED) {
         if (!wifiConnected) {
             wifiConnected = true;
-            udpConnected = true;
             wifiReconnecting = false;
+            udp.stop();  // Asegura socket limpio antes de bind
+            udpConnected = udp.begin(WiFiConfig::UDP_PORT);
             diagInfo.wifiOk = true;
-            diagInfo.udpConnected = true;
-
-            JsonDocument doc;
-            doc["cmd"] = "hello";
-            doc["device"] = "SURFACE_V2";
-            sendUDPCommand(doc);
-            requestPatternFromMaster();
+            diagInfo.udpConnected = udpConnected;
+            Serial.printf("[WiFi] Reconectado! IP: %s  UDP: %s\n",
+                          WiFi.localIP().toString().c_str(),
+                          udpConnected ? "OK" : "FALLO");
+            if (udpConnected) {
+                requestMasterSync();
+            }
         }
         return;
     }
@@ -220,14 +389,23 @@ void checkWiFiReconnect() {
     diagInfo.wifiOk = false;
     diagInfo.udpConnected = false;
 
-    if (!wifiReconnecting && (millis() - lastWiFiCheck > WiFiConfig::RECONNECT_INTERVAL_MS)) {
-        lastWiFiCheck = millis();
+    unsigned long now_wifi = millis();
+
+    // FIX: wifiReconnecting nunca se reseteaba si WiFi no conectaba → ningún reintento
+    // Después del timeout de intento, volver a permitir un nuevo ciclo de reconexión
+    if (wifiReconnecting && (now_wifi - lastWiFiCheck > WiFiConfig::RECONNECT_ATTEMPT_TIMEOUT_MS)) {
+        wifiReconnecting = false;
+        Serial.println("[WiFi] Intento de reconexion agotado, reintentando...");
+    }
+
+    if (!wifiReconnecting && (now_wifi - lastWiFiCheck > WiFiConfig::RECONNECT_INTERVAL_MS)) {
+        lastWiFiCheck = now_wifi;
         wifiReconnecting = true;
-        WiFi.disconnect(false);
-        delay(50);
+        WiFi.disconnect(false);   // No bloqueante
         WiFi.mode(WIFI_STA);
         WiFi.setSleep(false);
         WiFi.begin(WiFiConfig::SSID, WiFiConfig::PASSWORD);
+        Serial.printf("[WiFi] Reconectando a '%s'...\n", WiFiConfig::SSID);
     }
 }
 
@@ -330,14 +508,49 @@ void receiveUDPData() {
     else if (strcmp(cmd, "play_state") == 0) {
         isPlaying = doc["playing"] | false;
     }
-    else if (strcmp(cmd, "tempo_sync") == 0) {
-        currentBPM = doc["value"] | Config::DEFAULT_BPM;
+    else if (strcmp(cmd, "start") == 0) {
+        isPlaying = true;
     }
-    else if (strcmp(cmd, "volume_seq_sync") == 0) {
-        sequencerVolume = doc["value"] | Config::DEFAULT_VOLUME;
+    else if (strcmp(cmd, "stop") == 0) {
+        isPlaying = false;
     }
-    else if (strcmp(cmd, "volume_live_sync") == 0) {
-        livePadsVolume = doc["value"] | 100;
+    else if (strcmp(cmd, "tempo_sync") == 0 || strcmp(cmd, "tempo") == 0) {
+        currentBPM = constrain(doc["value"] | Config::DEFAULT_BPM, Config::MIN_BPM, Config::MAX_BPM);
+    }
+    else if (strcmp(cmd, "volume_sync") == 0 ||
+             strcmp(cmd, "master_volume_sync") == 0 ||
+             strcmp(cmd, "volume_master_sync") == 0 ||
+             strcmp(cmd, "setVolume") == 0) {
+        masterVolume = constrain(doc["value"] | Config::DEFAULT_VOLUME, 0, Config::MAX_VOLUME);
+    }
+    else if (strcmp(cmd, "volume_seq_sync") == 0 || strcmp(cmd, "setSequencerVolume") == 0) {
+        sequencerVolume = constrain(doc["value"] | Config::DEFAULT_VOLUME, 0, Config::MAX_VOLUME);
+    }
+    else if (strcmp(cmd, "volume_live_sync") == 0 || strcmp(cmd, "setLiveVolume") == 0) {
+        livePadsVolume = constrain(doc["value"] | 100, 0, Config::MAX_VOLUME);
+    }
+    else if (strcmp(cmd, "trackVolumes") == 0 ||
+             strcmp(cmd, "track_volumes") == 0 ||
+             strcmp(cmd, "track_volume_sync") == 0 ||
+             strcmp(cmd, "getTrackVolumes") == 0) {
+        JsonArray values = doc["values"].is<JsonArray>() ? doc["values"].as<JsonArray>() : JsonArray();
+        if (!values) values = doc["volumes"].as<JsonArray>();
+        if (!values) values = doc["data"].as<JsonArray>();
+
+        if (values) {
+            int index = 0;
+            for (JsonVariant value : values) {
+                if (index >= Config::MAX_TRACKS) break;
+                trackVolumes[index++] = constrain(value.as<int>(), 0, Config::MAX_VOLUME);
+            }
+        }
+    }
+    else if (strcmp(cmd, "trackVolume") == 0 || strcmp(cmd, "getTrackVolume") == 0) {
+        int track = doc["track"] | -1;
+        if (track >= 0 && track < Config::MAX_TRACKS) {
+            int value = doc["volume"] | (doc["value"] | trackVolumes[track]);
+            trackVolumes[track] = constrain(value, 0, Config::MAX_VOLUME);
+        }
     }
 }
 
@@ -419,8 +632,9 @@ void scanI2CHub() {
     Serial.println("[I2C] PCA9548A hub detected");
 
     int m5Found = 0, dfFound = 0;
+    bool byteButtonFound = false;
 
-    for (uint8_t ch = 0; ch < 8 && (m5Found < M5_ENCODER_MODULES || dfFound < DFROBOT_ENCODER_COUNT); ch++) {
+    for (uint8_t ch = 0; ch < 8 && (m5Found < M5_ENCODER_MODULES || dfFound < DFROBOT_ENCODER_COUNT || !byteButtonFound); ch++) {
         i2c_hub_select(ch);
         delay(5);
 
@@ -468,6 +682,21 @@ void scanI2CHub() {
             dfFound++;
         }
 
+        if (!byteButtonFound && i2c_device_present(BYTEBUTTON_ADDR)) {
+            byteButtonHubChannel = ch;
+            byteButtonConnected = true;
+            byteButtonFound = true;
+            prevByteButtonState = 0;
+            Serial.printf("[I2C] M5 ByteButton found on ch %d\n", ch);
+
+            if (i2c_lock(50)) {
+                i2c_hub_select_raw(ch);
+                byteButtonLedInitialized = byteButtonApplyLedConfigLocked();
+                i2c_hub_deselect_raw();
+                i2c_unlock();
+            }
+        }
+
         i2c_hub_deselect();
     }
 
@@ -475,8 +704,67 @@ void scanI2CHub() {
     diagInfo.m5encoder2Ok = m5encoderConnected[1];
     diagInfo.dfrobot1Ok = dfEncoderConnected[0];
     diagInfo.dfrobot2Ok = dfEncoderConnected[1];
+    diagInfo.byteButtonOk = byteButtonConnected;
 
-    Serial.printf("[I2C] Found: %d M5 modules, %d DFRobot rotaries\n", m5Found, dfFound);
+    Serial.printf("[I2C] Found: %d M5 modules, %d DFRobot rotaries, ByteButton: %s\n",
+                  m5Found, dfFound, byteButtonConnected ? "YES" : "NO");
+}
+
+void updateByteButtonLeds() {
+    if (!byteButtonConnected || byteButtonHubChannel < 0) return;
+    if (!byteButtonLedInitialized) {
+        initByteButtonLeds();
+        if (!byteButtonLedInitialized) return;
+    }
+
+    uint32_t desired[BYTEBUTTON_LED_COUNT] = {};
+    static const Screen navTargets[7] = {
+        SCREEN_LIVE,
+        SCREEN_SEQUENCER,
+        SCREEN_VOLUMES,
+        SCREEN_FILTERS,
+        SCREEN_PATTERNS,
+        SCREEN_SETTINGS,
+        SCREEN_DIAGNOSTICS,
+    };
+    uint32_t navColors[7];
+    for (int nc = 0; nc < 7; nc++) navColors[nc] = theme_nav_color(nc);
+
+    if (currentScreen == SCREEN_LIVE) {
+        for (int i = 0; i < BYTEBUTTON_BUTTONS; i++) {
+            desired[i] = byteButtonLivePressed[i] ? 0xFFFFFF : byteButtonColorForPad(i);
+        }
+        desired[8] = isPlaying ? 0x3FB950 : 0xF85149;
+    } else {
+        for (int i = 0; i < 7; i++) {
+            desired[i] = (currentScreen == navTargets[i]) ? 0xFFFFFF : navColors[i];
+        }
+        desired[7] = isPlaying ? 0x3FB950 : 0xF85149;
+        desired[8] = masterConnected ? 0x58A6FF : 0x30363D;
+    }
+
+    bool hasChanges = false;
+    for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
+        if (byteButtonLedCache[i] != desired[i]) {
+            hasChanges = true;
+            break;
+        }
+    }
+    if (!hasChanges) return;
+    if (!i2c_lock(25)) return;
+
+    i2c_hub_select_raw(byteButtonHubChannel);
+    for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
+        if (byteButtonLedCache[i] == desired[i]) continue;
+        uint32_t color = desired[i];
+        if (!byteButtonWriteBytes(BYTEBUTTON_LED_RGB888_REG + i * 4, (uint8_t*)&color, 4)) {
+            byteButtonLedInitialized = false;
+            break;
+        }
+        byteButtonLedCache[i] = desired[i];
+    }
+    i2c_hub_deselect_raw();
+    i2c_unlock();
 }
 
 // =============================================================================
@@ -496,10 +784,12 @@ void updateTrackEncoderLED(int track) {
     if (trackMuted[track]) {
         m5encoders[moduleIndex].writeRGB(encoderIndex, 0x1E, 0, 0);
     } else {
+        uint8_t rgb[3];
+        theme_encoder_color(track, rgb);
         uint8_t brightness = map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
-        uint8_t r = (encoderLEDColors[track][0] * brightness) / 255;
-        uint8_t g = (encoderLEDColors[track][1] * brightness) / 255;
-        uint8_t b = (encoderLEDColors[track][2] * brightness) / 255;
+        uint8_t r = (rgb[0] * brightness) / 255;
+        uint8_t g = (rgb[1] * brightness) / 255;
+        uint8_t b = (rgb[2] * brightness) / 255;
         m5encoders[moduleIndex].writeRGB(encoderIndex, r, g, b);
     }
 
@@ -533,10 +823,12 @@ void handleM5Encoders() {
                     doc["volume"] = trackVolumes[track];
                     sendUDPCommand(doc);
                     // LED update inline (already holding mutex + hub selected)
+                    uint8_t rgb[3];
+                    theme_encoder_color(track, rgb);
                     uint8_t brightness = map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
-                    uint8_t r = (encoderLEDColors[track][0] * brightness) / 255;
-                    uint8_t g = (encoderLEDColors[track][1] * brightness) / 255;
-                    uint8_t b = (encoderLEDColors[track][2] * brightness) / 255;
+                    uint8_t r = (rgb[0] * brightness) / 255;
+                    uint8_t g = (rgb[1] * brightness) / 255;
+                    uint8_t b = (rgb[2] * brightness) / 255;
                     m5encoders[mod].writeRGB(enc, r, g, b);
                 }
             }
@@ -551,10 +843,12 @@ void handleM5Encoders() {
                 if (trackMuted[track]) {
                     m5encoders[mod].writeRGB(enc, 0x1E, 0, 0);
                 } else {
+                    uint8_t rgb[3];
+                    theme_encoder_color(track, rgb);
                     uint8_t brightness = map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
-                    uint8_t r = (encoderLEDColors[track][0] * brightness) / 255;
-                    uint8_t g = (encoderLEDColors[track][1] * brightness) / 255;
-                    uint8_t b = (encoderLEDColors[track][2] * brightness) / 255;
+                    uint8_t r = (rgb[0] * brightness) / 255;
+                    uint8_t g = (rgb[1] * brightness) / 255;
+                    uint8_t b = (rgb[2] * brightness) / 255;
                     m5encoders[mod].writeRGB(enc, r, g, b);
                 }
             }
@@ -581,13 +875,17 @@ void handleDFRobotEncoders() {
         i2c_hub_select_raw(ch);
 
         uint16_t val = dfEncoders[i]->getEncoderValue() & 0x03FF; // 10-bit range: 0..1023
-        int16_t delta = (int16_t)val - (int16_t)(prevDFValue[i] & 0x03FF);
-        if (delta > 512) delta -= 1024;
-        if (delta < -512) delta += 1024;
-        if (delta > Config::DF_DELTA_CLAMP) delta = Config::DF_DELTA_CLAMP;
-        if (delta < -Config::DF_DELTA_CLAMP) delta = -Config::DF_DELTA_CLAMP;
-        if (abs((int)delta) > Config::DF_GLITCH_THRESHOLD) {
-            delta = (delta > 0) ? Config::DF_DELTA_CLAMP : -Config::DF_DELTA_CLAMP;
+        int16_t rawDelta = (int16_t)val - (int16_t)(prevDFValue[i] & 0x03FF);
+        if (rawDelta > 512) rawDelta -= 1024;
+        if (rawDelta < -512) rawDelta += 1024;
+
+        int16_t delta = rawDelta;
+        if (abs((int)rawDelta) > Config::DF_GLITCH_THRESHOLD) {
+            delta = 0;
+        } else {
+            if (delta > Config::DF_DELTA_CLAMP) delta = Config::DF_DELTA_CLAMP;
+            if (delta < -Config::DF_DELTA_CLAMP) delta = -Config::DF_DELTA_CLAMP;
+            if (abs((int)delta) <= 1) delta = 0;
         }
         prevDFValue[i] = val;
 
@@ -598,7 +896,8 @@ void handleDFRobotEncoders() {
 
         // Process results outside of I2C lock
         if (i == 0) {
-            if (delta != 0) {
+            int logical_delta = quantizeDFDelta(i, delta);
+            if (logical_delta != 0) {
                 TrackFilter& f = (filterSelectedTrack == -1) ? masterFilter : trackFilters[filterSelectedTrack];
                 uint8_t* param = nullptr;
                 switch (filterSelectedFX) {
@@ -607,26 +906,27 @@ void handleDFRobotEncoders() {
                     case FILTER_COMPRESSOR: param = &f.compAmount;    break;
                 }
                 if (param) {
-                    int newVal = constrain((int)*param + delta * Config::DF_FILTER_STEP, 0, 127);
+                    int newVal = constrain((int)*param + logical_delta * Config::DF_FILTER_STEP, 0, 127);
                     *param = (uint8_t)newVal;
                     f.enabled = (f.delayAmount > 0 || f.flangerAmount > 0 || f.compAmount > 0);
                     sendFilterUDP(filterSelectedTrack, filterSelectedFX);
                 }
             }
-            if (buttonPressed && (millis() - lastBtnMs[i]) > Config::BUTTON_DEBOUNCE_MS) {
+            if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();
                 sendPlayStateCommand(!isPlaying);
             }
         }
         else if (i == 1) {
-            if (delta != 0) {
-                int newPat = currentPattern + delta * Config::DF_PATTERN_STEP;
+            int logical_delta = quantizeDFDelta(i, delta);
+            if (logical_delta != 0) {
+                int newPat = currentPattern + logical_delta * Config::DF_PATTERN_STEP;
                 newPat = constrain(newPat, 0, Config::MAX_PATTERNS - 1);
                 if (newPat != currentPattern) {
                     selectPatternOnMaster(newPat);
                 }
             }
-            if (buttonPressed && (millis() - lastBtnMs[i]) > Config::BUTTON_DEBOUNCE_MS) {
+            if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();
                 requestPatternFromMaster();
             }
@@ -634,17 +934,89 @@ void handleDFRobotEncoders() {
     }
 }
 
+void handleByteButton() {
+    if (!byteButtonConnected) return;
+    if (byteButtonHubChannel < 0) return;
+
+    uint8_t status = 0;
+    bool readOk = false;
+
+    if (i2c_lock(20)) {
+        i2c_hub_select_raw(byteButtonHubChannel);
+
+        Wire.beginTransmission(BYTEBUTTON_ADDR);
+        Wire.write(BYTEBUTTON_STATUS_REG);
+        if (Wire.endTransmission(false) == 0 && Wire.requestFrom((uint8_t)BYTEBUTTON_ADDR, (uint8_t)1) == 1) {
+            status = Wire.read();
+            readOk = true;
+        }
+
+        i2c_hub_deselect_raw();
+        i2c_unlock();
+    }
+
+    if (!readOk) return;
+
+    uint8_t previousState = prevByteButtonState;
+    uint8_t pressedEdges = status & (uint8_t)~previousState;
+    prevByteButtonState = status;
+
+    unsigned long now = millis();
+    if (currentScreen == SCREEN_LIVE) {
+        int velocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
+
+        for (int button = 0; button < BYTEBUTTON_BUTTONS && button < Config::MAX_SAMPLES; button++) {
+            bool isPressed = (status & (1U << button)) != 0;
+            byteButtonLivePressed[button] = isPressed;
+
+            if ((pressedEdges & (1U << button)) == 0) continue;
+
+            sendLivePadTrigger(button, velocity);
+            lastLivePadTriggerMs[button] = now;
+        }
+    } else {
+        memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
+        for (int button = 0; button < BYTEBUTTON_BUTTONS; button++) {
+            if ((pressedEdges & (1U << button)) == 0) continue;
+
+            switch (button) {
+                case 0: navigateToScreen(SCREEN_LIVE); break;
+                case 1: navigateToScreen(SCREEN_SEQUENCER); break;
+                case 2: navigateToScreen(SCREEN_VOLUMES); break;
+                case 3: navigateToScreen(SCREEN_FILTERS); break;
+                case 4: navigateToScreen(SCREEN_PATTERNS); break;
+                case 5: navigateToScreen(SCREEN_SETTINGS); break;
+                case 6: navigateToScreen(SCREEN_DIAGNOSTICS); break;
+                case 7: sendPlayStateCommand(!isPlaying); break;
+            }
+        }
+    }
+
+    updateByteButtonLeds();
+}
+
 // =============================================================================
 // UI UPDATE (called from loop on Core 0, LVGL runs on Core 1)
 // =============================================================================
 
 void updateUI() {
+    // Handle theme change: update currentScreen and refresh M5 LEDs
+    if (themeJustChanged) {
+        themeJustChanged = false;
+        currentScreen = SCREEN_SETTINGS;
+        // Refresh all M5 encoder LEDs with new theme colors
+        for (int t = 0; t < Config::MAX_TRACKS; t++) {
+            updateTrackEncoderLED(t);
+        }
+    }
+
     if (!lvgl_port_lock(5)) return;
 
     ui_update_header();
 
     switch (currentScreen) {
         case SCREEN_MENU:      ui_update_menu_status(); break;
+        case SCREEN_LIVE:      ui_update_live_pads(); break;
         case SCREEN_SEQUENCER: ui_update_sequencer(); break;
         case SCREEN_VOLUMES:   ui_update_volumes();   break;
         case SCREEN_FILTERS:   ui_update_filters();   break;
@@ -711,14 +1083,20 @@ void setup() {
     lvgl_port_init(lcd_panel);
     Serial.println("[LVGL] Port initialized (task paused)");
 
-    // 6. Scan I2C hub for M5 + DFRobot (before LVGL task starts - no I2C race)
+    // 6. Scan I2C hub for M5 + DFRobot + ByteButton (before LVGL task starts - no I2C race)
     scanI2CHub();
 
-    // 7. Now start LVGL task (safe - I2C scanning is done)
+    // 7. WiFi + UDP — init BEFORE LVGL screens to reserve internal SRAM for WiFi DMA buffers
+    Serial.printf("[HEAP] Before WiFi: %d bytes\n", ESP.getFreeHeap());
+    setupWiFi();
+    Serial.printf("[HEAP] After WiFi: %d bytes\n", ESP.getFreeHeap());
+
+    // 8. Now start LVGL task (safe - I2C scanning is done)
     lvgl_port_task_start();
     Serial.println("[LVGL] Task started");
 
-    // 8. Create all UI screens (must be inside LVGL lock)
+    // 9. Create all UI screens (must be inside LVGL lock)
+    //    Widgets now allocate from PSRAM via lv_conf.h, keeping internal heap free
     Serial.println("[UI] Creating screens...");
     if (lvgl_port_lock(1000)) {
         ui_theme_init();
@@ -739,9 +1117,7 @@ void setup() {
         lvgl_port_unlock();
         Serial.println("[UI] All screens created");
     }
-
-    // 8. WiFi + UDP
-    setupWiFi();
+    Serial.printf("[HEAP] After UI: %d bytes  PSRAM: %d bytes\n", ESP.getFreeHeap(), ESP.getFreePsram());
 
     Serial.println("\n[SETUP] Complete! Entering main loop.\n");
 }
@@ -763,11 +1139,41 @@ void loop() {
     // Receive UDP data
     receiveUDPData();
 
-    if (pendingLivePadTrigger >= 0) {
-        int pad = pendingLivePadTrigger;
-        pendingLivePadTrigger = -1;
+    if (wifiConnected && udpConnected && !masterConnected && (now - lastUDPCheck >= 2000)) {
+        lastUDPCheck = now;
+        Serial.println("[UDP] Master not responding, resending hello...");
+        requestMasterSync();
+    }
+
+    handleLivePadTouchMatrix(now);
+
+    uint32_t pendingMask = pendingLivePadTriggerMask;
+    if (pendingMask != 0) {
+        pendingLivePadTriggerMask = 0;
+        int velocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
+        for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
+            if ((pendingMask & (1UL << pad)) == 0) continue;
+            sendLivePadTrigger(pad, velocity);
+            lastLivePadTriggerMs[pad] = now;
+        }
+    }
+
+    for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
+        if (!livePadPressed[pad]) continue;
+        if ((now - lastLivePadTriggerMs[pad]) < Config::LIVE_PAD_REPEAT_MS) continue;
+
         int velocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
         sendLivePadTrigger(pad, velocity);
+        lastLivePadTriggerMs[pad] = now;
+    }
+
+    for (int pad = 0; pad < BYTEBUTTON_BUTTONS && pad < Config::MAX_SAMPLES; pad++) {
+        if (!byteButtonLivePressed[pad]) continue;
+        if ((now - lastLivePadTriggerMs[pad]) < Config::LIVE_PAD_REPEAT_MS) continue;
+
+        int velocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
+        sendLivePadTrigger(pad, velocity);
+        lastLivePadTriggerMs[pad] = now;
     }
 
     // Encoder polling (50ms interval)
@@ -775,6 +1181,8 @@ void loop() {
         lastEncoderRead = now;
         handleM5Encoders();
         handleDFRobotEncoders();
+        handleByteButton();
+        updateByteButtonLeds();
     }
 
     // UI update (~60fps)
@@ -795,6 +1203,7 @@ void loop() {
         Serial.printf("  M5 #2:       %s (ch=%d)\n", m5encoderConnected[1] ? "OK" : "NO", m5HubChannel[1]);
         Serial.printf("  DFRobot #1:  %s (ch=%d)\n", dfEncoderConnected[0] ? "OK" : "NO", dfRobotHubChannel[0]);
         Serial.printf("  DFRobot #2:  %s (ch=%d)\n", dfEncoderConnected[1] ? "OK" : "NO", dfRobotHubChannel[1]);
+        Serial.printf("  ByteButton:  %s (ch=%d)\n", byteButtonConnected ? "OK" : "NO", byteButtonHubChannel);
         Serial.printf("  LCD panel:   %s\n", lcd_panel ? "OK" : "FAIL");
         Serial.printf("  Heap: %d  PSRAM: %d\n", ESP.getFreeHeap(), ESP.getFreePsram());
         Serial.println("===========================\n");

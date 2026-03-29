@@ -18,10 +18,10 @@
 // =============================================================================
 #define LV_MEM_CUSTOM      1
 #if LV_MEM_CUSTOM
-    #define LV_MEM_CUSTOM_INCLUDE   <stdlib.h>
-    #define LV_MEM_CUSTOM_ALLOC     malloc
-    #define LV_MEM_CUSTOM_FREE      free
-    #define LV_MEM_CUSTOM_REALLOC   realloc
+    #define LV_MEM_CUSTOM_INCLUDE   <esp_heap_caps.h>
+    #define LV_MEM_CUSTOM_ALLOC(size)     heap_caps_malloc(size, MALLOC_CAP_SPIRAM)
+    #define LV_MEM_CUSTOM_FREE            heap_caps_free
+    #define LV_MEM_CUSTOM_REALLOC(p,size) heap_caps_realloc(p, size, MALLOC_CAP_SPIRAM)
 #endif
 #define LV_MEMCPY_MEMSET_STD  1
 

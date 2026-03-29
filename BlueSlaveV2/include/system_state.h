@@ -76,6 +76,7 @@ struct DiagnosticInfo {
     bool m5encoder2Ok;
     bool dfrobot1Ok;
     bool dfrobot2Ok;
+    bool byteButtonOk;
     String lastError;
 };
 
@@ -98,11 +99,14 @@ extern int currentBPM;
 extern int currentKit;
 
 // Volume
+extern int masterVolume;
 extern int sequencerVolume;
 extern int livePadsVolume;
 extern int trackVolumes[];
 extern bool trackMuted[];
-extern int pendingLivePadTrigger;
+extern bool livePadPressed[];
+extern bool byteButtonLivePressed[];
+extern volatile uint32_t pendingLivePadTriggerMask;
 extern VolumeMode volumeMode;
 
 // Filters

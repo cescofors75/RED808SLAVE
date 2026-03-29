@@ -32,6 +32,8 @@ void ui_update_filters();
 void ui_update_diagnostics();
 void ui_update_header();
 void ui_update_menu_status();
+void ui_update_live_pads();
+int ui_live_pad_hit_test(int x, int y);
 
 // Header bar (shared across screens)
 void ui_create_header(lv_obj_t* parent);

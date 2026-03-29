@@ -18,7 +18,7 @@
 #define LCD_HSYNC      GPIO_NUM_46
 #define LCD_DE         GPIO_NUM_5
 #define LCD_PCLK       GPIO_NUM_7
-#define LCD_PCLK_HZ    (16 * 1000 * 1000)  // 16MHz - stable with PSRAM
+#define LCD_PCLK_HZ    (16 * 1000 * 1000)  // Conservative clock; panel stability depends more on valid porch timings
 
 // RGB565 Data (16-bit)
 #define LCD_B3         GPIO_NUM_14
@@ -39,10 +39,10 @@
 #define LCD_R7         GPIO_NUM_40
 
 // LCD Timing (ST7262) - Waveshare official for 1024x600
-#define LCD_HSYNC_PULSE_WIDTH  1
-#define LCD_HSYNC_BACK_PORCH   40
+#define LCD_HSYNC_PULSE_WIDTH  162
+#define LCD_HSYNC_BACK_PORCH   152
 #define LCD_HSYNC_FRONT_PORCH  48
-#define LCD_VSYNC_PULSE_WIDTH  1
+#define LCD_VSYNC_PULSE_WIDTH  45
 #define LCD_VSYNC_BACK_PORCH   13
 #define LCD_VSYNC_FRONT_PORCH  3
 
@@ -88,6 +88,11 @@
 // DFRobot #1: FX control (rotation=amount, button=cycle effect)
 // DFRobot #2: Pattern select (rotation=navigate, button=reset)
 
+// M5 Unit ByteButton (1x)
+#define BYTEBUTTON_COUNT       1
+#define BYTEBUTTON_ADDR        0x47
+#define BYTEBUTTON_BUTTONS     8
+
 // =============================================================================
 // SD CARD (SDMMC interface, CS via CH32V003 EXIO4)
 // =============================================================================
@@ -101,8 +106,9 @@ namespace WiFiConfig {
     constexpr const char* PASSWORD = "red808esp32";
     constexpr const char* MASTER_IP = "192.168.4.1";
     constexpr uint16_t UDP_PORT    = 8888;
-    constexpr uint32_t TIMEOUT_MS  = 20000;
-    constexpr uint32_t RECONNECT_INTERVAL_MS = 8000;
+    constexpr uint32_t TIMEOUT_MS  = 8000;
+    constexpr uint32_t RECONNECT_INTERVAL_MS       = 5000;
+    constexpr uint32_t RECONNECT_ATTEMPT_TIMEOUT_MS = 8000;
 }
 
 // =============================================================================
@@ -122,13 +128,13 @@ namespace Config {
     constexpr int DEFAULT_VOLUME = 75;
     constexpr int MAX_VOLUME    = 150;
     constexpr int MAX_SAMPLES   = 16;
-    constexpr int DEFAULT_TRACK_VOLUME = 100;
+    constexpr int DEFAULT_TRACK_VOLUME = 75;
 
     // Timing
-    constexpr uint32_t ENCODER_READ_MS    = 20;
-    constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
+    constexpr uint32_t ENCODER_READ_MS    = 10;
+    constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
     constexpr uint32_t LED_FLASH_MS       = 100;
-    constexpr uint32_t SCREEN_UPDATE_MS   = 16;  // balanced for smoother, less flicker (~60 FPS)
+    constexpr uint32_t SCREEN_UPDATE_MS   = 33;  // ~30fps UI update from Core 0 — reduce LVGL lock contention
     constexpr uint32_t UDP_CHECK_MS       = 30000;
 
     // Touch tuning (Waveshare 7B). Fine tune offsets if hitboxes feel shifted.
@@ -140,6 +146,7 @@ namespace Config {
     constexpr int TOUCH_X_SCALE_PCT = 100;
     constexpr int TOUCH_Y_SCALE_PCT = 100;
     constexpr int TOUCH_JITTER_PX = 3;
+    constexpr uint8_t TOUCH_MAX_POINTS = 5;
     // Raw touch range calibration (GT911 reported range before transform)
     constexpr int TOUCH_RAW_MIN_X = 0;
     constexpr int TOUCH_RAW_MAX_X = 1023;
@@ -149,8 +156,11 @@ namespace Config {
     // DFRobot rotary tuning
     constexpr int DF_DELTA_CLAMP = 16;
     constexpr int DF_GLITCH_THRESHOLD = 64;
-    constexpr int DF_FILTER_STEP = 3;
+    constexpr int DF_COUNTS_PER_STEP = 4;
+    constexpr int DF_FILTER_STEP = 1;
     constexpr int DF_PATTERN_STEP = 1;
+    constexpr uint32_t DF_BUTTON_GUARD_MS = 250;
+    constexpr uint32_t LIVE_PAD_REPEAT_MS = 85;
 
     // Menu
     constexpr int MENU_ITEMS = 6;
