@@ -115,6 +115,12 @@ uint8_t encoderLEDColors[Config::MAX_TRACKS][3] = {
 // Analog rotary encoder (GPIO6 - pattern select)
 int prevAnalogEncPattern = -1;
 int analogEncSmoothed = -1;
+int analogEncMin = 4095;
+int analogEncMax = 0;
+
+// Live pad touch guard (prevent phantom triggers on screen enter)
+unsigned long liveScreenEnteredMs = 0;
+static constexpr unsigned long LIVE_TOUCH_GUARD_MS = 500;
 
 // Timing
 unsigned long lastEncoderRead = 0;
@@ -206,6 +212,12 @@ static void handleLivePadTouchMatrix(unsigned long now) {
         return;
     }
 
+    // Guard period after entering LIVE screen — ignore stale touches
+    if ((now - liveScreenEnteredMs) < LIVE_TOUCH_GUARD_MS) {
+        memset(livePadPressed, 0, sizeof(bool) * Config::MAX_SAMPLES);
+        return;
+    }
+
     TouchPoint points[Config::TOUCH_MAX_POINTS] = {};
     uint8_t count = gt911_get_points(points, Config::TOUCH_MAX_POINTS);
 
@@ -285,6 +297,14 @@ static bool navigateToScreen(Screen screen) {
     }
 
     if (!target) return false;
+
+    // Guard BEFORE screen change: prevent race with touch handler
+    if (screen == SCREEN_LIVE) {
+        liveScreenEnteredMs = millis();
+        memset(livePadPressed, 0, sizeof(livePadPressed));
+        pendingLivePadTriggerMask = 0;
+    }
+
     if (!lvgl_port_lock(20)) return false;
     currentScreen = screen;
     lv_scr_load(target);
@@ -415,10 +435,14 @@ void checkWiFiReconnect() {
 }
 
 void sendUDPCommand(const char* cmd) {
-    if (!udpConnected) return;
+    if (!udpConnected) {
+        Serial.printf("[UDP] NOT connected, dropping: %s\n", cmd);
+        return;
+    }
     udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
     udp.write((const uint8_t*)cmd, strlen(cmd));
     udp.endPacket();
+    Serial.printf("[UDP] Sent: %s\n", cmd);
 }
 
 void sendUDPCommand(JsonDocument& doc) {
@@ -435,10 +459,10 @@ void requestPatternFromMaster() {
 }
 
 void sendPlayStateCommand(bool shouldPlay) {
-    JsonDocument doc;
-    doc["cmd"] = shouldPlay ? "start" : "stop";
-    sendUDPCommand(doc);
     isPlaying = shouldPlay;
+    JsonDocument doc;
+    doc["cmd"] = isPlaying ? "start" : "stop";
+    sendUDPCommand(doc);
 }
 
 void selectPatternOnMaster(int patternIndex) {
@@ -449,6 +473,7 @@ void selectPatternOnMaster(int patternIndex) {
     doc["index"] = currentPattern;
     sendUDPCommand(doc);
 
+    // Request the new pattern data from master
     requestPatternFromMaster();
 }
 
@@ -895,22 +920,41 @@ void handleDFRobotEncoders() {
         prevDFValue[i] = val;
 
         bool buttonPressed = dfEncoders[i]->detectButtonDown();
+        if (buttonPressed) {
+            Serial.printf("[DFRobot] Encoder #%d button PRESSED\n", i);
+        }
 
         i2c_hub_deselect_raw();
         i2c_unlock();
 
         // Process results outside of I2C lock
         if (i == 0) {
-            // DFRobot #0: Master Volume + Play/Pause button
+            // DFRobot #0: Sequencer Volume (or Pads Volume if any ByteButton held)
+            //   Button = Play/Pause
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                int newVol = constrain(masterVolume + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
-                if (newVol != masterVolume) {
-                    masterVolume = newVol;
-                    JsonDocument doc;
-                    doc["cmd"] = "setVolume";
-                    doc["value"] = masterVolume;
-                    sendUDPCommand(doc);
+                // Check if any ByteButton is physically held (filtered: ignore 0xFF noise)
+                bool anyBBHeld = (prevByteButtonState != 0 && prevByteButtonState != 0xFF);
+                if (anyBBHeld) {
+                    // Modify live pads volume
+                    int newVol = constrain(livePadsVolume + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
+                    if (newVol != livePadsVolume) {
+                        livePadsVolume = newVol;
+                        JsonDocument doc;
+                        doc["cmd"] = "setLiveVolume";
+                        doc["value"] = livePadsVolume;
+                        sendUDPCommand(doc);
+                    }
+                } else {
+                    // Modify sequencer volume
+                    int newVol = constrain(sequencerVolume + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
+                    if (newVol != sequencerVolume) {
+                        sequencerVolume = newVol;
+                        JsonDocument doc;
+                        doc["cmd"] = "setSequencerVolume";
+                        doc["value"] = sequencerVolume;
+                        sendUDPCommand(doc);
+                    }
                 }
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
@@ -926,7 +970,7 @@ void handleDFRobotEncoders() {
                 if (newBPM != currentBPM) {
                     currentBPM = newBPM;
                     JsonDocument doc;
-                    doc["cmd"] = "setTempo";
+                    doc["cmd"] = "tempo";
                     doc["value"] = currentBPM;
                     sendUDPCommand(doc);
                 }
@@ -944,17 +988,34 @@ void handleDFRobotEncoders() {
 // =============================================================================
 
 void handleAnalogEncoder() {
+    static int stablePattern = -1;
+    static int stableCount = 0;
+
     int raw = analogRead(Config::ANALOG_ENC_PIN);
 
-    // Simple exponential moving average for noise rejection
+    // Self-calibrate min/max range
+    if (raw < analogEncMin) analogEncMin = raw;
+    if (raw > analogEncMax) analogEncMax = raw;
+
+    // Very heavy smoothing (31/32 old + 1/32 new) to kill ADC noise
     if (analogEncSmoothed < 0) {
         analogEncSmoothed = raw;
         return;
     }
-    analogEncSmoothed = (analogEncSmoothed * 3 + raw) / 4;
+    analogEncSmoothed = (analogEncSmoothed * 31 + raw + 16) / 32;
 
-    // Map ADC range (0-4095) to pattern index (0..MAX_PATTERNS-1)
-    int pattern = map(analogEncSmoothed, 0, 4095, 0, Config::ANALOG_ENC_PATTERNS - 1);
+    // Need minimum ADC range before mapping
+    int range = analogEncMax - analogEncMin;
+    if (range < 200) return;
+
+    // Conservative edge margins (1/6 = 16.7% each side)
+    int usableMin = analogEncMin + range / 6;
+    int usableMax = analogEncMax - range / 6;
+    int usableRange = usableMax - usableMin;
+    if (usableRange < 100) return;
+
+    int clamped = constrain(analogEncSmoothed, usableMin, usableMax);
+    int pattern = map(clamped, usableMin, usableMax, 0, Config::MAX_PATTERNS - 1);
     pattern = constrain(pattern, 0, Config::MAX_PATTERNS - 1);
 
     if (prevAnalogEncPattern < 0) {
@@ -962,12 +1023,30 @@ void handleAnalogEncoder() {
         return;
     }
 
-    if (pattern != prevAnalogEncPattern) {
-        // Check ADC is stable (deadband check against raw vs smoothed)
-        if (abs(raw - analogEncSmoothed) < Config::ANALOG_ENC_DEADBAND) {
-            prevAnalogEncPattern = pattern;
-            selectPatternOnMaster(pattern);
-        }
+    if (pattern == prevAnalogEncPattern) {
+        stableCount = 0;
+        stablePattern = -1;
+        return;
+    }
+
+    // Hysteresis: smoothed ADC must move >70% of one zone width from current center
+    int zoneWidth = usableRange / max(1, Config::MAX_PATTERNS - 1);
+    int prevCenter = usableMin + (prevAnalogEncPattern * usableRange) / max(1, Config::MAX_PATTERNS - 1);
+    if (abs(clamped - prevCenter) < (zoneWidth * 7) / 10) return;
+
+    // Require 10 consecutive stable reads (~500ms at 50ms interval)
+    if (pattern == stablePattern) {
+        stableCount++;
+    } else {
+        stablePattern = pattern;
+        stableCount = 1;
+    }
+
+    if (stableCount >= 10) {
+        prevAnalogEncPattern = pattern;
+        selectPatternOnMaster(pattern);
+        stableCount = 0;
+        stablePattern = -1;
     }
 }
 
@@ -998,12 +1077,26 @@ void handleByteButton() {
 
     if (!readOk) return;
 
+    // Reject 0xFF — common I2C read error (bus noise / device not responding)
+    if (status == 0xFF) return;
+
+    // Reject values with more than 2 bits set (I2C noise reads garbage)
+    int bitCount = 0;
+    for (int b = 0; b < 8; b++) { if (status & (1 << b)) bitCount++; }
+    if (bitCount > 2) return;
+
     uint8_t previousState = prevByteButtonState;
     uint8_t pressedEdges = status & (uint8_t)~previousState;
     prevByteButtonState = status;
 
     unsigned long now = millis();
     if (currentScreen == SCREEN_LIVE) {
+        // Guard: skip ByteButton triggers during guard period (avoids phantom pads on entry)
+        extern unsigned long liveScreenEnteredMs;
+        if ((now - liveScreenEnteredMs) < LIVE_TOUCH_GUARD_MS) {
+            memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
+            return;
+        }
         int velocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
 
         for (int button = 0; button < BYTEBUTTON_BUTTONS && button < Config::MAX_SAMPLES; button++) {

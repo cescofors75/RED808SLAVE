@@ -93,9 +93,10 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     rgb_lcd_set_vsync_cb(lvgl_on_vsync, NULL);
 
     // Two full-screen buffers in PSRAM — required for direct_mode
+    // Align to 64 bytes for optimal DMA transfer bandwidth
     const size_t buf_pixels = SCREEN_WIDTH * SCREEN_HEIGHT;
-    draw_buf_1 = (lv_color_t*)heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    draw_buf_2 = (lv_color_t*)heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    draw_buf_1 = (lv_color_t*)heap_caps_aligned_alloc(64, buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    draw_buf_2 = (lv_color_t*)heap_caps_aligned_alloc(64, buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
     if (!draw_buf_1 || !draw_buf_2) {
         ESP_LOGE(TAG, "FATAL: Cannot allocate LVGL draw buffers in PSRAM!");
         return;
@@ -125,8 +126,8 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     indev_drv.read_cb = touch_read_cb;
     lv_indev_drv_register(&indev_drv);
 
-    // LVGL task — core 1, priority 2
-    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 16384, NULL, 2, NULL, 1);
+    // LVGL task — core 1, priority 3 (higher = less preemption during flush)
+    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 16384, NULL, 3, NULL, 1);
 
     ESP_LOGI(TAG, "LVGL port: %dx%d direct_mode, 2x full PSRAM buffers, vsync-synced",
              SCREEN_WIDTH, SCREEN_HEIGHT);
