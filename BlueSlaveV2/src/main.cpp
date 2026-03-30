@@ -112,12 +112,6 @@ uint8_t encoderLEDColors[Config::MAX_TRACKS][3] = {
     {255, 0,   255}, {255, 0,   160}, {255, 0,   80},  {255, 60,  60}
 };
 
-// Analog rotary encoder (GPIO6 - pattern select)
-int prevAnalogEncPattern = -1;
-int analogEncSmoothed = -1;
-int analogEncMin = 4095;
-int analogEncMax = 0;
-
 // Live pad touch guard (prevent phantom triggers on screen enter)
 unsigned long liveScreenEnteredMs = 0;
 static constexpr unsigned long LIVE_TOUCH_GUARD_MS = 500;
@@ -266,12 +260,13 @@ static bool byteButtonApplyLedConfigLocked() {
 }
 
 static void initByteButtonLeds() {
-    if (!byteButtonConnected || byteButtonHubChannel < 0) return;
+    if (!byteButtonConnected) return;
     if (!i2c_lock(30)) return;
 
-    i2c_hub_select_raw(byteButtonHubChannel);
+    if (byteButtonHubChannel >= 0) i2c_hub_select_raw(byteButtonHubChannel);
+    else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
     bool ok = byteButtonApplyLedConfigLocked();
-    i2c_hub_deselect_raw();
+    if (byteButtonHubChannel >= 0) i2c_hub_deselect_raw();
     i2c_unlock();
 
     if (ok) {
@@ -293,6 +288,9 @@ static bool navigateToScreen(Screen screen) {
         case SCREEN_SETTINGS:    target = scr_settings; break;
         case SCREEN_DIAGNOSTICS: target = scr_diagnostics; break;
         case SCREEN_PATTERNS:    target = scr_patterns; break;
+        case SCREEN_SPECTRUM:    target = scr_spectrum; break;
+        case SCREEN_PERFORMANCE: target = scr_performance; break;
+        case SCREEN_SAMPLES:     target = scr_samples; break;
         default: break;
     }
 
@@ -712,22 +710,51 @@ void scanI2CHub() {
             dfFound++;
         }
 
-        if (!byteButtonFound && i2c_device_present(BYTEBUTTON_ADDR)) {
-            byteButtonHubChannel = ch;
-            byteButtonConnected = true;
-            byteButtonFound = true;
-            prevByteButtonState = 0;
-            Serial.printf("[I2C] M5 ByteButton found on ch %d\n", ch);
+        // Re-select hub channel before ByteButton probe
+        // (M5/DFRobot init blocks above may have deselected the hub,
+        //  causing a false detection on the direct bus)
+        if (!byteButtonFound) {
+            i2c_hub_select(ch);
+            delay(2);
+            if (i2c_device_present(BYTEBUTTON_ADDR)) {
+                byteButtonHubChannel = ch;
+                byteButtonConnected = true;
+                byteButtonFound = true;
+                prevByteButtonState = 0;
+                Serial.printf("[I2C] M5 ByteButton found on hub ch %d\n", ch);
 
-            if (i2c_lock(50)) {
-                i2c_hub_select_raw(ch);
-                byteButtonLedInitialized = byteButtonApplyLedConfigLocked();
-                i2c_hub_deselect_raw();
-                i2c_unlock();
+                if (i2c_lock(50)) {
+                    i2c_hub_select_raw(ch);
+                    byteButtonLedInitialized = byteButtonApplyLedConfigLocked();
+                    i2c_hub_deselect_raw();
+                    i2c_unlock();
+                }
             }
         }
 
         i2c_hub_deselect();
+    }
+
+    // Fallback: try ByteButton directly on bus (not behind hub)
+    if (!byteButtonFound) {
+        i2c_hub_deselect();  // deselect all hub channels
+        delay(5);
+        if (i2c_device_present(BYTEBUTTON_ADDR)) {
+            byteButtonHubChannel = -2;  // sentinel: direct bus, no hub channel
+            byteButtonConnected = true;
+            byteButtonFound = true;
+            prevByteButtonState = 0;
+            Serial.println("[I2C] M5 ByteButton found DIRECT on bus (no hub)");
+
+            if (i2c_lock(50)) {
+                byteButtonLedInitialized = byteButtonApplyLedConfigLocked();
+                i2c_unlock();
+            }
+        }
+    }
+
+    if (!byteButtonFound) {
+        Serial.println("[I2C] WARNING: ByteButton NOT found on any channel or direct bus!");
     }
 
     diagInfo.m5encoder1Ok = m5encoderConnected[0];
@@ -741,7 +768,7 @@ void scanI2CHub() {
 }
 
 void updateByteButtonLeds() {
-    if (!byteButtonConnected || byteButtonHubChannel < 0) return;
+    if (!byteButtonConnected) return;
     if (!byteButtonLedInitialized) {
         initByteButtonLeds();
         if (!byteButtonLedInitialized) return;
@@ -783,7 +810,8 @@ void updateByteButtonLeds() {
     if (!hasChanges) return;
     if (!i2c_lock(25)) return;
 
-    i2c_hub_select_raw(byteButtonHubChannel);
+    if (byteButtonHubChannel >= 0) i2c_hub_select_raw(byteButtonHubChannel);
+    else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
     for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
         if (byteButtonLedCache[i] == desired[i]) continue;
         uint32_t color = desired[i];
@@ -793,7 +821,7 @@ void updateByteButtonLeds() {
         }
         byteButtonLedCache[i] = desired[i];
     }
-    i2c_hub_deselect_raw();
+    if (byteButtonHubChannel >= 0) i2c_hub_deselect_raw();
     i2c_unlock();
 }
 
@@ -828,6 +856,10 @@ void updateTrackEncoderLED(int track) {
 }
 
 void handleM5Encoders() {
+    static bool prevBtnState[Config::MAX_TRACKS] = {};
+    static unsigned long lastBtnToggle[Config::MAX_TRACKS] = {};
+    static constexpr unsigned long BTN_DEBOUNCE_MS = 250;
+
     for (int mod = 0; mod < M5_ENCODER_MODULES; mod++) {
         if (!m5encoderConnected[mod]) continue;
         int ch = m5HubChannel[mod];
@@ -844,7 +876,7 @@ void handleM5Encoders() {
             prevM5Counter[track] = counter;
 
             if (delta != 0) {
-                int newVol = constrain(trackVolumes[track] + delta * 5, 0, Config::MAX_VOLUME);
+                int newVol = constrain(trackVolumes[track] + delta * 3, 0, Config::MAX_VOLUME);
                 if (newVol != trackVolumes[track]) {
                     trackVolumes[track] = newVol;
                     JsonDocument doc;
@@ -852,7 +884,6 @@ void handleM5Encoders() {
                     doc["track"] = track;
                     doc["volume"] = trackVolumes[track];
                     sendUDPCommand(doc);
-                    // LED update inline (already holding mutex + hub selected)
                     uint8_t rgb[3];
                     theme_encoder_color(track, rgb);
                     uint8_t brightness = map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
@@ -863,23 +894,33 @@ void handleM5Encoders() {
                 }
             }
 
-            if (m5encoders[mod].getKeyPressed(enc)) {
-                trackMuted[track] = !trackMuted[track];
-                JsonDocument doc;
-                doc["cmd"] = "mute";
-                doc["track"] = track;
-                doc["value"] = trackMuted[track];
-                sendUDPCommand(doc);
-                if (trackMuted[track]) {
-                    m5encoders[mod].writeRGB(enc, 0x1E, 0, 0);
-                } else {
-                    uint8_t rgb[3];
-                    theme_encoder_color(track, rgb);
-                    uint8_t brightness = map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
-                    uint8_t r = (rgb[0] * brightness) / 255;
-                    uint8_t g = (rgb[1] * brightness) / 255;
-                    uint8_t b = (rgb[2] * brightness) / 255;
-                    m5encoders[mod].writeRGB(enc, r, g, b);
+            // Button: edge detection (falling edge = press) + debounce
+            bool btnNow = m5encoders[mod].getKeyPressed(enc);
+            bool btnPrev = prevBtnState[track];
+            prevBtnState[track] = btnNow;
+
+            if (btnNow && !btnPrev) {
+                unsigned long now = millis();
+                if ((now - lastBtnToggle[track]) >= BTN_DEBOUNCE_MS) {
+                    lastBtnToggle[track] = now;
+                    trackMuted[track] = !trackMuted[track];
+                    JsonDocument doc;
+                    doc["cmd"] = "mute";
+                    doc["track"] = track;
+                    doc["value"] = trackMuted[track];
+                    sendUDPCommand(doc);
+                    if (trackMuted[track]) {
+                        m5encoders[mod].writeRGB(enc, 0x1E, 0, 0);
+                    } else {
+                        uint8_t rgb[3];
+                        theme_encoder_color(track, rgb);
+                        uint8_t brightness = map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
+                        uint8_t r = (rgb[0] * brightness) / 255;
+                        uint8_t g = (rgb[1] * brightness) / 255;
+                        uint8_t b = (rgb[2] * brightness) / 255;
+                        m5encoders[mod].writeRGB(enc, r, g, b);
+                    }
+                    Serial.printf("[M5] Track %d %s\n", track, trackMuted[track] ? "MUTED" : "UNMUTED");
                 }
             }
         }
@@ -929,13 +970,11 @@ void handleDFRobotEncoders() {
 
         // Process results outside of I2C lock
         if (i == 0) {
-            // DFRobot #0: Sequencer Volume (or Pads Volume if any ByteButton held)
+            // DFRobot #0: Volume (SEQ or PAD based on volumeMode toggle)
             //   Button = Play/Pause
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                // Check if any ByteButton is physically held (filtered: ignore 0xFF noise)
-                bool anyBBHeld = (prevByteButtonState != 0 && prevByteButtonState != 0xFF);
-                if (anyBBHeld) {
+                if (volumeMode == VOL_LIVE_PADS) {
                     // Modify live pads volume
                     int newVol = constrain(livePadsVolume + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
                     if (newVol != livePadsVolume) {
@@ -988,65 +1027,32 @@ void handleDFRobotEncoders() {
 // =============================================================================
 
 void handleAnalogEncoder() {
-    static int stablePattern = -1;
-    static int stableCount = 0;
+    static int lastPosition = -1;
+    static uint32_t lastChangeMs = 0;
 
     int raw = analogRead(Config::ANALOG_ENC_PIN);
+    // 12-position rotary: map ADC 0-4095 to position 0-11
+    int position = (raw * 12) / 4096;
+    if (position > 11) position = 11;
 
-    // Self-calibrate min/max range
-    if (raw < analogEncMin) analogEncMin = raw;
-    if (raw > analogEncMax) analogEncMax = raw;
+    if (position == lastPosition) return;
+    if (millis() - lastChangeMs < 200) return;  // debounce
+    lastPosition = position;
+    lastChangeMs = millis();
 
-    // Very heavy smoothing (31/32 old + 1/32 new) to kill ADC noise
-    if (analogEncSmoothed < 0) {
-        analogEncSmoothed = raw;
-        return;
-    }
-    analogEncSmoothed = (analogEncSmoothed * 31 + raw + 16) / 32;
+    // Map positions 0-8 to screens, 9-11 unused
+    static const Screen screenMap[] = {
+        SCREEN_MENU, SCREEN_LIVE, SCREEN_SEQUENCER,
+        SCREEN_VOLUMES, SCREEN_FILTERS, SCREEN_PATTERNS,
+        SCREEN_SPECTRUM, SCREEN_PERFORMANCE, SCREEN_SAMPLES
+    };
 
-    // Need minimum ADC range before mapping
-    int range = analogEncMax - analogEncMin;
-    if (range < 200) return;
-
-    // Conservative edge margins (1/6 = 16.7% each side)
-    int usableMin = analogEncMin + range / 6;
-    int usableMax = analogEncMax - range / 6;
-    int usableRange = usableMax - usableMin;
-    if (usableRange < 100) return;
-
-    int clamped = constrain(analogEncSmoothed, usableMin, usableMax);
-    int pattern = map(clamped, usableMin, usableMax, 0, Config::MAX_PATTERNS - 1);
-    pattern = constrain(pattern, 0, Config::MAX_PATTERNS - 1);
-
-    if (prevAnalogEncPattern < 0) {
-        prevAnalogEncPattern = pattern;
-        return;
-    }
-
-    if (pattern == prevAnalogEncPattern) {
-        stableCount = 0;
-        stablePattern = -1;
-        return;
-    }
-
-    // Hysteresis: smoothed ADC must move >70% of one zone width from current center
-    int zoneWidth = usableRange / max(1, Config::MAX_PATTERNS - 1);
-    int prevCenter = usableMin + (prevAnalogEncPattern * usableRange) / max(1, Config::MAX_PATTERNS - 1);
-    if (abs(clamped - prevCenter) < (zoneWidth * 7) / 10) return;
-
-    // Require 10 consecutive stable reads (~500ms at 50ms interval)
-    if (pattern == stablePattern) {
-        stableCount++;
-    } else {
-        stablePattern = pattern;
-        stableCount = 1;
-    }
-
-    if (stableCount >= 10) {
-        prevAnalogEncPattern = pattern;
-        selectPatternOnMaster(pattern);
-        stableCount = 0;
-        stablePattern = -1;
+    if (position < 9) {
+        Screen target = screenMap[position];
+        if (currentScreen != target) {
+            Serial.printf("[ROTARY] pos=%d -> screen %d\n", position, target);
+            navigateToScreen(target);
+        }
     }
 }
 
@@ -1056,13 +1062,17 @@ void handleAnalogEncoder() {
 
 void handleByteButton() {
     if (!byteButtonConnected) return;
-    if (byteButtonHubChannel < 0) return;
 
     uint8_t status = 0;
     bool readOk = false;
 
     if (i2c_lock(20)) {
-        i2c_hub_select_raw(byteButtonHubChannel);
+        // Select hub channel only if ByteButton is behind the hub
+        if (byteButtonHubChannel >= 0) {
+            i2c_hub_select_raw(byteButtonHubChannel);
+        } else if (byteButtonHubChannel == -2) {
+            i2c_hub_deselect_raw();  // ensure hub is deselected for direct bus
+        }
 
         Wire.beginTransmission(BYTEBUTTON_ADDR);
         Wire.write(BYTEBUTTON_STATUS_REG);
@@ -1071,7 +1081,9 @@ void handleByteButton() {
             readOk = true;
         }
 
-        i2c_hub_deselect_raw();
+        if (byteButtonHubChannel >= 0) {
+            i2c_hub_deselect_raw();
+        }
         i2c_unlock();
     }
 
@@ -1114,14 +1126,57 @@ void handleByteButton() {
             if ((pressedEdges & (1U << button)) == 0) continue;
 
             switch (button) {
-                case 0: navigateToScreen(SCREEN_LIVE); break;
-                case 1: navigateToScreen(SCREEN_SEQUENCER); break;
-                case 2: navigateToScreen(SCREEN_VOLUMES); break;
-                case 3: navigateToScreen(SCREEN_FILTERS); break;
-                case 4: navigateToScreen(SCREEN_PATTERNS); break;
-                case 5: navigateToScreen(SCREEN_SETTINGS); break;
-                case 6: navigateToScreen(SCREEN_DIAGNOSTICS); break;
-                case 7: sendPlayStateCommand(!isPlaying); break;
+                case 0: // Pattern --
+                    if (currentPattern > 0) selectPatternOnMaster(currentPattern - 1);
+                    break;
+                case 1: // Pattern ++
+                    if (currentPattern < Config::MAX_PATTERNS - 1) selectPatternOnMaster(currentPattern + 1);
+                    break;
+                case 2: // Pattern = 1 (index 0)
+                    selectPatternOnMaster(0);
+                    break;
+                case 3: // Toggle volume mode SEQ <-> PAD
+                    volumeMode = (volumeMode == VOL_SEQUENCER) ? VOL_LIVE_PADS : VOL_SEQUENCER;
+                    Serial.printf("[BB] Volume mode: %s\n", volumeMode == VOL_SEQUENCER ? "SEQ" : "PAD");
+                    break;
+                case 4: { // FX Delay toggle
+                    masterFilter.enabled = !masterFilter.enabled || (filterSelectedFX != FILTER_DELAY);
+                    filterSelectedFX = FILTER_DELAY;
+                    if (!masterFilter.enabled) masterFilter.delayAmount = 0;
+                    else if (masterFilter.delayAmount == 0) masterFilter.delayAmount = 64;
+                    sendFilterUDP(-1, FILTER_DELAY);
+                    Serial.printf("[BB] FX DELAY %s\n", masterFilter.enabled ? "ON" : "OFF");
+                    break;
+                }
+                case 5: { // FX Flanger toggle
+                    masterFilter.enabled = !masterFilter.enabled || (filterSelectedFX != FILTER_FLANGER);
+                    filterSelectedFX = FILTER_FLANGER;
+                    if (!masterFilter.enabled) masterFilter.flangerAmount = 0;
+                    else if (masterFilter.flangerAmount == 0) masterFilter.flangerAmount = 64;
+                    sendFilterUDP(-1, FILTER_FLANGER);
+                    Serial.printf("[BB] FX FLANGER %s\n", masterFilter.enabled ? "ON" : "OFF");
+                    break;
+                }
+                case 6: { // FX Compressor toggle
+                    masterFilter.enabled = !masterFilter.enabled || (filterSelectedFX != FILTER_COMPRESSOR);
+                    filterSelectedFX = FILTER_COMPRESSOR;
+                    if (!masterFilter.enabled) masterFilter.compAmount = 0;
+                    else if (masterFilter.compAmount == 0) masterFilter.compAmount = 64;
+                    sendFilterUDP(-1, FILTER_COMPRESSOR);
+                    Serial.printf("[BB] FX COMPRESSOR %s\n", masterFilter.enabled ? "ON" : "OFF");
+                    break;
+                }
+                case 7: { // Clear ALL FX
+                    masterFilter.enabled = false;
+                    masterFilter.delayAmount = 0;
+                    masterFilter.flangerAmount = 0;
+                    masterFilter.compAmount = 0;
+                    sendFilterUDP(-1, FILTER_DELAY);
+                    sendFilterUDP(-1, FILTER_FLANGER);
+                    sendFilterUDP(-1, FILTER_COMPRESSOR);
+                    Serial.println("[BB] ALL FX CLEARED");
+                    break;
+                }
             }
         }
     }
@@ -1149,11 +1204,13 @@ void updateUI() {
     ui_update_header();
 
     switch (currentScreen) {
-        case SCREEN_MENU:      ui_update_menu_status(); break;
-        case SCREEN_LIVE:      ui_update_live_pads(); break;
-        case SCREEN_SEQUENCER: ui_update_sequencer(); break;
-        case SCREEN_VOLUMES:   ui_update_volumes();   break;
-        case SCREEN_FILTERS:   ui_update_filters();   break;
+        case SCREEN_MENU:        ui_update_menu_status(); break;
+        case SCREEN_LIVE:        ui_update_live_pads(); break;
+        case SCREEN_SEQUENCER:   ui_update_sequencer(); break;
+        case SCREEN_VOLUMES:     ui_update_volumes();   break;
+        case SCREEN_FILTERS:     ui_update_filters();   break;
+        case SCREEN_PATTERNS:    ui_update_patterns();  break;
+        case SCREEN_SPECTRUM:    ui_update_spectrum();  break;
         case SCREEN_DIAGNOSTICS: ui_update_diagnostics(); break;
         default: break;
     }
@@ -1248,6 +1305,9 @@ void setup() {
         ui_create_settings_screen();
         ui_create_diagnostics_screen();
         ui_create_patterns_screen();
+        ui_create_spectrum_screen();
+        ui_create_performance_screen();
+        ui_create_samples_screen();
 
         // Start on menu
         currentScreen = SCREEN_MENU;

@@ -99,6 +99,24 @@ const ThemeColors theme_presets[THEME_COUNT] = {
         },
         .name = "RAINBOW"
     },
+    // ── THEME_GREYSCALE — pure monochrome, zero color ──
+    {
+        .bg = 0x0E0E0E, .panel = 0x1A1A1A, .surface = 0x262626, .border = 0x3C3C3C,
+        .text = 0xD5D5D5, .text_dim = 0x777777,
+        .accent = 0xCCCCCC, .accent2 = 0xAAAAAA,
+        .success = 0x999999, .warning = 0x888888, .error = 0x666666, .info = 0xBBBBBB, .cyan = 0xFFFFFF,
+        .led_uniform = 0xCCCCCC,
+        .nav_colors = {0x555555, 0x777777, 0x999999, 0xBBBBBB, 0xDDDDDD, 0x444444, 0x666666},
+        .pad_colors = {0x404040, 0x505050, 0x606060, 0x707070, 0x808080, 0x909090, 0xA0A0A0, 0xB0B0B0},
+        .encoder_rgb = {180, 180, 180},
+        .track_colors = {
+            0x333333, 0x404040, 0x4D4D4D, 0x5A5A5A,
+            0x666666, 0x737373, 0x808080, 0x8D8D8D,
+            0x999999, 0xA6A6A6, 0xB3B3B3, 0xC0C0C0,
+            0x3D3D3D, 0x575757, 0x717171, 0x8B8B8B
+        },
+        .name = "GREYSCALE"
+    },
 };
 
 // ── Runtime color accessors ──
@@ -268,8 +286,12 @@ void ui_theme_apply(VisualTheme theme) {
     extern lv_obj_t* scr_settings;
     extern lv_obj_t* scr_diagnostics;
     extern lv_obj_t* scr_patterns;
+    extern lv_obj_t* scr_spectrum;
+    extern lv_obj_t* scr_performance;
+    extern lv_obj_t* scr_samples;
     lv_obj_t* screens[] = {scr_menu, scr_live, scr_sequencer, scr_volumes,
-                           scr_filters, scr_settings, scr_diagnostics, scr_patterns};
+                           scr_filters, scr_settings, scr_diagnostics, scr_patterns,
+                           scr_spectrum, scr_performance, scr_samples};
     for (auto scr : screens) {
         if (!scr) continue;
         lv_obj_set_style_bg_color(scr, lv_color_hex(cur.bg), 0);

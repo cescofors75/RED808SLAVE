@@ -14,6 +14,9 @@ extern lv_obj_t* scr_filters;
 extern lv_obj_t* scr_settings;
 extern lv_obj_t* scr_diagnostics;
 extern lv_obj_t* scr_patterns;
+extern lv_obj_t* scr_spectrum;
+extern lv_obj_t* scr_performance;
+extern lv_obj_t* scr_samples;
 
 // Create screens
 void ui_create_menu_screen();
@@ -24,6 +27,9 @@ void ui_create_filters_screen();
 void ui_create_settings_screen();
 void ui_create_diagnostics_screen();
 void ui_create_patterns_screen();
+void ui_create_spectrum_screen();
+void ui_create_performance_screen();
+void ui_create_samples_screen();
 
 // Update functions (called from timer)
 void ui_update_sequencer();
@@ -33,6 +39,8 @@ void ui_update_diagnostics();
 void ui_update_header();
 void ui_update_menu_status();
 void ui_update_live_pads();
+void ui_update_spectrum();
+void ui_update_patterns();
 int ui_live_pad_hit_test(int x, int y);
 
 // Header bar (shared across screens)

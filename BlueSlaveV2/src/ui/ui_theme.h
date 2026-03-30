@@ -14,6 +14,7 @@ enum VisualTheme : uint8_t {
     THEME_NEON,          // Green neon
     THEME_SUNSET,        // Orange/purple
     THEME_RAINBOW,       // Rainbow multicolor
+    THEME_GREYSCALE,     // Monochrome greyscale
     THEME_COUNT
 };
 
