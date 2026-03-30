@@ -8,6 +8,7 @@
 #include "../../include/config.h"
 #include <Esp.h>
 #include <ArduinoJson.h>
+#include <math.h>
 
 extern void sendUDPCommand(JsonDocument& doc);
 
@@ -23,6 +24,8 @@ lv_obj_t* scr_patterns = NULL;
 lv_obj_t* scr_spectrum = NULL;
 lv_obj_t* scr_performance = NULL;
 lv_obj_t* scr_samples = NULL;
+lv_obj_t* scr_boot = NULL;
+lv_obj_t* scr_seq_circle = NULL;
 
 // Header widgets (updated live)
 static constexpr uint8_t HEADER_SLOT_COUNT = SCREEN_ENCODER_TEST + 1;
@@ -43,6 +46,7 @@ static lv_obj_t* seq_grid[Config::MAX_TRACKS][Config::MAX_STEPS];
 static lv_obj_t* seq_track_labels[Config::MAX_TRACKS];
 static lv_obj_t* lbl_step_indicator = NULL;
 static lv_obj_t* seq_column_highlights[Config::MAX_STEPS];
+static lv_obj_t* seq_step_leds[Config::MAX_STEPS];  // LED strip below grid
 
 // Volume sliders
 static lv_obj_t* vol_sliders[Config::MAX_TRACKS];
@@ -54,6 +58,7 @@ static lv_obj_t* filter_arcs[3];       // Delay, Flanger, Compressor
 static lv_obj_t* filter_labels[3];
 static lv_obj_t* filter_value_labels[3];
 static lv_obj_t* filter_target_label = NULL;
+static lv_obj_t* filter_preset_label = NULL;  // rotary FX preset indicator
 
 // Live pads
 static lv_obj_t* live_pads[Config::MAX_SAMPLES];
@@ -71,6 +76,57 @@ static constexpr int LIVE_PAD_AREA_TOP = 70;
 
 static uint32_t last_nav_ms = 0;
 
+// ============================================================================
+// BOOT SCREEN (TRON / 80s terminal intro)
+// ============================================================================
+static lv_obj_t* boot_text_lines[12] = {};
+static lv_obj_t* boot_cursor_lbl = NULL;
+static lv_obj_t* boot_status_lbl = NULL;
+static lv_timer_t* boot_timer = NULL;
+static int boot_state = 0;
+
+static const char* const kBootLines[] = {
+    "SYSTEM KERNEL V3.8.1..................... OK",
+    "ESP32-S3 240MHz DUAL CORE............... OK",
+    "PSRAM 8MB OPI FLASH...................... OK",
+    "LVGL v8.4.0 DISPLAY ENGINE.............. OK",
+    "I2C BUS 400kHz........................... OK",
+    "M5 ROTATE8 ENCODER [2x]................. OK",
+    "DFROBOT VISUAL ENCODER [2x]............. OK",
+    "BYTEBUTTON MATRIX [8x1]................. OK",
+    "IEEE 802.11b/g/n WLAN................... OK",
+    "UDP STACK PORT 8888..................... OK",
+    "> RED808 SURFACE CONTROLLER V6....... READY",
+};
+static constexpr int kBootLineCount = 11;
+
+// ============================================================================
+// CIRCULAR SEQUENCER
+// ============================================================================
+static lv_obj_t* circ_step_btns[Config::MAX_STEPS] = {};
+static lv_obj_t* circ_playhead = NULL;
+static lv_obj_t* circ_track_name_lbl = NULL;
+static lv_obj_t* circ_track_btns[Config::MAX_TRACKS] = {};
+static lv_obj_t* lbl_circ_info = NULL;
+static int circ_step_cx[Config::MAX_STEPS];
+static int circ_step_cy[Config::MAX_STEPS];
+static constexpr int CIRC_CX = 295;
+static constexpr int CIRC_CY = 315;
+static constexpr float CIRC_R = 218.0f;
+static constexpr float CIRC_INNER_R = 152.0f;
+static constexpr int CIRC_PAD = 44;
+static constexpr int CIRC_HEAD_SIZE = 18;
+
+// ============================================================================
+// LVGL anim helper callbacks (captureless, safe as C function pointers)
+// ============================================================================
+static void anim_opa_cb(void* obj, int32_t v) {
+    lv_obj_set_style_opa((lv_obj_t*)obj, (lv_opa_t)v, 0);
+}
+static void anim_y_cb(void* obj, int32_t v) {
+    lv_obj_set_y((lv_obj_t*)obj, v);
+}
+
 static Screen screen_from_parent(lv_obj_t* parent) {
     if (parent == scr_menu) return SCREEN_MENU;
     if (parent == scr_live) return SCREEN_LIVE;
@@ -83,6 +139,7 @@ static Screen screen_from_parent(lv_obj_t* parent) {
     if (parent == scr_spectrum) return SCREEN_SPECTRUM;
     if (parent == scr_performance) return SCREEN_PERFORMANCE;
     if (parent == scr_samples) return SCREEN_SAMPLES;
+    if (parent == scr_seq_circle) return SCREEN_SEQ_CIRCLE;
     return SCREEN_BOOT;
 }
 
@@ -571,12 +628,44 @@ void ui_create_sequencer_screen() {
         }
     }
 
-    // Step indicator
+    // LED indicator strip: 16 small bars showing the active step (below grid, y=568)
+    for (int s = 0; s < Config::MAX_STEPS; s++) {
+        lv_obj_t* led = lv_obj_create(scr_sequencer);
+        lv_obj_set_size(led, cell_w, 7);
+        lv_obj_set_pos(led, grid_x + s * (cell_w + gap), 568);
+        lv_obj_set_style_bg_color(led, (s % 4 == 0) ? lv_color_hex(0x2A2A2A) : lv_color_hex(0x1A1A1A), 0);
+        lv_obj_set_style_bg_opa(led, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(led, 2, 0);
+        lv_obj_set_style_border_width(led, 0, 0);
+        lv_obj_set_style_shadow_width(led, 0, 0);
+        lv_obj_add_flag(led, LV_OBJ_FLAG_IGNORE_LAYOUT);
+        lv_obj_clear_flag(led, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        seq_step_leds[s] = led;
+    }
+
+    // Step counter label (bottom left)
     lbl_step_indicator = lv_label_create(scr_sequencer);
     lv_label_set_text(lbl_step_indicator, "Step: --");
     lv_obj_set_style_text_font(lbl_step_indicator, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(lbl_step_indicator, RED808_WARNING, 0);
     lv_obj_set_pos(lbl_step_indicator, 8, 580);
+
+    // CIRCLE VIEW button (bottom right)
+    lv_obj_t* circle_btn = lv_btn_create(scr_sequencer);
+    lv_obj_set_size(circle_btn, 186, 26);
+    lv_obj_set_pos(circle_btn, 826, 580);
+    lv_obj_set_style_bg_color(circle_btn, lv_color_hex(0x0C1C30), 0);
+    lv_obj_set_style_bg_opa(circle_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(circle_btn, 1, 0);
+    lv_obj_set_style_border_color(circle_btn, lv_color_hex(0x0060A0), 0);
+    lv_obj_set_style_radius(circle_btn, 5, 0);
+    lv_obj_add_event_cb(circle_btn, [](lv_event_t*) { nav_to(SCREEN_SEQ_CIRCLE, scr_seq_circle); },
+                        LV_EVENT_PRESSED, NULL);
+    lv_obj_t* circle_lbl = lv_label_create(circle_btn);
+    lv_label_set_text(circle_lbl, "O  CIRCULAR VIEW");
+    lv_obj_set_style_text_font(circle_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(circle_lbl, lv_color_hex(0x60AADF), 0);
+    lv_obj_center(circle_lbl);
 }
 
 void ui_update_sequencer() {
@@ -593,13 +682,32 @@ void ui_update_sequencer() {
 
     int active_column = isPlaying ? currentStep : -1;
     if (active_column != prev_column) {
-        if (prev_column >= 0 && prev_column < Config::MAX_STEPS && seq_column_highlights[prev_column]) {
-            lv_obj_set_style_bg_opa(seq_column_highlights[prev_column], LV_OPA_0, 0);
-            lv_obj_set_style_border_opa(seq_column_highlights[prev_column], LV_OPA_0, 0);
+        // --- Previous column: hide overlay + dim LED strip ---
+        if (prev_column >= 0 && prev_column < Config::MAX_STEPS) {
+            if (seq_column_highlights[prev_column]) {
+                lv_obj_set_style_bg_opa(seq_column_highlights[prev_column], LV_OPA_0, 0);
+                lv_obj_set_style_border_opa(seq_column_highlights[prev_column], LV_OPA_0, 0);
+            }
+            if (seq_step_leds[prev_column]) {
+                lv_obj_set_style_bg_color(seq_step_leds[prev_column],
+                    (prev_column % 4 == 0) ? lv_color_hex(0x2A2A2A) : lv_color_hex(0x1A1A1A), 0);
+                lv_obj_set_style_bg_opa(seq_step_leds[prev_column], LV_OPA_COVER, 0);
+                lv_obj_set_style_shadow_width(seq_step_leds[prev_column], 0, 0);
+            }
         }
-        if (active_column >= 0 && active_column < Config::MAX_STEPS && seq_column_highlights[active_column]) {
-            lv_obj_set_style_bg_opa(seq_column_highlights[active_column], LV_OPA_50, 0);
-            lv_obj_set_style_border_opa(seq_column_highlights[active_column], LV_OPA_COVER, 0);
+        // --- Active column: show overlay + bright LED strip ---
+        if (active_column >= 0 && active_column < Config::MAX_STEPS) {
+            if (seq_column_highlights[active_column]) {
+                lv_obj_set_style_bg_opa(seq_column_highlights[active_column], LV_OPA_30, 0);
+                lv_obj_set_style_border_opa(seq_column_highlights[active_column], LV_OPA_COVER, 0);
+            }
+            if (seq_step_leds[active_column]) {
+                lv_obj_set_style_bg_color(seq_step_leds[active_column], RED808_WARNING, 0);
+                lv_obj_set_style_bg_opa(seq_step_leds[active_column], LV_OPA_COVER, 0);
+                lv_obj_set_style_shadow_width(seq_step_leds[active_column], 16, 0);
+                lv_obj_set_style_shadow_color(seq_step_leds[active_column], RED808_WARNING, 0);
+                lv_obj_set_style_shadow_opa(seq_step_leds[active_column], LV_OPA_70, 0);
+            }
         }
         prev_column = active_column;
     }
@@ -616,16 +724,20 @@ void ui_update_sequencer() {
                     prev_grid_state[t][s] = state;
                     if (isCurrentStep) {
                         lv_obj_set_style_bg_color(seq_grid[t][s],
-                            active ? lv_color_white() : lv_color_hex(0x3A3A00), 0);
+                            active ? lv_color_white() : lv_color_hex(0x504000), 0);
                         lv_obj_set_style_bg_opa(seq_grid[t][s], LV_OPA_COVER, 0);
-                        lv_obj_set_style_border_width(seq_grid[t][s], 2, 0);
+                        lv_obj_set_style_border_width(seq_grid[t][s], 3, 0);
                         lv_obj_set_style_border_color(seq_grid[t][s], RED808_WARNING, 0);
+                        lv_obj_set_style_shadow_width(seq_grid[t][s], active ? 12 : 0, 0);
+                        lv_obj_set_style_shadow_color(seq_grid[t][s], RED808_WARNING, 0);
+                        lv_obj_set_style_shadow_opa(seq_grid[t][s], LV_OPA_50, 0);
                     } else {
                         lv_obj_set_style_bg_color(seq_grid[t][s],
                             active ? inst_colors[t] : RED808_SURFACE, 0);
                         lv_obj_set_style_bg_opa(seq_grid[t][s], LV_OPA_COVER, 0);
                         lv_obj_set_style_border_width(seq_grid[t][s], 0, 0);
                         lv_obj_set_style_border_color(seq_grid[t][s], RED808_BORDER, 0);
+                        lv_obj_set_style_shadow_width(seq_grid[t][s], 0, 0);
                     }
                 }
             }
@@ -877,12 +989,25 @@ void ui_create_filters_screen() {
     lv_obj_set_style_text_font(info, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(info, RED808_TEXT_DIM, 0);
     lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -10);
+
+    // Analog rotary FX preset badge (top right)
+    filter_preset_label = lv_label_create(scr_filters);
+    lv_label_set_text(filter_preset_label, "PRESET: --");
+    lv_obj_set_style_text_font(filter_preset_label, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(filter_preset_label, lv_color_hex(0x80FF80), 0);
+    lv_obj_set_pos(filter_preset_label, 820, 52);
 }
 
 void ui_update_filters() {
+    static const char* kPresetNames[12] = {
+        "FX OFF", "ROOM", "DELAY", "SLAPBACK",
+        "FLANGE LO", "FLANGE HI", "COMP SOFT", "COMP HARD",
+        "SPACE", "CHORUS", "FULL FX", "DESTROY"
+    };
     static uint8_t prev_amounts[3] = {0xFF, 0xFF, 0xFF};
     static int prev_selectedFX = -1;
     static int prev_target = -999;
+    static int prev_preset = -1;
     TrackFilter& f = (filterSelectedTrack == -1) ? masterFilter : trackFilters[filterSelectedTrack];
     uint8_t amounts[] = { f.delayAmount, f.flangerAmount, f.compAmount };
 
@@ -909,6 +1034,19 @@ void ui_update_filters() {
         }
     }
     prev_selectedFX = filterSelectedFX;
+
+    // Rotary FX preset indicator
+    if (filter_preset_label && analogFxPreset != prev_preset) {
+        prev_preset = analogFxPreset;
+        int p = constrain(analogFxPreset, 0, 11);
+        if (p == 0) {
+            lv_label_set_text(filter_preset_label, "PRESET: OFF");
+            lv_obj_set_style_text_color(filter_preset_label, lv_color_hex(0x666666), 0);
+        } else {
+            lv_label_set_text_fmt(filter_preset_label, "P%02d: %s", p, kPresetNames[p]);
+            lv_obj_set_style_text_color(filter_preset_label, lv_color_hex(0x80FF80), 0);
+        }
+    }
 }
 
 // ============================================================================

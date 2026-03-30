@@ -63,6 +63,7 @@ TrackFilter masterFilter = {false, 0, 0, 0};
 int filterSelectedTrack = -1;  // -1 = master
 int filterSelectedFX = FILTER_DELAY;
 EncoderMode encoderMode = ENC_MODE_VOLUME;
+int analogFxPreset = 0;  // 0=OFF, 1..11=FX presets (set by analog rotary)
 
 // I2C Hub
 int m5HubChannel[M5_ENCODER_MODULES] = {-1, -1};
@@ -130,7 +131,8 @@ bool byteButtonLivePressed[BYTEBUTTON_BUTTONS] = {false, false, false, false, fa
 uint32_t byteButtonLedCache[BYTEBUTTON_BUTTONS + 1] = {};
 bool byteButtonLedInitialized = false;
 
-static constexpr uint8_t BYTEBUTTON_STATUS_REG = 0x00;
+static constexpr uint8_t BYTEBUTTON_STATUS_REG      = 0x00;  // bitmask — unreliable polarity on some FW
+static constexpr uint8_t BYTEBUTTON_STATUS_8BYTE_REG = 0x60;  // per-button byte: 0x01=pressed, 0x00=released
 static constexpr uint8_t BYTEBUTTON_LED_BRIGHTNESS_REG = 0x10;
 static constexpr uint8_t BYTEBUTTON_LED_SHOW_MODE_REG = 0x19;
 static constexpr uint8_t BYTEBUTTON_LED_RGB888_REG = 0x20;
@@ -327,7 +329,8 @@ void initState() {
     for (int p = 0; p < Config::MAX_PATTERNS; p++) {
         memset(patterns[p].steps, 0, sizeof(patterns[p].steps));
         memset(patterns[p].muted, 0, sizeof(patterns[p].muted));
-        patterns[p].name = "Pattern " + String(p + 1);
+        char _nb[12]; snprintf(_nb, sizeof(_nb), "Pattern %d", p + 1);
+        patterns[p].name = _nb;
     }
     for (int i = 0; i < Config::MAX_TRACKS; i++) prevM5Counter[i] = 0;
     for (int i = 0; i < DFROBOT_ENCODER_COUNT; i++) prevDFValue[i] = 0;
@@ -433,14 +436,10 @@ void checkWiFiReconnect() {
 }
 
 void sendUDPCommand(const char* cmd) {
-    if (!udpConnected) {
-        Serial.printf("[UDP] NOT connected, dropping: %s\n", cmd);
-        return;
-    }
+    if (!udpConnected) return;  // silent drop — no Serial in hot path
     udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
     udp.write((const uint8_t*)cmd, strlen(cmd));
     udp.endPacket();
-    Serial.printf("[UDP] Sent: %s\n", cmd);
 }
 
 void sendUDPCommand(JsonDocument& doc) {
@@ -855,10 +854,23 @@ void updateTrackEncoderLED(int track) {
     i2c_unlock();
 }
 
+// Inline helper: write M5 encoder LED with volume-scaled brightness. Must be called inside i2c_lock.
+static inline void m5_write_track_led(M5ROTATE8& mod, int enc, int track) {
+    uint8_t rgb[3];
+    theme_encoder_color(track, rgb);
+    uint8_t br = (uint8_t)map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
+    mod.writeRGB(enc, (rgb[0]*br)/255, (rgb[1]*br)/255, (rgb[2]*br)/255);
+}
+
 void handleM5Encoders() {
     static bool prevBtnState[Config::MAX_TRACKS] = {};
     static unsigned long lastBtnToggle[Config::MAX_TRACKS] = {};
     static constexpr unsigned long BTN_DEBOUNCE_MS = 250;
+
+    // Collect changes inside I2C lock, send UDP outside to avoid blocking the bus
+    struct PendingMsg { uint8_t type; int track; int value; }; // 0=vol, 1=mute
+    PendingMsg pending[Config::MAX_TRACKS * 2];
+    int pendingCount = 0;
 
     for (int mod = 0; mod < M5_ENCODER_MODULES; mod++) {
         if (!m5encoderConnected[mod]) continue;
@@ -879,22 +891,12 @@ void handleM5Encoders() {
                 int newVol = constrain(trackVolumes[track] + delta * 3, 0, Config::MAX_VOLUME);
                 if (newVol != trackVolumes[track]) {
                     trackVolumes[track] = newVol;
-                    JsonDocument doc;
-                    doc["cmd"] = "setTrackVolume";
-                    doc["track"] = track;
-                    doc["volume"] = trackVolumes[track];
-                    sendUDPCommand(doc);
-                    uint8_t rgb[3];
-                    theme_encoder_color(track, rgb);
-                    uint8_t brightness = map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
-                    uint8_t r = (rgb[0] * brightness) / 255;
-                    uint8_t g = (rgb[1] * brightness) / 255;
-                    uint8_t b = (rgb[2] * brightness) / 255;
-                    m5encoders[mod].writeRGB(enc, r, g, b);
+                    if (!trackMuted[track]) m5_write_track_led(m5encoders[mod], enc, track);
+                    pending[pendingCount++] = {0, track, newVol};
                 }
             }
 
-            // Button: edge detection (falling edge = press) + debounce
+            // Button: edge detection + debounce
             bool btnNow = m5encoders[mod].getKeyPressed(enc);
             bool btnPrev = prevBtnState[track];
             prevBtnState[track] = btnNow;
@@ -904,29 +906,31 @@ void handleM5Encoders() {
                 if ((now - lastBtnToggle[track]) >= BTN_DEBOUNCE_MS) {
                     lastBtnToggle[track] = now;
                     trackMuted[track] = !trackMuted[track];
-                    JsonDocument doc;
-                    doc["cmd"] = "mute";
-                    doc["track"] = track;
-                    doc["value"] = trackMuted[track];
-                    sendUDPCommand(doc);
-                    if (trackMuted[track]) {
-                        m5encoders[mod].writeRGB(enc, 0x1E, 0, 0);
-                    } else {
-                        uint8_t rgb[3];
-                        theme_encoder_color(track, rgb);
-                        uint8_t brightness = map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
-                        uint8_t r = (rgb[0] * brightness) / 255;
-                        uint8_t g = (rgb[1] * brightness) / 255;
-                        uint8_t b = (rgb[2] * brightness) / 255;
-                        m5encoders[mod].writeRGB(enc, r, g, b);
-                    }
-                    Serial.printf("[M5] Track %d %s\n", track, trackMuted[track] ? "MUTED" : "UNMUTED");
+                    if (trackMuted[track]) m5encoders[mod].writeRGB(enc, 0x1E, 0, 0);
+                    else                   m5_write_track_led(m5encoders[mod], enc, track);
+                    pending[pendingCount++] = {1, track, (int)trackMuted[track]};
                 }
             }
         }
 
         i2c_hub_deselect_raw();
         i2c_unlock();
+    }
+
+    // Send all queued UDP messages OUTSIDE i2c lock (WiFi must not hold I2C mutex)
+    for (int i = 0; i < pendingCount; i++) {
+        JsonDocument doc;
+        if (pending[i].type == 0) {
+            doc["cmd"] = "setTrackVolume";
+            doc["track"] = pending[i].track;
+            doc["volume"] = pending[i].value;
+        } else {
+            doc["cmd"] = "mute";
+            doc["track"] = pending[i].track;
+            doc["value"] = (bool)pending[i].value;
+            Serial.printf("[M5] Track %d %s\n", pending[i].track, pending[i].value ? "MUTED" : "UNMUTED");
+        }
+        sendUDPCommand(doc);
     }
 }
 
@@ -1026,6 +1030,60 @@ void handleDFRobotEncoders() {
 // ANALOG ROTARY ENCODER (GPIO6 - Pattern Select)
 // =============================================================================
 
+// =============================================================================
+// ANALOG ROTARY ENCODER (GPIO6) — 12-position FX preset selector
+// pos  0 = NO FX (todo off)
+// pos  1..11 = 11 presets FX predefinidos
+// =============================================================================
+struct FxPreset {
+    const char* name;
+    bool  delayEn;  uint8_t delayAmt;    // delay amount 0-127
+    bool  flanEn;   uint8_t flanAmt;     // flanger amount 0-127
+    bool  compEn;   uint8_t compAmt;     // compressor amount 0-127
+};
+
+static const FxPreset kFxPresets[12] = {
+    // pos  0 — OFF
+    { "FX OFF",      false,  0, false,  0, false,  0 },
+    // pos  1 — Slight delay, dry
+    { "ROOM",        true,  32, false,  0, false,  0 },
+    // pos  2 — Medium delay
+    { "DELAY",       true,  72, false,  0, false,  0 },
+    // pos  3 — Heavy slapback
+    { "SLAPBACK",    true, 110, false,  0, false,  0 },
+    // pos  4 — Soft flanger
+    { "FLANGE LO",   false,  0, true,  28, false,  0 },
+    // pos  5 — Strong flanger
+    { "FLANGE HI",   false,  0, true,  80, false,  0 },
+    // pos  6 — Light compression
+    { "COMP SOFT",   false,  0, false,  0, true,  30 },
+    // pos  7 — Hard compression
+    { "COMP HARD",   false,  0, false,  0, true,  90 },
+    // pos  8 — Delay + light comp
+    { "SPACE",       true,  55, false,  0, true,  40 },
+    // pos  9 — Delay + flanger
+    { "CHORUS",      true,  40, true,  50, false,  0 },
+    // pos 10 — All FX medium
+    { "FULL FX",     true,  60, true,  45, true,  50 },
+    // pos 11 — All FX heavy
+    { "DESTROY",     true, 120, true, 100, true, 100 },
+};
+
+static void applyFxPreset(int pos) {
+    pos = constrain(pos, 0, 11);
+    const FxPreset& p = kFxPresets[pos];
+
+    masterFilter.enabled      = p.delayEn || p.flanEn || p.compEn;
+    masterFilter.delayAmount   = p.delayAmt;
+    masterFilter.flangerAmount = p.flanAmt;
+    masterFilter.compAmount    = p.compAmt;
+
+    sendFilterUDP(-1, FILTER_DELAY);
+    sendFilterUDP(-1, FILTER_FLANGER);
+    sendFilterUDP(-1, FILTER_COMPRESSOR);
+    Serial.printf("[ROTARY FX] pos=%d '%s'\n", pos, p.name);
+}
+
 void handleAnalogEncoder() {
     static int lastPosition = -1;
     static uint32_t lastChangeMs = 0;
@@ -1040,20 +1098,8 @@ void handleAnalogEncoder() {
     lastPosition = position;
     lastChangeMs = millis();
 
-    // Map positions 0-8 to screens, 9-11 unused
-    static const Screen screenMap[] = {
-        SCREEN_MENU, SCREEN_LIVE, SCREEN_SEQUENCER,
-        SCREEN_VOLUMES, SCREEN_FILTERS, SCREEN_PATTERNS,
-        SCREEN_SPECTRUM, SCREEN_PERFORMANCE, SCREEN_SAMPLES
-    };
-
-    if (position < 9) {
-        Screen target = screenMap[position];
-        if (currentScreen != target) {
-            Serial.printf("[ROTARY] pos=%d -> screen %d\n", position, target);
-            navigateToScreen(target);
-        }
-    }
+    analogFxPreset = position;
+    applyFxPreset(position);
 }
 
 // =============================================================================
@@ -1063,39 +1109,34 @@ void handleAnalogEncoder() {
 void handleByteButton() {
     if (!byteButtonConnected) return;
 
-    uint8_t status = 0;
+    // Read 8 individual per-button bytes from reg 0x60..0x67.
+    // Each byte: 0x01 = pressed, 0x00 = released (active-high, unambiguous).
+    uint8_t rawBytes[BYTEBUTTON_BUTTONS] = {};
     bool readOk = false;
 
     if (i2c_lock(20)) {
-        // Select hub channel only if ByteButton is behind the hub
-        if (byteButtonHubChannel >= 0) {
-            i2c_hub_select_raw(byteButtonHubChannel);
-        } else if (byteButtonHubChannel == -2) {
-            i2c_hub_deselect_raw();  // ensure hub is deselected for direct bus
-        }
+        if (byteButtonHubChannel >= 0) i2c_hub_select_raw(byteButtonHubChannel);
+        else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
 
         Wire.beginTransmission(BYTEBUTTON_ADDR);
-        Wire.write(BYTEBUTTON_STATUS_REG);
-        if (Wire.endTransmission(false) == 0 && Wire.requestFrom((uint8_t)BYTEBUTTON_ADDR, (uint8_t)1) == 1) {
-            status = Wire.read();
+        Wire.write(BYTEBUTTON_STATUS_8BYTE_REG);
+        if (Wire.endTransmission(false) == 0 &&
+            Wire.requestFrom((uint8_t)BYTEBUTTON_ADDR, (uint8_t)BYTEBUTTON_BUTTONS) == BYTEBUTTON_BUTTONS) {
+            for (int i = 0; i < BYTEBUTTON_BUTTONS; i++) rawBytes[i] = Wire.read();
             readOk = true;
         }
 
-        if (byteButtonHubChannel >= 0) {
-            i2c_hub_deselect_raw();
-        }
+        if (byteButtonHubChannel >= 0) i2c_hub_deselect_raw();
         i2c_unlock();
     }
 
     if (!readOk) return;
 
-    // Reject 0xFF — common I2C read error (bus noise / device not responding)
-    if (status == 0xFF) return;
-
-    // Reject values with more than 2 bits set (I2C noise reads garbage)
-    int bitCount = 0;
-    for (int b = 0; b < 8; b++) { if (status & (1 << b)) bitCount++; }
-    if (bitCount > 2) return;
+    // Build bitmask (bit N=1 if button N pressed)
+    uint8_t status = 0;
+    for (int i = 0; i < BYTEBUTTON_BUTTONS; i++) {
+        if (rawBytes[i] == 0x01) status |= (1U << i);
+    }
 
     uint8_t previousState = prevByteButtonState;
     uint8_t pressedEdges = status & (uint8_t)~previousState;
@@ -1224,7 +1265,9 @@ void updateUI() {
 
 void setup() {
     Serial.begin(115200);
-    delay(3000);  // Wait for USB CDC to be ready
+    // Wait up to 3s for USB CDC, skip wait if no monitor connected
+    { unsigned long _t = millis(); while (!Serial && (millis()-_t) < 3000) delay(10); }
+    delay(50);
     Serial.println("\n====================================");
     Serial.println("  RED808 V6 - BlueSlaveV2");
     Serial.println("  Waveshare ESP32-S3-Touch-LCD-7B");
@@ -1346,13 +1389,15 @@ void loop() {
 
     handleLivePadTouchMatrix(now);
 
+    // Velocity computed once for all pad triggers this frame
+    const int padVelocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
+
     uint32_t pendingMask = pendingLivePadTriggerMask;
     if (pendingMask != 0) {
         pendingLivePadTriggerMask = 0;
-        int velocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
         for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
             if ((pendingMask & (1UL << pad)) == 0) continue;
-            sendLivePadTrigger(pad, velocity);
+            sendLivePadTrigger(pad, padVelocity);
             lastLivePadTriggerMs[pad] = now;
         }
     }
@@ -1360,18 +1405,14 @@ void loop() {
     for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
         if (!livePadPressed[pad]) continue;
         if ((now - lastLivePadTriggerMs[pad]) < Config::LIVE_PAD_REPEAT_MS) continue;
-
-        int velocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
-        sendLivePadTrigger(pad, velocity);
+        sendLivePadTrigger(pad, padVelocity);
         lastLivePadTriggerMs[pad] = now;
     }
 
     for (int pad = 0; pad < BYTEBUTTON_BUTTONS && pad < Config::MAX_SAMPLES; pad++) {
         if (!byteButtonLivePressed[pad]) continue;
         if ((now - lastLivePadTriggerMs[pad]) < Config::LIVE_PAD_REPEAT_MS) continue;
-
-        int velocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
-        sendLivePadTrigger(pad, velocity);
+        sendLivePadTrigger(pad, padVelocity);
         lastLivePadTriggerMs[pad] = now;
     }
 
@@ -1381,8 +1422,7 @@ void loop() {
         handleM5Encoders();
         handleDFRobotEncoders();
         handleAnalogEncoder();
-        handleByteButton();
-        updateByteButtonLeds();
+        handleByteButton();  // calls updateByteButtonLeds() internally
     }
 
     // UI update (~60fps)

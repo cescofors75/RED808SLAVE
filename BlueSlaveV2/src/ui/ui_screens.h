@@ -17,6 +17,8 @@ extern lv_obj_t* scr_patterns;
 extern lv_obj_t* scr_spectrum;
 extern lv_obj_t* scr_performance;
 extern lv_obj_t* scr_samples;
+extern lv_obj_t* scr_boot;
+extern lv_obj_t* scr_seq_circle;
 
 // Create screens
 void ui_create_menu_screen();
@@ -30,9 +32,12 @@ void ui_create_patterns_screen();
 void ui_create_spectrum_screen();
 void ui_create_performance_screen();
 void ui_create_samples_screen();
+void ui_create_boot_screen();
+void ui_create_seq_circle_screen();
 
 // Update functions (called from timer)
 void ui_update_sequencer();
+void ui_update_seq_circle();
 void ui_update_volumes();
 void ui_update_filters();
 void ui_update_diagnostics();

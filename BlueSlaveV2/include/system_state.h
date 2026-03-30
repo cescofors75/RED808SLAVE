@@ -24,6 +24,7 @@ enum Screen {
     SCREEN_SPECTRUM,
     SCREEN_PERFORMANCE,
     SCREEN_SAMPLES,
+    SCREEN_SEQ_CIRCLE,
     SCREEN_ENCODER_TEST
 };
 
@@ -118,6 +119,7 @@ extern TrackFilter masterFilter;
 extern int filterSelectedTrack;   // -1 = MASTER
 extern int filterSelectedFX;
 extern EncoderMode encoderMode;
+extern int analogFxPreset;        // 0=OFF, 1..11=FX preset (analog rotary)
 
 // I2C Hub
 extern int m5HubChannel[];
