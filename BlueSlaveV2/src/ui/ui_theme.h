@@ -35,6 +35,7 @@ struct ThemeColors {
     uint32_t nav_colors[7];    // ByteButton nav colors
     uint32_t pad_colors[8];    // ByteButton live pad colors
     uint8_t  encoder_rgb[3];   // M5 encoder uniform color (when led_uniform != 0)
+    uint32_t track_colors[16]; // Per-track UI colors (pads, sequencer, volumes)
     const char* name;
 };
 
@@ -59,7 +60,6 @@ lv_color_t theme_cyan();
 // Apply theme
 void ui_theme_init();
 void ui_theme_apply(VisualTheme theme);
-void ui_recreate_all_screens();
 
 // LED color helpers for main.cpp
 uint32_t theme_nav_color(int index);
@@ -81,22 +81,5 @@ void     theme_encoder_color(int track, uint8_t out_rgb[3]);
 #define RED808_INFO        theme_info()
 #define RED808_CYAN        theme_cyan()
 
-// Instrument colors
-static const lv_color_t inst_colors[] = {
-    lv_color_hex(0xFF4444), // KICK - Red
-    lv_color_hex(0xFF8C00), // SNARE - Orange
-    lv_color_hex(0xFFD700), // CL-HAT - Yellow
-    lv_color_hex(0x00CED1), // OP-HAT - Cyan
-    lv_color_hex(0xFF00FF), // CLAP - Magenta
-    lv_color_hex(0x00FF00), // TOM-LO - Green
-    lv_color_hex(0x00FA9A), // TOM-HI - MedSpringGreen
-    lv_color_hex(0x6495ED), // CYMBAL - CornflowerBlue
-    lv_color_hex(0xDA70D6), // PERC-1 - Orchid
-    lv_color_hex(0xFFA07A), // PERC-2 - LightSalmon
-    lv_color_hex(0xADFF2F), // SHAKER - GreenYellow
-    lv_color_hex(0xFFE4B5), // COWBELL - Moccasin
-    lv_color_hex(0x87CEEB), // RIDE - SkyBlue
-    lv_color_hex(0xDDA0DD), // CONGA - Plum
-    lv_color_hex(0xF0E68C), // BONGO - Khaki
-    lv_color_hex(0xB0C4DE), // EXTRA - LightSteelBlue
-};
+// Instrument/track colors — updated on theme change
+extern lv_color_t inst_colors[16];

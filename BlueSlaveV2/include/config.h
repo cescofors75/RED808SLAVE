@@ -157,10 +157,15 @@ namespace Config {
     constexpr int DF_DELTA_CLAMP = 16;
     constexpr int DF_GLITCH_THRESHOLD = 64;
     constexpr int DF_COUNTS_PER_STEP = 4;
-    constexpr int DF_FILTER_STEP = 1;
-    constexpr int DF_PATTERN_STEP = 1;
+    constexpr int DF_VOLUME_STEP = 3;   // Master volume change per encoder step
+    constexpr int DF_BPM_STEP = 1;      // BPM change per encoder step
     constexpr uint32_t DF_BUTTON_GUARD_MS = 250;
     constexpr uint32_t LIVE_PAD_REPEAT_MS = 85;
+
+    // GPIO analog rotary encoder (pattern select)
+    constexpr int ANALOG_ENC_PIN = 6;        // GPIO6 signal pin
+    constexpr int ANALOG_ENC_PATTERNS = 16;  // Number of pattern positions
+    constexpr int ANALOG_ENC_DEADBAND = 40;  // ADC noise deadband
 
     // Menu
     constexpr int MENU_ITEMS = 6;

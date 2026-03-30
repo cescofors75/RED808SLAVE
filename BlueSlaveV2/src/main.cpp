@@ -104,13 +104,17 @@ bool dfEncoderConnected[DFROBOT_ENCODER_COUNT] = {false, false};
 bool byteButtonConnected = false;
 esp_lcd_panel_handle_t lcd_panel = NULL;
 
-// Encoder LED colors per track
+// Encoder LED colors per track (full rainbow spectrum)
 uint8_t encoderLEDColors[Config::MAX_TRACKS][3] = {
-    {255, 0,   0},   {255, 128, 0},   {255, 255, 0},   {128, 255, 0},
-    {0,   255, 0},   {0,   255, 128}, {0,   255, 255}, {0,   128, 255},
-    {0,   0,   255}, {128, 0,   255}, {255, 0,   255}, {255, 0,   128},
-    {200, 100, 50},  {100, 200, 100}, {50,  100, 200}, {200, 200, 200}
+    {255, 0,   0},   {255, 80,  0},   {255, 160, 0},   {255, 255, 0},
+    {128, 255, 0},   {0,   255, 0},   {0,   255, 128}, {0,   255, 255},
+    {0,   128, 255}, {0,   0,   255}, {80,  0,   255}, {160, 0,   255},
+    {255, 0,   255}, {255, 0,   160}, {255, 0,   80},  {255, 60,  60}
 };
+
+// Analog rotary encoder (GPIO6 - pattern select)
+int prevAnalogEncPattern = -1;
+int analogEncSmoothed = -1;
 
 // Timing
 unsigned long lastEncoderRead = 0;
@@ -155,6 +159,7 @@ void handleDFRobotEncoders();
 void handleByteButton();
 void updateByteButtonLeds();
 void updateTrackEncoderLED(int track);
+void handleAnalogEncoder();
 void updateUI();
 
 static void requestTrackVolumesFromMaster() {
@@ -734,13 +739,13 @@ void updateByteButtonLeds() {
         for (int i = 0; i < BYTEBUTTON_BUTTONS; i++) {
             desired[i] = byteButtonLivePressed[i] ? 0xFFFFFF : byteButtonColorForPad(i);
         }
-        desired[8] = isPlaying ? 0x3FB950 : 0xF85149;
+        desired[8] = isPlaying ? theme_nav_color(2) : theme_nav_color(0);
     } else {
         for (int i = 0; i < 7; i++) {
             desired[i] = (currentScreen == navTargets[i]) ? 0xFFFFFF : navColors[i];
         }
-        desired[7] = isPlaying ? 0x3FB950 : 0xF85149;
-        desired[8] = masterConnected ? 0x58A6FF : 0x30363D;
+        desired[7] = isPlaying ? theme_nav_color(2) : theme_nav_color(0);
+        desired[8] = masterConnected ? theme_nav_color(1) : 0x222222;
     }
 
     bool hasChanges = false;
@@ -896,20 +901,16 @@ void handleDFRobotEncoders() {
 
         // Process results outside of I2C lock
         if (i == 0) {
+            // DFRobot #0: Master Volume + Play/Pause button
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                TrackFilter& f = (filterSelectedTrack == -1) ? masterFilter : trackFilters[filterSelectedTrack];
-                uint8_t* param = nullptr;
-                switch (filterSelectedFX) {
-                    case FILTER_DELAY:      param = &f.delayAmount;   break;
-                    case FILTER_FLANGER:    param = &f.flangerAmount; break;
-                    case FILTER_COMPRESSOR: param = &f.compAmount;    break;
-                }
-                if (param) {
-                    int newVal = constrain((int)*param + logical_delta * Config::DF_FILTER_STEP, 0, 127);
-                    *param = (uint8_t)newVal;
-                    f.enabled = (f.delayAmount > 0 || f.flangerAmount > 0 || f.compAmount > 0);
-                    sendFilterUDP(filterSelectedTrack, filterSelectedFX);
+                int newVol = constrain(masterVolume + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
+                if (newVol != masterVolume) {
+                    masterVolume = newVol;
+                    JsonDocument doc;
+                    doc["cmd"] = "setVolume";
+                    doc["value"] = masterVolume;
+                    sendUDPCommand(doc);
                 }
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
@@ -918,21 +919,61 @@ void handleDFRobotEncoders() {
             }
         }
         else if (i == 1) {
+            // DFRobot #1: BPM (1 per step) + BACK button
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                int newPat = currentPattern + logical_delta * Config::DF_PATTERN_STEP;
-                newPat = constrain(newPat, 0, Config::MAX_PATTERNS - 1);
-                if (newPat != currentPattern) {
-                    selectPatternOnMaster(newPat);
+                int newBPM = constrain(currentBPM + logical_delta * Config::DF_BPM_STEP, Config::MIN_BPM, Config::MAX_BPM);
+                if (newBPM != currentBPM) {
+                    currentBPM = newBPM;
+                    JsonDocument doc;
+                    doc["cmd"] = "setTempo";
+                    doc["value"] = currentBPM;
+                    sendUDPCommand(doc);
                 }
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();
-                requestPatternFromMaster();
+                navigateToScreen(SCREEN_MENU);
             }
         }
     }
 }
+
+// =============================================================================
+// ANALOG ROTARY ENCODER (GPIO6 - Pattern Select)
+// =============================================================================
+
+void handleAnalogEncoder() {
+    int raw = analogRead(Config::ANALOG_ENC_PIN);
+
+    // Simple exponential moving average for noise rejection
+    if (analogEncSmoothed < 0) {
+        analogEncSmoothed = raw;
+        return;
+    }
+    analogEncSmoothed = (analogEncSmoothed * 3 + raw) / 4;
+
+    // Map ADC range (0-4095) to pattern index (0..MAX_PATTERNS-1)
+    int pattern = map(analogEncSmoothed, 0, 4095, 0, Config::ANALOG_ENC_PATTERNS - 1);
+    pattern = constrain(pattern, 0, Config::MAX_PATTERNS - 1);
+
+    if (prevAnalogEncPattern < 0) {
+        prevAnalogEncPattern = pattern;
+        return;
+    }
+
+    if (pattern != prevAnalogEncPattern) {
+        // Check ADC is stable (deadband check against raw vs smoothed)
+        if (abs(raw - analogEncSmoothed) < Config::ANALOG_ENC_DEADBAND) {
+            prevAnalogEncPattern = pattern;
+            selectPatternOnMaster(pattern);
+        }
+    }
+}
+
+// =============================================================================
+// BYTEBUTTON HANDLING
+// =============================================================================
 
 void handleByteButton() {
     if (!byteButtonConnected) return;
@@ -1083,19 +1124,24 @@ void setup() {
     lvgl_port_init(lcd_panel);
     Serial.println("[LVGL] Port initialized (task paused)");
 
-    // 6. Scan I2C hub for M5 + DFRobot + ByteButton (before LVGL task starts - no I2C race)
+    // 6. Analog rotary encoder GPIO setup
+    pinMode(Config::ANALOG_ENC_PIN, INPUT);
+    analogReadResolution(12);  // 12-bit ADC (0-4095)
+    Serial.println("[ENC] Analog rotary on GPIO6 initialized");
+
+    // 7. Scan I2C hub for M5 + DFRobot + ByteButton (before LVGL task starts - no I2C race)
     scanI2CHub();
 
-    // 7. WiFi + UDP — init BEFORE LVGL screens to reserve internal SRAM for WiFi DMA buffers
+    // 8. WiFi + UDP — init BEFORE LVGL screens to reserve internal SRAM for WiFi DMA buffers
     Serial.printf("[HEAP] Before WiFi: %d bytes\n", ESP.getFreeHeap());
     setupWiFi();
     Serial.printf("[HEAP] After WiFi: %d bytes\n", ESP.getFreeHeap());
 
-    // 8. Now start LVGL task (safe - I2C scanning is done)
+    // 9. Now start LVGL task (safe - I2C scanning is done)
     lvgl_port_task_start();
     Serial.println("[LVGL] Task started");
 
-    // 9. Create all UI screens (must be inside LVGL lock)
+    // 10. Create all UI screens (must be inside LVGL lock)
     //    Widgets now allocate from PSRAM via lv_conf.h, keeping internal heap free
     Serial.println("[UI] Creating screens...");
     if (lvgl_port_lock(1000)) {
@@ -1181,6 +1227,7 @@ void loop() {
         lastEncoderRead = now;
         handleM5Encoders();
         handleDFRobotEncoders();
+        handleAnalogEncoder();
         handleByteButton();
         updateByteButtonLeds();
     }
