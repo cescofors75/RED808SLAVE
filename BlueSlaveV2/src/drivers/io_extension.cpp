@@ -50,3 +50,11 @@ void io_ext_lcd_reset() {
     io_ext_output(EXIO_LCD_RST, 1);
     delay(50);
 }
+
+void io_ext_sd_enable() {
+    io_ext_output(EXIO_SD_CS, 0);  // CS low = selected
+}
+
+void io_ext_sd_disable() {
+    io_ext_output(EXIO_SD_CS, 1);  // CS high = deselected
+}

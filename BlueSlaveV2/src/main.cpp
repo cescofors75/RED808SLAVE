@@ -123,6 +123,8 @@ unsigned long lastWiFiCheck = 0;
 unsigned long lastScreenUpdate = 0;
 unsigned long lastUDPCheck = 0;
 unsigned long lastMasterPacketMs = 0;
+unsigned long lastStepUpdateMs = 0;   // last UDP step_update/step_sync received
+unsigned long lastLocalStepMs  = 0;   // last local-clock step advance (independent of UDP)
 int32_t prevM5Counter[Config::MAX_TRACKS];
 uint16_t prevDFValue[DFROBOT_ENCODER_COUNT];
 unsigned long lastLivePadTriggerMs[Config::MAX_SAMPLES];
@@ -291,7 +293,7 @@ static bool navigateToScreen(Screen screen) {
         case SCREEN_SETTINGS:    target = scr_settings; break;
         case SCREEN_DIAGNOSTICS: target = scr_diagnostics; break;
         case SCREEN_PATTERNS:    target = scr_patterns; break;
-        case SCREEN_SPECTRUM:    target = scr_spectrum; break;
+        case SCREEN_SDCARD:    target = scr_sdcard; break;
         case SCREEN_PERFORMANCE: target = scr_performance; break;
         case SCREEN_SAMPLES:     target = scr_samples; break;
         case SCREEN_SEQ_CIRCLE:  target = scr_seq_circle; break;
@@ -497,6 +499,8 @@ void sendLivePadTrigger(int pad, int velocity) {
 void receiveUDPData() {
     if (!udpConnected) return;
 
+    // Drain ALL pending UDP packets each loop iteration
+    for (int pkt = 0; pkt < 8; pkt++) {
     int packetSize = udp.parsePacket();
     if (packetSize == 0) return;
 
@@ -511,10 +515,10 @@ void receiveUDPData() {
 
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, buf);
-    if (err) return;
+    if (err) continue;
 
     const char* cmd = doc["cmd"];
-    if (!cmd) return;
+    if (!cmd) continue;
 
     if (strcmp(cmd, "pattern_sync") == 0) {
         int pat = doc["pattern"] | 0;
@@ -536,16 +540,26 @@ void receiveUDPData() {
         }
     }
     else if (strcmp(cmd, "step_update") == 0 || strcmp(cmd, "step_sync") == 0) {
-        currentStep = doc["step"] | 0;
+        // Visual step is driven by local clock — ignore master step position
+        // (UDP packet loss causes jumps: e.g. 1,3,6,8 instead of smooth 0,1,2,3)
+        // Only track that master is alive for connection status
+        lastStepUpdateMs = millis();
     }
     else if (strcmp(cmd, "play_state") == 0) {
-        isPlaying = doc["playing"] | false;
+        bool playing = doc["playing"] | false;
+        if (playing && !isPlaying) {
+            currentStep = 0;
+            lastLocalStepMs = millis();
+        }
+        isPlaying = playing;
     }
     else if (strcmp(cmd, "start") == 0) {
+        if (!isPlaying) { currentStep = 0; lastLocalStepMs = millis(); }
         isPlaying = true;
     }
     else if (strcmp(cmd, "stop") == 0) {
         isPlaying = false;
+        currentStep = 0;
     }
     else if (strcmp(cmd, "tempo_sync") == 0 || strcmp(cmd, "tempo") == 0) {
         currentBPM = constrain(doc["value"] | Config::DEFAULT_BPM, Config::MIN_BPM, Config::MAX_BPM);
@@ -585,6 +599,7 @@ void receiveUDPData() {
             trackVolumes[track] = constrain(value, 0, Config::MAX_VOLUME);
         }
     }
+    } // end drain loop
 }
 
 // =============================================================================
@@ -1091,32 +1106,46 @@ static void applyFxPreset(int pos) {
 }
 
 void handleAnalogEncoder() {
-    static int lastPosition = -1;
+    static int  lastPosition = -1;
+    static int  stableRaw    = -1;   // last accepted raw after deadband filter
     static unsigned long lastChangeMs = 0;
+    // Self-calibrating ADC range: tracks actual min/max seen from the hardware.
+    // Many analog rotary encoders only span a fraction of the 0-3.3V range;
+    // calibrating automatically avoids hard-coding wrong limits.
+    static int  calMin = 4095;  // lowest ADC value ever read
+    static int  calMax = 0;     // highest ADC value ever read
 
-    // 8-sample average reduces ESP32-S3 ADC noise (±50 raw counts → ±6 after avg)
+    // 16-sample average — reduces ESP32-S3 ADC noise
     long sum = 0;
-    for (int i = 0; i < 8; i++) sum += analogRead(Config::ANALOG_ENC_PIN);
-    int raw = (int)(sum / 8);
+    for (int i = 0; i < 16; i++) sum += analogRead(Config::ANALOG_ENC_PIN);
+    int raw = (int)(sum / 16);
 
-    // 12-position rotary: each zone spans ~341 ADC counts (4096/12)
-    int position = (raw * 12) / 4096;
-    if (position > 11) position = 11;
+    // Update calibration bounds continuously
+    if (raw < calMin) calMin = raw;
+    if (raw > calMax) calMax = raw;
 
-    // Hysteresis: reject reads within 40 ADC counts of a zone boundary.
-    // This prevents oscillation when the rotary is near a detent edge.
-    int lower = position * 341;
-    int upper = lower + 341;
-    if ((raw - lower) < 40 || (upper - raw) < 40) return;
+    // Deadband: ignore small fluctuations around the last stable reading.
+    if (stableRaw >= 0 && abs(raw - stableRaw) < 60) return;
+    stableRaw = raw;
+
+    // Map using calibrated range once we have seen enough spread (>= 200 ADC counts).
+    // Until calibrated, fall back to full-range formula.
+    int position;
+    if ((calMax - calMin) >= 200) {
+        position = constrain((int)map(raw, calMin, calMax, 0, 11), 0, 11);
+    } else {
+        position = constrain((raw * 12 + 2048) / 4096, 0, 11);
+    }
 
     if (position == lastPosition) return;
-    if ((millis() - lastChangeMs) < 300) return;  // 300 ms debounce
+    if ((millis() - lastChangeMs) < 150) return;  // short debounce after detent cross
 
     lastPosition = position;
     lastChangeMs = millis();
 
     analogFxPreset = position;
     applyFxPreset(position);
+    Serial.printf("[ROTARY] raw=%d cal=[%d..%d] pos=%d\n", raw, calMin, calMax, position);
 }
 
 // =============================================================================
@@ -1258,10 +1287,11 @@ void updateUI() {
         case SCREEN_MENU:        ui_update_menu_status(); break;
         case SCREEN_LIVE:        ui_update_live_pads(); break;
         case SCREEN_SEQUENCER:   ui_update_sequencer(); break;
+        case SCREEN_SEQ_CIRCLE:  ui_update_seq_circle(); break;
         case SCREEN_VOLUMES:     ui_update_volumes();   break;
         case SCREEN_FILTERS:     ui_update_filters();   break;
         case SCREEN_PATTERNS:    ui_update_patterns();  break;
-        case SCREEN_SPECTRUM:    ui_update_spectrum();  break;
+        case SCREEN_SDCARD:    ui_update_sdcard();    break;
         case SCREEN_DIAGNOSTICS: ui_update_diagnostics(); break;
         default: break;
     }
@@ -1351,6 +1381,7 @@ void setup() {
         ui_theme_init();
 
         ui_create_boot_screen();      // boot animation — shown first; auto-navigates to menu
+        ui_create_seq_circle_screen();
         ui_create_menu_screen();
         ui_create_live_screen();
         ui_create_sequencer_screen();
@@ -1359,7 +1390,7 @@ void setup() {
         ui_create_settings_screen();
         ui_create_diagnostics_screen();
         ui_create_patterns_screen();
-        ui_create_spectrum_screen();
+        ui_create_sdcard_screen();
         ui_create_performance_screen();
         ui_create_samples_screen();
 
@@ -1421,6 +1452,21 @@ void loop() {
     }
 
     // ByteButton: single-shot on press edge only (no repeat — physical buttons sustain too long)
+
+    // Local step clock: PRIMARY driver of currentStep (same approach as old project).
+    // Master step_update is ignored for position — UDP packet loss makes it unreliable.
+    // BPM is synced via tempo_sync, so local clock stays accurate (<1ms drift/step).
+    // SNAP-TO-NOW: never catch up — max 1 step per loop iteration = smooth visual always.
+    if (isPlaying && currentBPM > 0) {
+        unsigned long step_ms = 60000UL / (unsigned long)currentBPM / 4;
+        if (step_ms < 50) step_ms = 50;
+        if ((now - lastLocalStepMs) >= step_ms) {
+            lastLocalStepMs = now;  // snap to now — NEVER accumulate, NEVER catch up
+            currentStep = (currentStep + 1) % Config::MAX_STEPS;
+        }
+    } else if (!isPlaying) {
+        lastLocalStepMs = now;
+    }
 
     // Encoder polling (50ms interval)
     if (now - lastEncoderRead >= Config::ENCODER_READ_MS) {

@@ -94,9 +94,15 @@
 #define BYTEBUTTON_BUTTONS     8
 
 // =============================================================================
-// SD CARD (SDMMC interface, CS via CH32V003 EXIO4)
+// SD CARD (SDMMC 1-bit mode, CS via CH32V003 EXIO4)
+// GPIO 11=CLK, 12=CMD, 13=D0 (confirmed free pins on Waveshare ESP32-S3-7B)
 // =============================================================================
-// SD card uses SDMMC, CS pin managed by IO Extension (EXIO_SD_CS)
+#define SD_CLK_PIN     12  // GPIO12 = SCK  (confirmed from schematic)
+#define SD_CMD_PIN     11  // GPIO11 = MOSI (confirmed from schematic)
+#define SD_D0_PIN      13  // GPIO13 = MISO (confirmed from schematic)
+// D3/CS via EXIO4 — must be HIGH before SD_MMC.begin() so card enters SDMMC mode
+// Mount point for SD_MMC
+#define SD_MOUNT_POINT "/sdcard"
 
 // =============================================================================
 // WiFi / UDP

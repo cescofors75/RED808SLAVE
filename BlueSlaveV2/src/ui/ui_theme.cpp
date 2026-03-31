@@ -286,12 +286,12 @@ void ui_theme_apply(VisualTheme theme) {
     extern lv_obj_t* scr_settings;
     extern lv_obj_t* scr_diagnostics;
     extern lv_obj_t* scr_patterns;
-    extern lv_obj_t* scr_spectrum;
+    extern lv_obj_t* scr_sdcard;
     extern lv_obj_t* scr_performance;
     extern lv_obj_t* scr_samples;
     lv_obj_t* screens[] = {scr_menu, scr_live, scr_sequencer, scr_volumes,
                            scr_filters, scr_settings, scr_diagnostics, scr_patterns,
-                           scr_spectrum, scr_performance, scr_samples};
+                           scr_sdcard, scr_performance, scr_samples};
     for (auto scr : screens) {
         if (!scr) continue;
         lv_obj_set_style_bg_color(scr, lv_color_hex(cur.bg), 0);

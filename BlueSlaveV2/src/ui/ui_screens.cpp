@@ -6,6 +6,7 @@
 #include "ui_theme.h"
 #include "../../include/system_state.h"
 #include "../../include/config.h"
+#include "../drivers/io_extension.h"
 #include <Esp.h>
 #include <ArduinoJson.h>
 #include <math.h>
@@ -21,7 +22,7 @@ lv_obj_t* scr_filters = NULL;
 lv_obj_t* scr_settings = NULL;
 lv_obj_t* scr_diagnostics = NULL;
 lv_obj_t* scr_patterns = NULL;
-lv_obj_t* scr_spectrum = NULL;
+lv_obj_t* scr_sdcard = NULL;
 lv_obj_t* scr_performance = NULL;
 lv_obj_t* scr_samples = NULL;
 lv_obj_t* scr_boot = NULL;
@@ -31,6 +32,8 @@ lv_obj_t* scr_seq_circle = NULL;
 static constexpr uint8_t HEADER_SLOT_COUNT = SCREEN_ENCODER_TEST + 1;
 static lv_obj_t* lbl_seq_volume[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_pad_volume[HEADER_SLOT_COUNT] = {};
+static lv_obj_t* chip_seq_volume[HEADER_SLOT_COUNT] = {};
+static lv_obj_t* chip_pad_volume[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_bpm[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_pattern[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_play[HEADER_SLOT_COUNT] = {};
@@ -47,6 +50,10 @@ static lv_obj_t* seq_track_labels[Config::MAX_TRACKS];
 static lv_obj_t* lbl_step_indicator = NULL;
 static lv_obj_t* seq_column_highlights[Config::MAX_STEPS];
 static lv_obj_t* seq_step_leds[Config::MAX_STEPS];  // LED strip below grid
+static int seq_page = 0;              // 0 = tracks 0-7, 1 = tracks 8-15
+static constexpr int SEQ_TRACKS_PER_PAGE = 8;
+static lv_obj_t* seq_page_btn = NULL;
+static lv_obj_t* seq_page_lbl = NULL;
 
 // Volume sliders
 static lv_obj_t* vol_sliders[Config::MAX_TRACKS];
@@ -136,7 +143,7 @@ static Screen screen_from_parent(lv_obj_t* parent) {
     if (parent == scr_patterns) return SCREEN_PATTERNS;
     if (parent == scr_volumes) return SCREEN_VOLUMES;
     if (parent == scr_filters) return SCREEN_FILTERS;
-    if (parent == scr_spectrum) return SCREEN_SPECTRUM;
+    if (parent == scr_sdcard) return SCREEN_SDCARD;
     if (parent == scr_performance) return SCREEN_PERFORMANCE;
     if (parent == scr_samples) return SCREEN_SAMPLES;
     if (parent == scr_seq_circle) return SCREEN_SEQ_CIRCLE;
@@ -295,11 +302,18 @@ void ui_create_header(lv_obj_t* parent) {
     lv_obj_set_flex_align(status_row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_flex_grow(status_row, 1);
 
-    create_info_chip(status_row, RED808_ACCENT, &lbl_seq_volume[slot]);
+    chip_seq_volume[slot] = create_info_chip(status_row, RED808_ACCENT, &lbl_seq_volume[slot]);
     lv_label_set_text_fmt(lbl_seq_volume[slot], "SEQ %d", sequencerVolume);
 
-    create_info_chip(status_row, RED808_ACCENT2, &lbl_pad_volume[slot]);
+    chip_pad_volume[slot] = create_info_chip(status_row, RED808_ACCENT2, &lbl_pad_volume[slot]);
     lv_label_set_text_fmt(lbl_pad_volume[slot], "PAD %d", livePadsVolume);
+
+    // Highlight active volume mode chip
+    bool seqActive = (volumeMode == VOL_SEQUENCER);
+    lv_obj_set_style_bg_opa(chip_seq_volume[slot], seqActive ? LV_OPA_80 : LV_OPA_20, 0);
+    lv_obj_set_style_border_width(chip_seq_volume[slot], seqActive ? 2 : 1, 0);
+    lv_obj_set_style_bg_opa(chip_pad_volume[slot], seqActive ? LV_OPA_20 : LV_OPA_80, 0);
+    lv_obj_set_style_border_width(chip_pad_volume[slot], seqActive ? 1 : 2, 0);
 
     create_info_chip(status_row, RED808_WARNING, &lbl_bpm[slot]);
     lv_label_set_text_fmt(lbl_bpm[slot], "BPM %d", currentBPM);
@@ -319,10 +333,21 @@ void ui_update_header() {
     static int prev_pattern = -1;
     static int prev_playing = -1;
     static int prev_wifi = -1;
+    static uint8_t prev_slot = 255;
 
     // Only update the active screen's header slot — avoids dirtying hidden screens
     uint8_t slot = static_cast<uint8_t>(currentScreen);
     if (slot >= HEADER_SLOT_COUNT) return;
+
+    // Force full refresh when switching screens (different slot)
+    bool slotChanged = (slot != prev_slot);
+    if (slotChanged) {
+        prev_slot = slot;
+        prev_bpm = -1;
+        prev_pattern = -1;
+        prev_playing = -1;
+        prev_wifi = -1;
+    }
 
     if (currentBPM != prev_bpm) {
         prev_bpm = currentBPM;
@@ -352,6 +377,12 @@ void ui_update_header() {
     }
     static int prev_seq_volume = -1;
     static int prev_pad_volume = -1;
+    static int prev_vol_mode = -1;
+    if (slotChanged) {
+        prev_seq_volume = -1;
+        prev_pad_volume = -1;
+        prev_vol_mode = -1;
+    }
     if (sequencerVolume != prev_seq_volume) {
         prev_seq_volume = sequencerVolume;
         if (lbl_seq_volume[slot]) {
@@ -362,6 +393,18 @@ void ui_update_header() {
         prev_pad_volume = livePadsVolume;
         if (lbl_pad_volume[slot]) {
             lv_label_set_text_fmt(lbl_pad_volume[slot], "PAD %d", livePadsVolume);
+        }
+    }
+    if ((int)volumeMode != prev_vol_mode) {
+        prev_vol_mode = (int)volumeMode;
+        bool seqActive = (volumeMode == VOL_SEQUENCER);
+        if (chip_seq_volume[slot]) {
+            lv_obj_set_style_bg_opa(chip_seq_volume[slot], seqActive ? LV_OPA_80 : LV_OPA_20, 0);
+            lv_obj_set_style_border_width(chip_seq_volume[slot], seqActive ? 2 : 1, 0);
+        }
+        if (chip_pad_volume[slot]) {
+            lv_obj_set_style_bg_opa(chip_pad_volume[slot], seqActive ? LV_OPA_20 : LV_OPA_80, 0);
+            lv_obj_set_style_border_width(chip_pad_volume[slot], seqActive ? 1 : 2, 0);
         }
     }
 }
@@ -377,7 +420,7 @@ static void menu_btn_cb(lv_event_t* e) {
         case 2: nav_to(SCREEN_VOLUMES, scr_volumes); break;
         case 3: nav_to(SCREEN_FILTERS, scr_filters); break;
         case 4: nav_to(SCREEN_PATTERNS, scr_patterns); break;
-        case 5: nav_to(SCREEN_SPECTRUM, scr_spectrum); break;
+        case 5: nav_to(SCREEN_SDCARD, scr_sdcard); break;
         case 6: nav_to(SCREEN_PERFORMANCE, scr_performance); break;
         case 7: nav_to(SCREEN_SETTINGS, scr_settings); break;
         case 8: nav_to(SCREEN_DIAGNOSTICS, scr_diagnostics); break;
@@ -397,7 +440,7 @@ void ui_create_menu_screen() {
         LV_SYMBOL_VOLUME_MAX "  VOLUMES",
         LV_SYMBOL_SETTINGS "  FILTERS FX",
         LV_SYMBOL_DRIVE "  PATTERNS",
-        LV_SYMBOL_SHUFFLE "  SPECTRUM",
+        LV_SYMBOL_DRIVE "  SD BROWSER",
         LV_SYMBOL_CHARGE "  PERFORMANCE",
         LV_SYMBOL_HOME "  SETTINGS",
         LV_SYMBOL_EYE_OPEN "  DIAGNOSTICS"
@@ -567,7 +610,7 @@ void ui_update_live_pads() {
 }
 
 // ============================================================================
-// SEQUENCER SCREEN - 16x16 step grid
+// SEQUENCER SCREEN - 8-track paged grid (2 pages of 8 tracks)
 // ============================================================================
 static void seq_step_cb(lv_event_t* e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
@@ -579,6 +622,26 @@ static void seq_step_cb(lv_event_t* e) {
         active ? inst_colors[track] : RED808_SURFACE, 0);
 }
 
+static void seq_apply_page() {
+    int page_start = seq_page * SEQ_TRACKS_PER_PAGE;
+    for (int t = 0; t < Config::MAX_TRACKS; t++) {
+        bool visible = (t >= page_start && t < page_start + SEQ_TRACKS_PER_PAGE);
+        if (seq_track_labels[t]) {
+            if (visible) lv_obj_clear_flag(seq_track_labels[t], LV_OBJ_FLAG_HIDDEN);
+            else         lv_obj_add_flag(seq_track_labels[t], LV_OBJ_FLAG_HIDDEN);
+        }
+        for (int s = 0; s < Config::MAX_STEPS; s++) {
+            if (seq_grid[t][s]) {
+                if (visible) lv_obj_clear_flag(seq_grid[t][s], LV_OBJ_FLAG_HIDDEN);
+                else         lv_obj_add_flag(seq_grid[t][s], LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
+    if (seq_page_lbl) {
+        lv_label_set_text_fmt(seq_page_lbl, "PAGE %d/2", seq_page + 1);
+    }
+}
+
 void ui_create_sequencer_screen() {
     scr_sequencer = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_sequencer, RED808_BG, 0);
@@ -587,22 +650,23 @@ void ui_create_sequencer_screen() {
     lv_obj_t* shell = create_section_shell(scr_sequencer, 16, 78, 992, 506);
 
     int grid_x = 80, grid_y = 55;
-    int cell_w = 56, cell_h = 30, gap = 2;
+    int cell_w = 56, cell_h = 58, gap = 2;  // taller cells for 8-track view
 
-    // Track labels
+    // Track labels (positioned for 8 visible rows)
     for (int t = 0; t < Config::MAX_TRACKS; t++) {
+        int row = t % SEQ_TRACKS_PER_PAGE;
         lv_obj_t* lbl = lv_label_create(scr_sequencer);
         lv_label_set_text(lbl, trackNames[t]);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(lbl, inst_colors[t], 0);
-        lv_obj_set_pos(lbl, 8, grid_y + t * (cell_h + gap) + 6);
+        lv_obj_set_pos(lbl, 8, grid_y + row * (cell_h + gap) + 20);
         seq_track_labels[t] = lbl;
     }
 
-    // Step grid
+    // Step column highlights (sized for 8 tracks)
     for (int s = 0; s < Config::MAX_STEPS; s++) {
         lv_obj_t* column = lv_obj_create(scr_sequencer);
-        lv_obj_set_size(column, cell_w, Config::MAX_TRACKS * (cell_h + gap) - gap);
+        lv_obj_set_size(column, cell_w, SEQ_TRACKS_PER_PAGE * (cell_h + gap) - gap);
         lv_obj_set_pos(column, grid_x + s * (cell_w + gap), grid_y);
         lv_obj_set_style_bg_color(column, RED808_WARNING, 0);
         lv_obj_set_style_bg_opa(column, LV_OPA_0, 0);
@@ -616,11 +680,13 @@ void ui_create_sequencer_screen() {
         seq_column_highlights[s] = column;
     }
 
+    // Grid cells — all 16 tracks created, positioned in 8-row layout
     for (int t = 0; t < Config::MAX_TRACKS; t++) {
+        int row = t % SEQ_TRACKS_PER_PAGE;
         for (int s = 0; s < Config::MAX_STEPS; s++) {
             lv_obj_t* cell = lv_btn_create(scr_sequencer);
             lv_obj_set_size(cell, cell_w, cell_h);
-            lv_obj_set_pos(cell, grid_x + s * (cell_w + gap), grid_y + t * (cell_h + gap));
+            lv_obj_set_pos(cell, grid_x + s * (cell_w + gap), grid_y + row * (cell_h + gap));
             bool active = patterns[currentPattern].steps[t][s];
             apply_stable_button_style(cell, active ? inst_colors[t] : RED808_SURFACE, RED808_BORDER);
             lv_obj_set_style_radius(cell, 3, 0);
@@ -632,11 +698,12 @@ void ui_create_sequencer_screen() {
         }
     }
 
-    // LED indicator strip: 16 small bars showing the active step (below grid, y=568)
+    // LED indicator strip (below 8-track grid)
+    int led_y = grid_y + SEQ_TRACKS_PER_PAGE * (cell_h + gap) + 4;
     for (int s = 0; s < Config::MAX_STEPS; s++) {
         lv_obj_t* led = lv_obj_create(scr_sequencer);
         lv_obj_set_size(led, cell_w, 7);
-        lv_obj_set_pos(led, grid_x + s * (cell_w + gap), 568);
+        lv_obj_set_pos(led, grid_x + s * (cell_w + gap), led_y);
         lv_obj_set_style_bg_color(led, (s % 4 == 0) ? lv_color_hex(0x2A2A2A) : lv_color_hex(0x1A1A1A), 0);
         lv_obj_set_style_bg_opa(led, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(led, 2, 0);
@@ -647,17 +714,38 @@ void ui_create_sequencer_screen() {
         seq_step_leds[s] = led;
     }
 
-    // Step counter label (bottom left)
+    // Bottom bar: Step indicator + PAGE button + CIRCULAR button
+    int bottom_y = led_y + 14;
+
     lbl_step_indicator = lv_label_create(scr_sequencer);
     lv_label_set_text(lbl_step_indicator, "Step: --");
     lv_obj_set_style_text_font(lbl_step_indicator, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(lbl_step_indicator, RED808_WARNING, 0);
-    lv_obj_set_pos(lbl_step_indicator, 8, 580);
+    lv_obj_set_pos(lbl_step_indicator, 8, bottom_y);
 
-    // CIRCLE VIEW button (bottom right)
+    // PAGE button
+    seq_page_btn = lv_btn_create(scr_sequencer);
+    lv_obj_set_size(seq_page_btn, 130, 26);
+    lv_obj_set_pos(seq_page_btn, 550, bottom_y);
+    lv_obj_set_style_bg_color(seq_page_btn, lv_color_hex(0x1C300C), 0);
+    lv_obj_set_style_bg_opa(seq_page_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(seq_page_btn, 1, 0);
+    lv_obj_set_style_border_color(seq_page_btn, lv_color_hex(0x40A000), 0);
+    lv_obj_set_style_radius(seq_page_btn, 5, 0);
+    lv_obj_add_event_cb(seq_page_btn, [](lv_event_t*) {
+        seq_page = (seq_page + 1) % 2;
+        seq_apply_page();
+    }, LV_EVENT_PRESSED, NULL);
+    seq_page_lbl = lv_label_create(seq_page_btn);
+    lv_label_set_text(seq_page_lbl, "PAGE 1/2");
+    lv_obj_set_style_text_font(seq_page_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(seq_page_lbl, lv_color_hex(0x80DF60), 0);
+    lv_obj_center(seq_page_lbl);
+
+    // CIRCLE VIEW button
     lv_obj_t* circle_btn = lv_btn_create(scr_sequencer);
     lv_obj_set_size(circle_btn, 186, 26);
-    lv_obj_set_pos(circle_btn, 826, 580);
+    lv_obj_set_pos(circle_btn, 826, bottom_y);
     lv_obj_set_style_bg_color(circle_btn, lv_color_hex(0x0C1C30), 0);
     lv_obj_set_style_bg_opa(circle_btn, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(circle_btn, 1, 0);
@@ -670,6 +758,10 @@ void ui_create_sequencer_screen() {
     lv_obj_set_style_text_font(circle_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(circle_lbl, lv_color_hex(0x60AADF), 0);
     lv_obj_center(circle_lbl);
+
+    // Show only page 0 tracks initially
+    seq_page = 0;
+    seq_apply_page();
 }
 
 void ui_update_sequencer() {
@@ -677,7 +769,22 @@ void ui_update_sequencer() {
 
     static int prev_step = -1;
     static int prev_column = -2;
+    static int prev_page = -1;
     static uint8_t prev_grid_state[Config::MAX_TRACKS][Config::MAX_STEPS];
+
+    int page_start = seq_page * SEQ_TRACKS_PER_PAGE;
+    int page_end   = page_start + SEQ_TRACKS_PER_PAGE;
+
+    // On page change, force full grid refresh for visible tracks
+    if (seq_page != prev_page) {
+        prev_page = seq_page;
+        for (int t = page_start; t < page_end; t++) {
+            for (int s = 0; s < Config::MAX_STEPS; s++) {
+                prev_grid_state[t][s] = 0xFF;  // force redraw
+            }
+        }
+        prev_column = -2;  // force column highlight refresh
+    }
 
     // Update step highlight label only when step changes
     if (lbl_step_indicator && currentStep != prev_step) {
@@ -695,8 +802,6 @@ void ui_update_sequencer() {
             if (seq_step_leds[prev_column]) {
                 lv_obj_set_style_bg_color(seq_step_leds[prev_column],
                     (prev_column % 4 == 0) ? lv_color_hex(0x2A2A2A) : lv_color_hex(0x1A1A1A), 0);
-                lv_obj_set_style_bg_opa(seq_step_leds[prev_column], LV_OPA_COVER, 0);
-                lv_obj_set_style_shadow_width(seq_step_leds[prev_column], 0, 0);
             }
         }
         // --- Active column: show overlay + bright LED strip ---
@@ -707,42 +812,48 @@ void ui_update_sequencer() {
             }
             if (seq_step_leds[active_column]) {
                 lv_obj_set_style_bg_color(seq_step_leds[active_column], RED808_WARNING, 0);
-                lv_obj_set_style_bg_opa(seq_step_leds[active_column], LV_OPA_COVER, 0);
-                lv_obj_set_style_shadow_width(seq_step_leds[active_column], 16, 0);
-                lv_obj_set_style_shadow_color(seq_step_leds[active_column], RED808_WARNING, 0);
-                lv_obj_set_style_shadow_opa(seq_step_leds[active_column], LV_OPA_70, 0);
+            }
+        }
+
+        // Update ONLY visible tracks (8) in the 2 changed columns
+        for (int t = page_start; t < page_end; t++) {
+            if (prev_column >= 0 && prev_column < Config::MAX_STEPS && seq_grid[t][prev_column]) {
+                bool active = patterns[currentPattern].steps[t][prev_column];
+                prev_grid_state[t][prev_column] = active ? 1 : 0;
+                lv_obj_set_style_bg_color(seq_grid[t][prev_column],
+                    active ? inst_colors[t] : RED808_SURFACE, 0);
+                lv_obj_set_style_border_width(seq_grid[t][prev_column], 0, 0);
+            }
+            if (active_column >= 0 && active_column < Config::MAX_STEPS && seq_grid[t][active_column]) {
+                bool active = patterns[currentPattern].steps[t][active_column];
+                prev_grid_state[t][active_column] = (active ? 1 : 0) | 2;
+                lv_obj_set_style_bg_color(seq_grid[t][active_column],
+                    active ? lv_color_white() : lv_color_hex(0x504000), 0);
+                lv_obj_set_style_border_width(seq_grid[t][active_column], 2, 0);
+                lv_obj_set_style_border_color(seq_grid[t][active_column], RED808_WARNING, 0);
             }
         }
         prev_column = active_column;
     }
 
-    // Update grid state - only changed cells
-    for (int t = 0; t < Config::MAX_TRACKS; t++) {
+    // Update visible grid state - only cells whose pattern data changed (toggle)
+    for (int t = page_start; t < page_end; t++) {
         for (int s = 0; s < Config::MAX_STEPS; s++) {
-            if (seq_grid[t][s]) {
-                bool active = patterns[currentPattern].steps[t][s];
-                bool isCurrentStep = (s == currentStep && isPlaying);
-                uint8_t state = (isCurrentStep ? 2 : 0) | (active ? 1 : 0);
-
-                if (state != prev_grid_state[t][s]) {
-                    prev_grid_state[t][s] = state;
-                    if (isCurrentStep) {
-                        lv_obj_set_style_bg_color(seq_grid[t][s],
-                            active ? lv_color_white() : lv_color_hex(0x504000), 0);
-                        lv_obj_set_style_bg_opa(seq_grid[t][s], LV_OPA_COVER, 0);
-                        lv_obj_set_style_border_width(seq_grid[t][s], 3, 0);
-                        lv_obj_set_style_border_color(seq_grid[t][s], RED808_WARNING, 0);
-                        lv_obj_set_style_shadow_width(seq_grid[t][s], active ? 12 : 0, 0);
-                        lv_obj_set_style_shadow_color(seq_grid[t][s], RED808_WARNING, 0);
-                        lv_obj_set_style_shadow_opa(seq_grid[t][s], LV_OPA_50, 0);
-                    } else {
-                        lv_obj_set_style_bg_color(seq_grid[t][s],
-                            active ? inst_colors[t] : RED808_SURFACE, 0);
-                        lv_obj_set_style_bg_opa(seq_grid[t][s], LV_OPA_COVER, 0);
-                        lv_obj_set_style_border_width(seq_grid[t][s], 0, 0);
-                        lv_obj_set_style_border_color(seq_grid[t][s], RED808_BORDER, 0);
-                        lv_obj_set_style_shadow_width(seq_grid[t][s], 0, 0);
-                    }
+            if (!seq_grid[t][s]) continue;
+            bool active = patterns[currentPattern].steps[t][s];
+            bool isActive = (s == currentStep && isPlaying);
+            uint8_t state = (isActive ? 2 : 0) | (active ? 1 : 0);
+            if (state != prev_grid_state[t][s]) {
+                prev_grid_state[t][s] = state;
+                if (isActive) {
+                    lv_obj_set_style_bg_color(seq_grid[t][s],
+                        active ? lv_color_white() : lv_color_hex(0x504000), 0);
+                    lv_obj_set_style_border_width(seq_grid[t][s], 2, 0);
+                    lv_obj_set_style_border_color(seq_grid[t][s], RED808_WARNING, 0);
+                } else {
+                    lv_obj_set_style_bg_color(seq_grid[t][s],
+                        active ? inst_colors[t] : RED808_SURFACE, 0);
+                    lv_obj_set_style_border_width(seq_grid[t][s], 0, 0);
                 }
             }
         }
@@ -1288,100 +1399,394 @@ void ui_update_patterns() {
 }
 
 // ============================================================================
-// SPECTRUM SCREEN - Animated spectrum analyzer bars
+// SD CARD FILE BROWSER SCREEN
+// Browse SD folder/file tree → select file → assign to pad → send loadSample
+// UDP: {"cmd":"loadSample","family":"BD","filename":"BD_01.wav","pad":0}
+// SD folder structure: /BD/BD_01.wav, /SD/..., etc.
 // ============================================================================
-static lv_obj_t* spectrum_bars[Config::MAX_TRACKS] = {};
-static lv_obj_t* spectrum_peak[Config::MAX_TRACKS] = {};
-static int spectrum_heights[Config::MAX_TRACKS] = {};
-static int spectrum_peaks[Config::MAX_TRACKS] = {};
-static uint32_t spectrum_last_update = 0;
+#include <SD_MMC.h>
+#include <FS.h>
 
-void ui_create_spectrum_screen() {
-    scr_spectrum = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr_spectrum, RED808_BG, 0);
-    ui_create_header(scr_spectrum);
+// Layout constants
+static constexpr int SD_LEFT_W  = 580;   // file browser panel width
+static constexpr int SD_RIGHT_W = 420;   // pad assignment panel width
+static constexpr int SD_TOP     = 60;    // below header
+static constexpr int SD_H       = 540;   // panel height
 
-    int bar_w = 48;
-    int gap = (1024 - 16 * bar_w) / 17;
-    int bar_max_h = 480;
-    int y_bottom = 570;
+// SD state
+static bool sd_mounted = false;
+static bool sd_init_attempted = false;
 
-    for (int t = 0; t < Config::MAX_TRACKS; t++) {
-        int x = gap + t * (bar_w + gap);
+// Navigation state
+static char sd_current_dir[128] = "/";
+static char sd_current_family[32] = "";
+static char sd_current_file[64] = "";
+static int  sd_selected_pad = 0;
+static int  sd_file_scroll_offset = 0;
 
-        // Bar (grows upward from bottom)
-        lv_obj_t* bar = lv_obj_create(scr_spectrum);
-        lv_obj_set_size(bar, bar_w, 20);
-        lv_obj_set_pos(bar, x, y_bottom - 20);
-        lv_obj_set_style_bg_color(bar, inst_colors[t], 0);
-        lv_obj_set_style_bg_opa(bar, LV_OPA_90, 0);
-        lv_obj_set_style_radius(bar, 4, 0);
-        lv_obj_set_style_border_width(bar, 0, 0);
-        lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-        spectrum_bars[t] = bar;
+// UI widgets
+static lv_obj_t* sd_left_panel  = NULL;
+static lv_obj_t* sd_right_panel = NULL;
+static lv_obj_t* sd_status_lbl  = NULL;
+static lv_obj_t* sd_path_lbl    = NULL;
+static lv_obj_t* sd_file_list   = NULL;  // scrollable container
+static lv_obj_t* sd_selected_lbl = NULL;
+static lv_obj_t* sd_pad_btns[Config::MAX_TRACKS] = {};
+static lv_obj_t* sd_load_btn    = NULL;
+static lv_obj_t* sd_load_lbl    = NULL;
 
-        // Peak indicator (thin line)
-        lv_obj_t* peak = lv_obj_create(scr_spectrum);
-        lv_obj_set_size(peak, bar_w, 3);
-        lv_obj_set_pos(peak, x, y_bottom - 24);
-        lv_obj_set_style_bg_color(peak, lv_color_white(), 0);
-        lv_obj_set_style_bg_opa(peak, LV_OPA_90, 0);
-        lv_obj_set_style_radius(peak, 1, 0);
-        lv_obj_set_style_border_width(peak, 0, 0);
-        lv_obj_clear_flag(peak, LV_OBJ_FLAG_SCROLLABLE);
-        spectrum_peak[t] = peak;
+// Forward declarations
+static void sd_refresh_filelist();
+static void sd_file_btn_cb(lv_event_t* e);
+static void sd_pad_btn_cb(lv_event_t* e);
+static void sd_load_btn_cb(lv_event_t* e);
+static void sd_back_btn_cb(lv_event_t* e);
 
-        // Track name at bottom
-        lv_obj_t* name = lv_label_create(scr_spectrum);
-        lv_label_set_text(name, trackNames[t]);
-        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(name, inst_colors[t], 0);
-        lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_pos(name, x, y_bottom + 4);
-        lv_obj_set_width(name, bar_w);
+// Send loadSample UDP  (also callable from outside)
+void ui_sdcard_send_load_sample(int pad, const char* family, const char* filename) {
+    JsonDocument doc;
+    doc["cmd"]      = "loadSample";
+    doc["family"]   = family;
+    doc["filename"] = filename;
+    doc["pad"]      = pad;
+    sendUDPCommand(doc);
+    Serial.printf("[SD] LoadSample pad=%d family=%s file=%s\n", pad, family, filename);
+}
 
-        spectrum_heights[t] = 20;
-        spectrum_peaks[t] = 24;
+// Mount SD card via SD_MMC (1-bit mode)
+static bool sd_try_mount() {
+    if (sd_mounted) return true;
+    // Drive EXIO4 (D3/CS) HIGH so the card enters SDMMC mode (not SPI)
+    io_ext_sd_disable();  // EXIO4=1 → D3 pulled high
+    delay(10);
+    SD_MMC.setPins(SD_CLK_PIN, SD_CMD_PIN, SD_D0_PIN);
+    if (!SD_MMC.begin(SD_MOUNT_POINT, true /* 1-bit mode */)) {
+        Serial.println("[SD] Mount failed");
+        return false;
+    }
+    uint8_t cardType = SD_MMC.cardType();
+    if (cardType == CARD_NONE) {
+        Serial.println("[SD] No SD card");
+        SD_MMC.end();
+        return false;
+    }
+    sd_mounted = true;
+    Serial.printf("[SD] Mounted OK. Type=%d Size=%lluMB\n", cardType,
+                  SD_MMC.cardSize() / (1024ULL * 1024ULL));
+    return true;
+}
+
+// Populate file list from sd_current_dir
+static void sd_refresh_filelist() {
+    if (!sd_left_panel) return;
+    if (!sd_file_list) return;
+
+    // Clear existing items
+    lv_obj_clean(sd_file_list);
+
+    // Update path label
+    if (sd_path_lbl) lv_label_set_text(sd_path_lbl, sd_current_dir);
+
+    if (!sd_mounted) {
+        lv_obj_t* lbl = lv_label_create(sd_file_list);
+        lv_label_set_text(lbl, "SD NOT MOUNTED");
+        lv_obj_set_style_text_color(lbl, RED808_ACCENT, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_20, 0);
+        return;
+    }
+
+    // "Back" button if we're in a subfolder
+    if (strcmp(sd_current_dir, "/") != 0) {
+        lv_obj_t* back_btn = lv_btn_create(sd_file_list);
+        lv_obj_set_size(back_btn, 540, 44);
+        lv_obj_set_style_bg_color(back_btn, lv_color_hex(0x333344), 0);
+        lv_obj_set_style_radius(back_btn, 6, 0);
+        lv_obj_t* back_lbl = lv_label_create(back_btn);
+        lv_label_set_text(back_lbl, LV_SYMBOL_LEFT "  .. (back)");
+        lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(back_lbl, lv_color_hex(0xCCCCCC), 0);
+        lv_obj_center(back_lbl);
+        lv_obj_add_event_cb(back_btn, sd_back_btn_cb, LV_EVENT_CLICKED, NULL);
+    }
+
+    // List directory contents
+    File dir = SD_MMC.open(sd_current_dir);
+    if (!dir || !dir.isDirectory()) {
+        lv_obj_t* lbl = lv_label_create(sd_file_list);
+        lv_label_set_text(lbl, "Cannot open directory");
+        lv_obj_set_style_text_color(lbl, RED808_WARNING, 0);
+        return;
+    }
+
+    int count = 0;
+    File entry = dir.openNextFile();
+    while (entry && count < 80) {
+        const char* name = entry.name();
+        bool is_dir = entry.isDirectory();
+
+        // Skip hidden files
+        if (name[0] == '.') { entry.close(); entry = dir.openNextFile(); continue; }
+        // Only show .wav/.WAV files and directories
+        if (!is_dir) {
+            size_t nlen = strlen(name);
+            bool is_wav = (nlen > 4 &&
+                           (strcasecmp(name + nlen - 4, ".wav") == 0));
+            if (!is_wav) { entry.close(); entry = dir.openNextFile(); continue; }
+        }
+
+        lv_obj_t* btn = lv_btn_create(sd_file_list);
+        lv_obj_set_size(btn, 540, 44);
+        lv_obj_set_style_radius(btn, 6, 0);
+
+        lv_color_t btn_color = is_dir ? lv_color_hex(0x1A3A5C) : lv_color_hex(0x1A2A1A);
+        lv_obj_set_style_bg_color(btn, btn_color, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x446688), LV_STATE_PRESSED);
+
+        lv_obj_t* lbl = lv_label_create(btn);
+        char display[80];
+        snprintf(display, sizeof(display), is_dir ? LV_SYMBOL_DIRECTORY "  %s" : LV_SYMBOL_AUDIO "  %s", name);
+        lv_label_set_text(lbl, display);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(lbl, is_dir ? RED808_CYAN : RED808_SUCCESS, 0);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
+
+        // Store entry name in user data (heap allocated, freed on lv_obj_clean)
+        char* name_copy = (char*)lv_mem_alloc(strlen(name) + 2);
+        if (name_copy) {
+            name_copy[0] = is_dir ? 'D' : 'F';  // D=dir, F=file prefix
+            strcpy(name_copy + 1, name);
+            lv_obj_set_user_data(btn, name_copy);
+            lv_obj_add_event_cb(btn, sd_file_btn_cb, LV_EVENT_CLICKED, name_copy);
+        }
+
+        count++;
+        entry.close();
+        entry = dir.openNextFile();
+    }
+    dir.close();
+
+    if (count == 0) {
+        lv_obj_t* lbl = lv_label_create(sd_file_list);
+        lv_label_set_text(lbl, "No files found (.wav)");
+        lv_obj_set_style_text_color(lbl, RED808_TEXT_DIM, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
     }
 }
 
-void ui_update_spectrum() {
-    int bar_max_h = 480;
-    int y_bottom = 570;
+// Click on a directory → navigate into it; click on file → select it
+static void sd_file_btn_cb(lv_event_t* e) {
+    char* data = (char*)lv_event_get_user_data(e);
+    if (!data) return;
+    char type = data[0];
+    const char* name = data + 1;
 
-    for (int t = 0; t < Config::MAX_TRACKS; t++) {
-        // Height based on track volume (proportional)
-        int target_h = (trackVolumes[t] * bar_max_h) / Config::MAX_VOLUME;
-        if (target_h < 4) target_h = 4;
-
-        // Add some variation based on step for animation effect
-        if (isPlaying) {
-            int variation = ((currentStep + t * 3) % 7) * (target_h / 14);
-            target_h = constrain(target_h + variation - target_h / 7, 4, bar_max_h);
-        }
-
-        // Smooth: rise fast, fall slow
-        if (target_h > spectrum_heights[t]) {
-            spectrum_heights[t] = target_h;  // instant rise
+    if (type == 'D') {
+        // Navigate into directory
+        if (strcmp(sd_current_dir, "/") == 0) {
+            snprintf(sd_current_dir, sizeof(sd_current_dir), "/%s", name);
+            strncpy(sd_current_family, name, sizeof(sd_current_family) - 1);
+            sd_current_family[sizeof(sd_current_family) - 1] = '\0';
         } else {
-            spectrum_heights[t] = spectrum_heights[t] - (spectrum_heights[t] - target_h) / 4 - 1;
-            if (spectrum_heights[t] < 4) spectrum_heights[t] = 4;
+            // Subdir — append (not typical for drum machines but handle anyway)
+            char tmp[128];
+            snprintf(tmp, sizeof(tmp), "%s/%s", sd_current_dir, name);
+            strncpy(sd_current_dir, tmp, sizeof(sd_current_dir) - 1);
         }
+        sd_current_file[0] = '\0';
+        sd_refresh_filelist();
+        if (sd_selected_lbl) lv_label_set_text(sd_selected_lbl, "");
+    } else {
+        // Select file
+        strncpy(sd_current_file, name, sizeof(sd_current_file) - 1);
+        sd_current_file[sizeof(sd_current_file) - 1] = '\0';
+        char sel[128];
+        snprintf(sel, sizeof(sel), "%s / %s", sd_current_family, sd_current_file);
+        if (sd_selected_lbl) lv_label_set_text(sd_selected_lbl, sel);
+        if (sd_load_btn) lv_obj_clear_state(sd_load_btn, LV_STATE_DISABLED);
+    }
+}
 
-        int h = spectrum_heights[t];
-        if (spectrum_bars[t]) {
-            lv_obj_set_size(spectrum_bars[t], 48, h);
-            lv_obj_set_pos(spectrum_bars[t], lv_obj_get_x(spectrum_bars[t]), y_bottom - h);
-        }
+// Back button: go up one level
+static void sd_back_btn_cb(lv_event_t* e) {
+    (void)e;
+    // Go to root
+    strncpy(sd_current_dir, "/", sizeof(sd_current_dir));
+    sd_current_family[0] = '\0';
+    sd_current_file[0] = '\0';
+    if (sd_selected_lbl) lv_label_set_text(sd_selected_lbl, "");
+    if (sd_load_btn) lv_obj_add_state(sd_load_btn, LV_STATE_DISABLED);
+    sd_refresh_filelist();
+}
 
-        // Peak: falls slowly
-        if (h > spectrum_peaks[t]) spectrum_peaks[t] = h + 4;
-        else spectrum_peaks[t] = spectrum_peaks[t] > 5 ? spectrum_peaks[t] - 1 : 5;
+// Select target pad (0-15)
+static void sd_pad_btn_cb(lv_event_t* e) {
+    int pad = (int)(intptr_t)lv_event_get_user_data(e);
+    if (pad < 0 || pad >= Config::MAX_TRACKS) return;
+    // Update highlight
+    for (int i = 0; i < Config::MAX_TRACKS; i++) {
+        if (!sd_pad_btns[i]) continue;
+        lv_color_t c = (i == pad) ? RED808_ACCENT : lv_color_hex(0x222233);
+        lv_obj_set_style_bg_color(sd_pad_btns[i], c, 0);
+    }
+    sd_selected_pad = pad;
+}
 
-        if (spectrum_peak[t]) {
-            lv_obj_set_pos(spectrum_peak[t], lv_obj_get_x(spectrum_peak[t]), y_bottom - spectrum_peaks[t]);
+// Load button: send loadSample UDP
+static void sd_load_btn_cb(lv_event_t* e) {
+    (void)e;
+    if (sd_current_file[0] == '\0' || sd_current_family[0] == '\0') return;
+    ui_sdcard_send_load_sample(sd_selected_pad, sd_current_family, sd_current_file);
+    // Visual feedback: flash load button
+    if (sd_load_lbl) lv_label_set_text(sd_load_lbl, LV_SYMBOL_OK "  LOADED!");
+    lv_timer_t* t = lv_timer_create([](lv_timer_t* t) {
+        if (sd_load_lbl) lv_label_set_text(sd_load_lbl,
+            LV_SYMBOL_UPLOAD "  LOAD TO PAD");
+        lv_timer_del(t);
+    }, 1200, NULL);
+    (void)t;
+}
+
+void ui_create_sdcard_screen() {
+    scr_sdcard = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr_sdcard, RED808_BG, 0);
+    ui_create_header(scr_sdcard);
+
+    // ── Left Panel: file browser ──────────────────────────────────────────
+    sd_left_panel = lv_obj_create(scr_sdcard);
+    lv_obj_set_size(sd_left_panel, SD_LEFT_W, SD_H);
+    lv_obj_set_pos(sd_left_panel, 4, SD_TOP);
+    lv_obj_set_style_bg_color(sd_left_panel, lv_color_hex(0x0D1520), 0);
+    lv_obj_set_style_border_color(sd_left_panel, RED808_INFO, 0);
+    lv_obj_set_style_border_width(sd_left_panel, 1, 0);
+    lv_obj_set_style_radius(sd_left_panel, 8, 0);
+    lv_obj_set_style_pad_all(sd_left_panel, 8, 0);
+    lv_obj_clear_flag(sd_left_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Title row
+    lv_obj_t* title_lbl = lv_label_create(sd_left_panel);
+    lv_label_set_text(title_lbl, LV_SYMBOL_DRIVE "  SD CARD BROWSER");
+    lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(title_lbl, RED808_CYAN, 0);
+    lv_obj_set_pos(title_lbl, 8, 4);
+
+    // Status label
+    sd_status_lbl = lv_label_create(sd_left_panel);
+    lv_label_set_text(sd_status_lbl, sd_mounted ? "READY" : "NO SD CARD");
+    lv_obj_set_style_text_font(sd_status_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(sd_status_lbl, sd_mounted ? RED808_SUCCESS : RED808_WARNING, 0);
+    lv_obj_set_pos(sd_status_lbl, 420, 8);
+
+    // Path label
+    sd_path_lbl = lv_label_create(sd_left_panel);
+    lv_label_set_text(sd_path_lbl, "/");
+    lv_obj_set_style_text_font(sd_path_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(sd_path_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(sd_path_lbl, 8, 30);
+
+    // Scrollable file list container
+    sd_file_list = lv_obj_create(sd_left_panel);
+    lv_obj_set_size(sd_file_list, 556, 460);
+    lv_obj_set_pos(sd_file_list, 4, 54);
+    lv_obj_set_style_bg_opa(sd_file_list, LV_OPA_0, 0);
+    lv_obj_set_style_border_width(sd_file_list, 0, 0);
+    lv_obj_set_style_pad_row(sd_file_list, 4, 0);
+    lv_obj_set_style_pad_all(sd_file_list, 2, 0);
+    lv_obj_set_flex_flow(sd_file_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(sd_file_list, LV_DIR_VER);
+    lv_obj_add_flag(sd_file_list, LV_OBJ_FLAG_SCROLLABLE);
+
+    // ── Right Panel: pad assignment ───────────────────────────────────────
+    sd_right_panel = lv_obj_create(scr_sdcard);
+    lv_obj_set_size(sd_right_panel, SD_RIGHT_W, SD_H);
+    lv_obj_set_pos(sd_right_panel, SD_LEFT_W + 8, SD_TOP);
+    lv_obj_set_style_bg_color(sd_right_panel, lv_color_hex(0x0D1520), 0);
+    lv_obj_set_style_border_color(sd_right_panel, RED808_ACCENT, 0);
+    lv_obj_set_style_border_width(sd_right_panel, 1, 0);
+    lv_obj_set_style_radius(sd_right_panel, 8, 0);
+    lv_obj_set_style_pad_all(sd_right_panel, 8, 0);
+    lv_obj_clear_flag(sd_right_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    // "ASSIGN TO PAD" title
+    lv_obj_t* assign_lbl = lv_label_create(sd_right_panel);
+    lv_label_set_text(assign_lbl, "ASSIGN TO PAD");
+    lv_obj_set_style_text_font(assign_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(assign_lbl, RED808_ACCENT, 0);
+    lv_obj_set_pos(assign_lbl, 8, 4);
+
+    // 4x4 pad grid (pads 0-15)
+    int pad_w = 84, pad_h = 50, pad_gap = 6;
+    int px_start = 16, py_start = 36;
+    for (int i = 0; i < Config::MAX_TRACKS; i++) {
+        int col = i % 4;
+        int row = i / 4;
+        int px = px_start + col * (pad_w + pad_gap);
+        int py = py_start + row * (pad_h + pad_gap);
+
+        lv_obj_t* btn = lv_btn_create(sd_right_panel);
+        lv_obj_set_size(btn, pad_w, pad_h);
+        lv_obj_set_pos(btn, px, py);
+        lv_obj_set_style_bg_color(btn, i == 0 ? RED808_ACCENT : lv_color_hex(0x222233), 0);
+        lv_obj_set_style_radius(btn, 6, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0x444466), 0);
+
+        lv_obj_t* num_lbl = lv_label_create(btn);
+        char num_str[8];
+        snprintf(num_str, sizeof(num_str), "%s\n%d", trackNames[i], i);
+        lv_label_set_text(num_lbl, num_str);
+        lv_obj_set_style_text_font(num_lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(num_lbl, inst_colors[i], 0);
+        lv_obj_set_style_text_align(num_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(num_lbl);
+
+        sd_pad_btns[i] = btn;
+        lv_obj_add_event_cb(btn, sd_pad_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    }
+
+    // Selected file label
+    sd_selected_lbl = lv_label_create(sd_right_panel);
+    lv_label_set_text(sd_selected_lbl, "");
+    lv_obj_set_width(sd_selected_lbl, 390);
+    lv_obj_set_style_text_font(sd_selected_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(sd_selected_lbl, RED808_SUCCESS, 0);
+    lv_obj_set_style_text_align(sd_selected_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(sd_selected_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(sd_selected_lbl, 12, 264);
+
+    // LOAD button
+    sd_load_btn = lv_btn_create(sd_right_panel);
+    lv_obj_set_size(sd_load_btn, 380, 60);
+    lv_obj_set_pos(sd_load_btn, 16, 320);
+    lv_obj_set_style_bg_color(sd_load_btn, RED808_ACCENT, 0);
+    lv_obj_set_style_bg_color(sd_load_btn, lv_color_hex(0x882200), LV_STATE_DISABLED);
+    lv_obj_set_style_radius(sd_load_btn, 10, 0);
+    lv_obj_add_state(sd_load_btn, LV_STATE_DISABLED);
+
+    sd_load_lbl = lv_label_create(sd_load_btn);
+    lv_label_set_text(sd_load_lbl, LV_SYMBOL_UPLOAD "  LOAD TO PAD");
+    lv_obj_set_style_text_font(sd_load_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(sd_load_lbl, lv_color_white(), 0);
+    lv_obj_center(sd_load_lbl);
+    lv_obj_add_event_cb(sd_load_btn, sd_load_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    // Mount SD card now (non-blocking approach — just try once)
+    if (!sd_init_attempted) {
+        sd_init_attempted = true;
+        sd_mounted = sd_try_mount();
+        if (sd_status_lbl) {
+            lv_label_set_text(sd_status_lbl, sd_mounted ? "READY" : "NO SD CARD");
+            lv_obj_set_style_text_color(sd_status_lbl,
+                sd_mounted ? RED808_SUCCESS : RED808_WARNING, 0);
         }
     }
+
+    // Populate file list
+    sd_refresh_filelist();
+}
+
+void ui_update_sdcard() {
+    // Nothing to animate; all interaction is event-driven
+    (void)0;
 }
 
 // ============================================================================
@@ -1637,4 +2042,249 @@ void ui_create_boot_screen() {
 
     // Start animation timer: 240 ms between line reveals (~2.6 s total)
     boot_timer = lv_timer_create(boot_timer_cb, 240, NULL);
+}
+
+// ============================================================================
+// CIRCULAR SEQUENCER SCREEN
+// ============================================================================
+
+static void circ_track_btn_cb(lv_event_t* e) {
+    int t = (int)(intptr_t)lv_event_get_user_data(e);
+    selectedTrack = t;
+}
+
+static void circ_step_btn_cb(lv_event_t* e) {
+    int s = (int)(intptr_t)lv_event_get_user_data(e);
+    patterns[currentPattern].steps[selectedTrack][s] ^= 1;
+}
+
+void ui_create_seq_circle_screen() {
+    scr_seq_circle = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr_seq_circle, RED808_BG, 0);
+    lv_obj_clear_flag(scr_seq_circle, LV_OBJ_FLAG_SCROLLABLE);
+    ui_create_header(scr_seq_circle);
+
+    // --- CIRCLE AREA (left half) ---
+    // Decorative ring outline
+    lv_obj_t* ring = lv_obj_create(scr_seq_circle);
+    lv_coord_t ring_d = (lv_coord_t)(CIRC_R * 2 + CIRC_PAD + 8);
+    lv_obj_set_size(ring, ring_d, ring_d);
+    lv_obj_set_pos(ring, CIRC_CX - ring_d / 2, CIRC_CY - ring_d / 2);
+    lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(ring, LV_OPA_0, 0);
+    lv_obj_set_style_border_width(ring, 1, 0);
+    lv_obj_set_style_border_color(ring, lv_color_hex(0x222222), 0);
+    lv_obj_set_style_border_opa(ring, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(ring, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    // Inner ring
+    lv_obj_t* inner_ring = lv_obj_create(scr_seq_circle);
+    lv_coord_t inn_d = (lv_coord_t)(CIRC_INNER_R * 2);
+    lv_obj_set_size(inner_ring, inn_d, inn_d);
+    lv_obj_set_pos(inner_ring, CIRC_CX - inn_d / 2, CIRC_CY - inn_d / 2);
+    lv_obj_set_style_radius(inner_ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(inner_ring, lv_color_hex(0x080808), 0);
+    lv_obj_set_style_bg_opa(inner_ring, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(inner_ring, 1, 0);
+    lv_obj_set_style_border_color(inner_ring, lv_color_hex(0x181818), 0);
+    lv_obj_clear_flag(inner_ring, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    // Center track info labels
+    lbl_circ_info = lv_label_create(scr_seq_circle);
+    lv_label_set_text_fmt(lbl_circ_info, "STEP  0 / %d", Config::MAX_STEPS);
+    lv_obj_set_style_text_font(lbl_circ_info, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lbl_circ_info, RED808_TEXT_DIM, 0);
+    lv_obj_set_style_text_align(lbl_circ_info, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(lbl_circ_info, CIRC_CX - 60, CIRC_CY - 26);
+    lv_obj_set_width(lbl_circ_info, 120);
+
+    circ_track_name_lbl = lv_label_create(scr_seq_circle);
+    lv_label_set_text(circ_track_name_lbl, trackNames[0]);
+    lv_obj_set_style_text_font(circ_track_name_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(circ_track_name_lbl, inst_colors[0], 0);
+    lv_obj_set_style_text_align(circ_track_name_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(circ_track_name_lbl, CIRC_CX - 60, CIRC_CY + 0);
+    lv_obj_set_width(circ_track_name_lbl, 120);
+
+    // 16 step buttons on the ring
+    for (int s = 0; s < Config::MAX_STEPS; s++) {
+        float angle = -(float)M_PI / 2.0f + s * 2.0f * (float)M_PI / (float)Config::MAX_STEPS;
+        int cx = CIRC_CX + (int)(cosf(angle) * CIRC_R);
+        int cy = CIRC_CY + (int)(sinf(angle) * CIRC_R);
+        circ_step_cx[s] = cx;
+        circ_step_cy[s] = cy;
+
+        lv_obj_t* btn = lv_btn_create(scr_seq_circle);
+        lv_obj_set_size(btn, CIRC_PAD, CIRC_PAD);
+        lv_obj_set_pos(btn, cx - CIRC_PAD / 2, cy - CIRC_PAD / 2);
+        lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(btn, RED808_SURFACE, 0);
+        lv_obj_set_style_bg_color(btn, RED808_SURFACE, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, RED808_BORDER, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_shadow_width(btn, 0, LV_STATE_PRESSED);
+        lv_obj_set_style_pad_all(btn, 0, 0);
+        lv_obj_add_event_cb(btn, circ_step_btn_cb, LV_EVENT_PRESSED, (void*)(intptr_t)s);
+
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text_fmt(lbl, "%d", s + 1);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, RED808_TEXT_DIM, 0);
+        lv_obj_center(lbl);
+
+        circ_step_btns[s] = btn;
+    }
+
+    // Playhead indicator — glowing dot that moves to the active step
+    circ_playhead = lv_obj_create(scr_seq_circle);
+    lv_obj_set_size(circ_playhead, CIRC_HEAD_SIZE, CIRC_HEAD_SIZE);
+    lv_obj_set_style_radius(circ_playhead, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(circ_playhead, RED808_WARNING, 0);
+    lv_obj_set_style_bg_opa(circ_playhead, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(circ_playhead, 0, 0);
+    lv_obj_set_style_shadow_width(circ_playhead, 18, 0);
+    lv_obj_set_style_shadow_color(circ_playhead, RED808_WARNING, 0);
+    lv_obj_set_style_shadow_opa(circ_playhead, LV_OPA_80, 0);
+    lv_obj_add_flag(circ_playhead, LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(circ_playhead, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    // Place at top of ring initially
+    lv_obj_set_pos(circ_playhead,
+        circ_step_cx[0] - CIRC_HEAD_SIZE / 2,
+        circ_step_cy[0] - CIRC_HEAD_SIZE / 2);
+
+    // --- TRACK SELECTOR (right panel) ---
+    // 16 track buttons in 2 columns of 8
+    static constexpr int PANEL_X  = 555;
+    static constexpr int BTN_W    = 200;
+    static constexpr int BTN_H    = 28;
+    static constexpr int BTN_GAP  = 6;
+    static constexpr int COL_GAP  = 10;
+    // Total height of one 8-button column
+    static constexpr int COL_H    = 8 * BTN_H + 7 * BTN_GAP;  // 266
+    // Vertically center in available area (y=78 to y=580 = 502px)
+    static constexpr int Y_START  = 78 + (502 - COL_H) / 2;   // ~196
+
+    for (int t = 0; t < Config::MAX_TRACKS; t++) {
+        int col = t / 8;
+        int row = t % 8;
+        int x   = PANEL_X + col * (BTN_W + COL_GAP);
+        int y   = Y_START + row * (BTN_H + BTN_GAP);
+
+        lv_obj_t* btn = lv_btn_create(scr_seq_circle);
+        lv_obj_set_size(btn, BTN_W, BTN_H);
+        lv_obj_set_pos(btn, x, y);
+        bool sel = (t == selectedTrack);
+        lv_obj_set_style_bg_color(btn, sel ? inst_colors[t] : RED808_SURFACE, 0);
+        lv_obj_set_style_bg_color(btn, sel ? inst_colors[t] : RED808_SURFACE, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, sel ? inst_colors[t] : RED808_BORDER, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_shadow_width(btn, 0, LV_STATE_PRESSED);
+
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text_fmt(lbl, "%2d  %s", t + 1, trackNames[t]);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, sel ? RED808_BG : inst_colors[t], 0);
+        lv_obj_center(lbl);
+
+        lv_obj_add_event_cb(btn, circ_track_btn_cb, LV_EVENT_PRESSED, (void*)(intptr_t)t);
+        circ_track_btns[t] = btn;
+    }
+}
+
+void ui_update_seq_circle() {
+    if (!scr_seq_circle) return;
+
+    static int prev_step  = -2;
+    static int prev_track = -1;
+
+    int active_step = (isPlaying && currentStep >= 0 && currentStep < Config::MAX_STEPS)
+                      ? currentStep : -1;
+
+    bool stepChanged  = (active_step != prev_step);
+    bool trackChanged = (selectedTrack != prev_track);
+
+    if (!stepChanged && !trackChanged) return;
+
+    // --- Update playhead ---
+    if (circ_playhead) {
+        if (active_step >= 0) {
+            lv_obj_set_pos(circ_playhead,
+                circ_step_cx[active_step] - CIRC_HEAD_SIZE / 2,
+                circ_step_cy[active_step] - CIRC_HEAD_SIZE / 2);
+            lv_obj_clear_flag(circ_playhead, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(circ_playhead, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    // --- Update center info ---
+    if (lbl_circ_info && stepChanged) {
+        lv_label_set_text_fmt(lbl_circ_info, "STEP %2d / %d",
+            active_step >= 0 ? active_step + 1 : 0, Config::MAX_STEPS);
+    }
+
+    // --- Update step buttons ---
+    for (int s = 0; s < Config::MAX_STEPS; s++) {
+        if (!circ_step_btns[s]) continue;
+
+        bool is_on      = patterns[currentPattern].steps[selectedTrack][s];
+        bool is_current = (s == active_step);
+
+        lv_color_t bg_col;
+        lv_color_t brd_col;
+        lv_coord_t brd_w;
+        lv_coord_t shad_w;
+
+        if (is_current) {
+            bg_col  = RED808_WARNING;
+            brd_col = lv_color_white();
+            brd_w   = 3;
+            shad_w  = 16;
+        } else if (is_on) {
+            bg_col  = inst_colors[selectedTrack];
+            brd_col = inst_colors[selectedTrack];
+            brd_w   = 1;
+            shad_w  = 8;
+        } else {
+            bg_col  = RED808_SURFACE;
+            brd_col = RED808_BORDER;
+            brd_w   = 1;
+            shad_w  = 0;
+        }
+
+        lv_obj_set_style_bg_color(circ_step_btns[s], bg_col, 0);
+        lv_obj_set_style_border_width(circ_step_btns[s], brd_w, 0);
+        lv_obj_set_style_border_color(circ_step_btns[s], brd_col, 0);
+        lv_obj_set_style_shadow_width(circ_step_btns[s], shad_w, 0);
+        if (shad_w > 0) {
+            lv_obj_set_style_shadow_color(circ_step_btns[s],
+                is_current ? RED808_WARNING : inst_colors[selectedTrack], 0);
+            lv_obj_set_style_shadow_opa(circ_step_btns[s], LV_OPA_60, 0);
+        }
+    }
+
+    // --- Update track selector buttons (only on track change) ---
+    if (trackChanged) {
+        for (int t = 0; t < Config::MAX_TRACKS; t++) {
+            if (!circ_track_btns[t]) continue;
+            bool sel = (t == selectedTrack);
+            lv_obj_set_style_bg_color(circ_track_btns[t], sel ? inst_colors[t] : RED808_SURFACE, 0);
+            lv_obj_set_style_border_color(circ_track_btns[t], sel ? inst_colors[t] : RED808_BORDER, 0);
+            // update label color
+            lv_obj_t* lbl = lv_obj_get_child(circ_track_btns[t], 0);
+            if (lbl) lv_obj_set_style_text_color(lbl, sel ? RED808_BG : inst_colors[t], 0);
+        }
+        if (circ_track_name_lbl) {
+            lv_obj_set_style_text_color(circ_track_name_lbl, inst_colors[selectedTrack], 0);
+            lv_label_set_text(circ_track_name_lbl, trackNames[selectedTrack]);
+        }
+        prev_track = selectedTrack;
+    }
+
+    prev_step = active_step;
 }
