@@ -110,6 +110,7 @@ extern int trackVolumes[];
 extern bool trackMuted[];
 extern bool livePadPressed[];
 extern bool byteButtonLivePressed[];
+extern uint8_t prevByteButtonState;  // ByteButton bitmask state for edge detection
 extern volatile uint32_t pendingLivePadTriggerMask;
 extern VolumeMode volumeMode;
 

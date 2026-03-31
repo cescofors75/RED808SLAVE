@@ -282,6 +282,7 @@ static bool navigateToScreen(Screen screen) {
 
     lv_obj_t* target = NULL;
     switch (screen) {
+        case SCREEN_BOOT:        target = scr_boot; break;
         case SCREEN_MENU:        target = scr_menu; break;
         case SCREEN_LIVE:        target = scr_live; break;
         case SCREEN_SEQUENCER:   target = scr_sequencer; break;
@@ -293,6 +294,7 @@ static bool navigateToScreen(Screen screen) {
         case SCREEN_SPECTRUM:    target = scr_spectrum; break;
         case SCREEN_PERFORMANCE: target = scr_performance; break;
         case SCREEN_SAMPLES:     target = scr_samples; break;
+        case SCREEN_SEQ_CIRCLE:  target = scr_seq_circle; break;
         default: break;
     }
 
@@ -303,6 +305,10 @@ static bool navigateToScreen(Screen screen) {
         liveScreenEnteredMs = millis();
         memset(livePadPressed, 0, sizeof(livePadPressed));
         pendingLivePadTriggerMask = 0;
+        // Sync ByteButton edge detection: assume all buttons were pressed so
+        // no phantom edges fire on the first handleByteButton() after entry.
+        prevByteButtonState = 0xFF;
+        memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
     }
 
     if (!lvgl_port_lock(20)) return false;
@@ -1086,15 +1092,26 @@ static void applyFxPreset(int pos) {
 
 void handleAnalogEncoder() {
     static int lastPosition = -1;
-    static uint32_t lastChangeMs = 0;
+    static unsigned long lastChangeMs = 0;
 
-    int raw = analogRead(Config::ANALOG_ENC_PIN);
-    // 12-position rotary: map ADC 0-4095 to position 0-11
+    // 8-sample average reduces ESP32-S3 ADC noise (±50 raw counts → ±6 after avg)
+    long sum = 0;
+    for (int i = 0; i < 8; i++) sum += analogRead(Config::ANALOG_ENC_PIN);
+    int raw = (int)(sum / 8);
+
+    // 12-position rotary: each zone spans ~341 ADC counts (4096/12)
     int position = (raw * 12) / 4096;
     if (position > 11) position = 11;
 
+    // Hysteresis: reject reads within 40 ADC counts of a zone boundary.
+    // This prevents oscillation when the rotary is near a detent edge.
+    int lower = position * 341;
+    int upper = lower + 341;
+    if ((raw - lower) < 40 || (upper - raw) < 40) return;
+
     if (position == lastPosition) return;
-    if (millis() - lastChangeMs < 200) return;  // debounce
+    if ((millis() - lastChangeMs) < 300) return;  // 300 ms debounce
+
     lastPosition = position;
     lastChangeMs = millis();
 
@@ -1109,9 +1126,11 @@ void handleAnalogEncoder() {
 void handleByteButton() {
     if (!byteButtonConnected) return;
 
-    // Read 8 individual per-button bytes from reg 0x60..0x67.
-    // Each byte: 0x01 = pressed, 0x00 = released (active-high, unambiguous).
-    uint8_t rawBytes[BYTEBUTTON_BUTTONS] = {};
+    // Read 1-byte bitmask from register 0x00.  Bit N = 1 if button N is pressed.
+    // (Reverted from 8-byte reg 0x60: block-read on I2C devices without guaranteed
+    //  address auto-increment returned the same byte 8 times, causing ALL pads to
+    //  fire simultaneously and "go crazy" in LIVE mode.)
+    uint8_t status = 0;
     bool readOk = false;
 
     if (i2c_lock(20)) {
@@ -1119,10 +1138,10 @@ void handleByteButton() {
         else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
 
         Wire.beginTransmission(BYTEBUTTON_ADDR);
-        Wire.write(BYTEBUTTON_STATUS_8BYTE_REG);
+        Wire.write(BYTEBUTTON_STATUS_REG);
         if (Wire.endTransmission(false) == 0 &&
-            Wire.requestFrom((uint8_t)BYTEBUTTON_ADDR, (uint8_t)BYTEBUTTON_BUTTONS) == BYTEBUTTON_BUTTONS) {
-            for (int i = 0; i < BYTEBUTTON_BUTTONS; i++) rawBytes[i] = Wire.read();
+            Wire.requestFrom((uint8_t)BYTEBUTTON_ADDR, (uint8_t)1) == 1) {
+            status = Wire.read();
             readOk = true;
         }
 
@@ -1131,12 +1150,6 @@ void handleByteButton() {
     }
 
     if (!readOk) return;
-
-    // Build bitmask (bit N=1 if button N pressed)
-    uint8_t status = 0;
-    for (int i = 0; i < BYTEBUTTON_BUTTONS; i++) {
-        if (rawBytes[i] == 0x01) status |= (1U << i);
-    }
 
     uint8_t previousState = prevByteButtonState;
     uint8_t pressedEdges = status & (uint8_t)~previousState;
@@ -1152,14 +1165,11 @@ void handleByteButton() {
         }
         int velocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
 
+        // Edge-only: fire once per physical press, no repeat
         for (int button = 0; button < BYTEBUTTON_BUTTONS && button < Config::MAX_SAMPLES; button++) {
-            bool isPressed = (status & (1U << button)) != 0;
-            byteButtonLivePressed[button] = isPressed;
-
+            byteButtonLivePressed[button] = false;  // don't feed repeat loop
             if ((pressedEdges & (1U << button)) == 0) continue;
-
             sendLivePadTrigger(button, velocity);
-            lastLivePadTriggerMs[button] = now;
         }
     } else {
         memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
@@ -1340,6 +1350,7 @@ void setup() {
     if (lvgl_port_lock(1000)) {
         ui_theme_init();
 
+        ui_create_boot_screen();      // boot animation — shown first; auto-navigates to menu
         ui_create_menu_screen();
         ui_create_live_screen();
         ui_create_sequencer_screen();
@@ -1352,9 +1363,9 @@ void setup() {
         ui_create_performance_screen();
         ui_create_samples_screen();
 
-        // Start on menu
-        currentScreen = SCREEN_MENU;
-        lv_scr_load(scr_menu);
+        // Start on boot animation; boot_timer_cb() will navigate to SCREEN_MENU when complete
+        currentScreen = SCREEN_BOOT;
+        lv_scr_load(scr_boot);
 
         lvgl_port_unlock();
         Serial.println("[UI] All screens created");
@@ -1409,12 +1420,7 @@ void loop() {
         lastLivePadTriggerMs[pad] = now;
     }
 
-    for (int pad = 0; pad < BYTEBUTTON_BUTTONS && pad < Config::MAX_SAMPLES; pad++) {
-        if (!byteButtonLivePressed[pad]) continue;
-        if ((now - lastLivePadTriggerMs[pad]) < Config::LIVE_PAD_REPEAT_MS) continue;
-        sendLivePadTrigger(pad, padVelocity);
-        lastLivePadTriggerMs[pad] = now;
-    }
+    // ByteButton: single-shot on press edge only (no repeat — physical buttons sustain too long)
 
     // Encoder polling (50ms interval)
     if (now - lastEncoderRead >= Config::ENCODER_READ_MS) {

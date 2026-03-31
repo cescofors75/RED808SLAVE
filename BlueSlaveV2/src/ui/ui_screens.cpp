@@ -226,6 +226,10 @@ static void nav_to(Screen screen, lv_obj_t* scr) {
         liveScreenEnteredMs = millis();
         memset(livePadPressed, 0, sizeof(bool) * Config::MAX_SAMPLES);
         pendingLivePadTriggerMask = 0;
+        // Sync ByteButton edge-detection state: assume all buttons "were pressed"
+        // so no phantom edge fires on first handleByteButton() after entering LIVE.
+        prevByteButtonState = 0xFF;
+        memset(byteButtonLivePressed, 0, sizeof(bool) * BYTEBUTTON_BUTTONS);
     }
 
     currentScreen = screen;
@@ -1529,4 +1533,108 @@ void ui_create_samples_screen() {
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_center(lbl);
     }
+}
+
+// ============================================================================
+// BOOT SCREEN — TRON / 80s terminal intro animation
+// ============================================================================
+
+static void boot_timer_cb(lv_timer_t* timer) {
+    if (boot_state < kBootLineCount) {
+        // Reveal the next line
+        lv_obj_t* line = boot_text_lines[boot_state];
+        if (line) {
+            lv_obj_clear_flag(line, LV_OBJ_FLAG_HIDDEN);
+            // Keep current line at full opacity; dim previous to 60%
+            lv_obj_set_style_opa(line, LV_OPA_COVER, 0);
+            if (boot_state > 0 && boot_text_lines[boot_state - 1]) {
+                lv_obj_set_style_opa(boot_text_lines[boot_state - 1], LV_OPA_60, 0);
+            }
+        }
+        boot_state++;
+
+        // When last line is revealed: slow down and blink cursor
+        if (boot_state == kBootLineCount) {
+            lv_timer_set_period(timer, 900);
+            if (boot_cursor_lbl) {
+                lv_obj_clear_flag(boot_cursor_lbl, LV_OBJ_FLAG_HIDDEN);
+                lv_anim_t a;
+                lv_anim_init(&a);
+                lv_anim_set_var(&a, boot_cursor_lbl);
+                lv_anim_set_exec_cb(&a, anim_opa_cb);
+                lv_anim_set_values(&a, LV_OPA_COVER, LV_OPA_TRANSP);
+                lv_anim_set_time(&a, 420);
+                lv_anim_set_playback_time(&a, 420);
+                lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+                lv_anim_start(&a);
+            }
+            if (boot_status_lbl) {
+                lv_label_set_text(boot_status_lbl, "[ BOOT COMPLETE — LOADING INTERFACE... ]");
+                lv_obj_set_style_text_opa(boot_status_lbl, LV_OPA_COVER, 0);
+            }
+        }
+    } else {
+        // All lines done — navigate to menu
+        lv_timer_del(timer);
+        boot_timer = NULL;
+        if (boot_cursor_lbl) lv_anim_del(boot_cursor_lbl, anim_opa_cb);
+        nav_to(SCREEN_MENU, scr_menu);
+    }
+}
+
+void ui_create_boot_screen() {
+    scr_boot = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr_boot, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr_boot, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(scr_boot, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Title — TRON electric blue
+    lv_obj_t* title = lv_label_create(scr_boot);
+    lv_label_set_text(title, "RED808 SURFACE CONTROLLER  V6");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x00D4FF), 0);
+    lv_obj_set_pos(title, 40, 18);
+
+    // Thin separator
+    lv_obj_t* sep = lv_obj_create(scr_boot);
+    lv_obj_set_size(sep, 944, 2);
+    lv_obj_set_pos(sep, 40, 62);
+    lv_obj_set_style_bg_color(sep, lv_color_hex(0x00FF41), 0);
+    lv_obj_set_style_bg_opa(sep, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(sep, 0, 0);
+    lv_obj_clear_flag(sep, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Text lines hidden until timer reveals them one by one
+    // 11 lines × 42 px = 462 px from y=78 → last line at y=498 (screen 600px)
+    for (int i = 0; i < kBootLineCount; i++) {
+        lv_obj_t* lbl = lv_label_create(scr_boot);
+        lv_label_set_text(lbl, kBootLines[i]);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0x39FF14), 0);  // terminal green
+        lv_obj_set_pos(lbl, 40, 78 + i * 42);
+        lv_obj_add_flag(lbl, LV_OBJ_FLAG_HIDDEN);
+        boot_text_lines[i] = lbl;
+    }
+
+    // Blinking cursor — appears below the last line after sequence completes
+    boot_cursor_lbl = lv_label_create(scr_boot);
+    lv_label_set_text(boot_cursor_lbl, "_ ");
+    lv_obj_set_style_text_font(boot_cursor_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(boot_cursor_lbl, lv_color_hex(0x39FF14), 0);
+    lv_obj_set_pos(boot_cursor_lbl, 40, 78 + kBootLineCount * 42);
+    lv_obj_add_flag(boot_cursor_lbl, LV_OBJ_FLAG_HIDDEN);
+
+    // Status bar at bottom
+    boot_status_lbl = lv_label_create(scr_boot);
+    lv_label_set_text(boot_status_lbl, "[ INITIALIZING... ]");
+    lv_obj_set_style_text_font(boot_status_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(boot_status_lbl, lv_color_hex(0x00FF41), 0);
+    lv_obj_set_style_text_opa(boot_status_lbl, LV_OPA_50, 0);
+    lv_obj_set_pos(boot_status_lbl, 40, 560);
+
+    // Reset state
+    boot_state = 0;
+
+    // Start animation timer: 240 ms between line reveals (~2.6 s total)
+    boot_timer = lv_timer_create(boot_timer_cb, 240, NULL);
 }
