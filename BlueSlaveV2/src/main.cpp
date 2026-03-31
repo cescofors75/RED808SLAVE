@@ -54,6 +54,7 @@ int livePadsVolume = 100;
 int trackVolumes[Config::MAX_TRACKS];
 VolumeMode volumeMode = VOL_SEQUENCER;
 bool trackMuted[Config::MAX_TRACKS];
+bool trackSolo[Config::MAX_TRACKS];
 bool livePadPressed[Config::MAX_SAMPLES];
 volatile uint32_t pendingLivePadTriggerMask = 0;
 
@@ -328,6 +329,7 @@ void initState() {
     for (int i = 0; i < Config::MAX_TRACKS; i++) {
         trackVolumes[i] = Config::DEFAULT_TRACK_VOLUME;
         trackMuted[i] = false;
+        trackSolo[i] = false;
         trackFilters[i] = {false, 0, 0, 0};
     }
     for (int i = 0; i < Config::MAX_SAMPLES; i++) {

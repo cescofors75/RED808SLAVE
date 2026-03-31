@@ -12,6 +12,7 @@
 #include <math.h>
 
 extern void sendUDPCommand(JsonDocument& doc);
+extern void sendUDPCommand(const char* cmd);
 
 // Screen objects
 lv_obj_t* scr_menu = NULL;
@@ -47,6 +48,9 @@ static lv_obj_t* lbl_menu_transport = NULL;
 // Sequencer grid buttons
 static lv_obj_t* seq_grid[Config::MAX_TRACKS][Config::MAX_STEPS];
 static lv_obj_t* seq_track_labels[Config::MAX_TRACKS];
+static lv_obj_t* seq_track_panels[Config::MAX_TRACKS]; // container: label + S + M
+static lv_obj_t* seq_solo_btns[Config::MAX_TRACKS];
+static lv_obj_t* seq_mute_btns[Config::MAX_TRACKS];
 static lv_obj_t* lbl_step_indicator = NULL;
 static lv_obj_t* seq_column_highlights[Config::MAX_STEPS];
 static lv_obj_t* seq_step_leds[Config::MAX_STEPS];  // LED strip below grid
@@ -620,15 +624,123 @@ static void seq_step_cb(lv_event_t* e) {
     bool active = patterns[currentPattern].steps[track][step];
     lv_obj_set_style_bg_color(lv_event_get_target(e),
         active ? inst_colors[track] : RED808_SURFACE, 0);
+    // Send step toggle to master
+    char buf[80];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"toggleStep\",\"track\":%d,\"step\":%d,\"active\":%s}",
+        track, step, active ? "true" : "false");
+    sendUDPCommand(buf);
+}
+
+// Is track effectively silent? (muted directly, or muted by another track's solo)
+static bool isTrackEffectivelyMuted(int track) {
+    for (int t = 0; t < Config::MAX_TRACKS; t++) {
+        if (trackSolo[t]) return (track != t); // solo active: only solo'd track is audible
+    }
+    return trackMuted[track];
+}
+
+static void seq_update_solo_mute_visuals(int track) {
+    bool effMuted = isTrackEffectivelyMuted(track);
+
+    // Solo button
+    if (seq_solo_btns[track]) {
+        lv_obj_set_style_bg_color(seq_solo_btns[track],
+            trackSolo[track] ? lv_color_hex(0xFFD700) : RED808_SURFACE, 0);
+        lv_obj_set_style_bg_opa(seq_solo_btns[track], LV_OPA_COVER, 0);
+        lv_obj_t* lbl = lv_obj_get_child(seq_solo_btns[track], 0);
+        if (lbl) lv_obj_set_style_text_color(lbl,
+            trackSolo[track] ? RED808_BG : RED808_TEXT_DIM, 0);
+    }
+    // Mute button
+    if (seq_mute_btns[track]) {
+        lv_obj_set_style_bg_color(seq_mute_btns[track],
+            trackMuted[track] ? lv_color_hex(0xFF3030) : RED808_SURFACE, 0);
+        lv_obj_set_style_bg_opa(seq_mute_btns[track], LV_OPA_COVER, 0);
+        lv_obj_t* lbl = lv_obj_get_child(seq_mute_btns[track], 0);
+        if (lbl) lv_obj_set_style_text_color(lbl,
+            trackMuted[track] ? lv_color_white() : RED808_TEXT_DIM, 0);
+    }
+    // Track panel: solo'd = gold border, muted = dim + red border, normal = default
+    if (seq_track_panels[track]) {
+        if (trackSolo[track]) {
+            lv_obj_set_style_bg_opa(seq_track_panels[track], LV_OPA_70, 0);
+            lv_obj_set_style_border_width(seq_track_panels[track], 2, 0);
+            lv_obj_set_style_border_color(seq_track_panels[track], lv_color_hex(0xFFD700), 0);
+        } else if (effMuted) {
+            lv_obj_set_style_bg_opa(seq_track_panels[track], LV_OPA_20, 0);
+            lv_obj_set_style_border_width(seq_track_panels[track], 1, 0);
+            lv_obj_set_style_border_color(seq_track_panels[track], lv_color_hex(0xFF3030), 0);
+        } else {
+            lv_obj_set_style_bg_opa(seq_track_panels[track], LV_OPA_40, 0);
+            lv_obj_set_style_border_width(seq_track_panels[track], 0, 0);
+        }
+    }
+    // Track label dim when muted
+    if (seq_track_labels[track]) {
+        lv_obj_set_style_text_opa(seq_track_labels[track],
+            effMuted ? LV_OPA_40 : LV_OPA_COVER, 0);
+    }
+    // Grid cells: dim when effectively muted
+    for (int s = 0; s < Config::MAX_STEPS; s++) {
+        if (seq_grid[track][s]) {
+            lv_obj_set_style_bg_opa(seq_grid[track][s],
+                effMuted ? LV_OPA_30 : LV_OPA_COVER, 0);
+        }
+    }
+}
+
+static void seq_solo_cb(lv_event_t* e) {
+    int track = (int)(intptr_t)lv_event_get_user_data(e);
+
+    if (trackSolo[track]) {
+        // Un-solo: clear and restore original mute states
+        trackSolo[track] = false;
+        for (int t = 0; t < Config::MAX_TRACKS; t++) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"mute\",\"track\":%d,\"value\":%s}",
+                t, trackMuted[t] ? "true" : "false");
+            sendUDPCommand(buf);
+            seq_update_solo_mute_visuals(t);
+        }
+    } else {
+        // Solo this track EXCLUSIVELY — clear all others
+        for (int t = 0; t < Config::MAX_TRACKS; t++) trackSolo[t] = false;
+        trackSolo[track] = true;
+        for (int t = 0; t < Config::MAX_TRACKS; t++) {
+            bool shouldMute = (t != track);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"mute\",\"track\":%d,\"value\":%s}",
+                t, shouldMute ? "true" : "false");
+            sendUDPCommand(buf);
+            seq_update_solo_mute_visuals(t);
+        }
+    }
+}
+
+static void seq_mute_cb(lv_event_t* e) {
+    int track = (int)(intptr_t)lv_event_get_user_data(e);
+    trackMuted[track] = !trackMuted[track];
+
+    // Send to master only if this track's audible state actually changes
+    bool anySolo = false;
+    for (int t = 0; t < Config::MAX_TRACKS; t++) if (trackSolo[t]) { anySolo = true; break; }
+
+    if (!anySolo || trackSolo[track]) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "{\"cmd\":\"mute\",\"track\":%d,\"value\":%s}",
+            track, trackMuted[track] ? "true" : "false");
+        sendUDPCommand(buf);
+    }
+    seq_update_solo_mute_visuals(track);
 }
 
 static void seq_apply_page() {
     int page_start = seq_page * SEQ_TRACKS_PER_PAGE;
     for (int t = 0; t < Config::MAX_TRACKS; t++) {
         bool visible = (t >= page_start && t < page_start + SEQ_TRACKS_PER_PAGE);
-        if (seq_track_labels[t]) {
-            if (visible) lv_obj_clear_flag(seq_track_labels[t], LV_OBJ_FLAG_HIDDEN);
-            else         lv_obj_add_flag(seq_track_labels[t], LV_OBJ_FLAG_HIDDEN);
+        if (seq_track_panels[t]) {
+            if (visible) lv_obj_clear_flag(seq_track_panels[t], LV_OBJ_FLAG_HIDDEN);
+            else         lv_obj_add_flag(seq_track_panels[t], LV_OBJ_FLAG_HIDDEN);
         }
         for (int s = 0; s < Config::MAX_STEPS; s++) {
             if (seq_grid[t][s]) {
@@ -649,18 +761,78 @@ void ui_create_sequencer_screen() {
 
     lv_obj_t* shell = create_section_shell(scr_sequencer, 16, 78, 992, 506);
 
-    int grid_x = 80, grid_y = 55;
-    int cell_w = 56, cell_h = 58, gap = 2;  // taller cells for 8-track view
+    // Layout
+    int label_col_w = 78;              // wider column for name + S + M
+    int grid_x = label_col_w + 8;      // grid starts after label column
+    int grid_y = 55;
+    int cell_w = 54, cell_h = 58, gap = 2;  // slightly narrower to fit
 
-    // Track labels (positioned for 8 visible rows)
+    // Track panels: container with name + S + M buttons (positioned for 8 visible rows)
     for (int t = 0; t < Config::MAX_TRACKS; t++) {
         int row = t % SEQ_TRACKS_PER_PAGE;
-        lv_obj_t* lbl = lv_label_create(scr_sequencer);
+        int panel_y = grid_y + row * (cell_h + gap);
+
+        // Panel container
+        lv_obj_t* panel = lv_obj_create(scr_sequencer);
+        lv_obj_set_size(panel, label_col_w, cell_h);
+        lv_obj_set_pos(panel, 2, panel_y);
+        lv_obj_set_style_bg_color(panel, RED808_PANEL, 0);
+        lv_obj_set_style_bg_opa(panel, LV_OPA_40, 0);
+        lv_obj_set_style_border_width(panel, 0, 0);
+        lv_obj_set_style_radius(panel, 4, 0);
+        lv_obj_set_style_pad_all(panel, 2, 0);
+        lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+        seq_track_panels[t] = panel;
+
+        // Track name label (top of panel)
+        lv_obj_t* lbl = lv_label_create(panel);
         lv_label_set_text(lbl, trackNames[t]);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(lbl, inst_colors[t], 0);
-        lv_obj_set_pos(lbl, 8, grid_y + row * (cell_h + gap) + 20);
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 0);
         seq_track_labels[t] = lbl;
+
+        // S button (Solo) — bottom left
+        lv_obj_t* btn_s = lv_btn_create(panel);
+        lv_obj_set_size(btn_s, 32, 24);
+        lv_obj_align(btn_s, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+        lv_obj_set_style_bg_color(btn_s, RED808_SURFACE, 0);
+        lv_obj_set_style_bg_opa(btn_s, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(btn_s, RED808_SURFACE, LV_STATE_PRESSED);
+        lv_obj_set_style_radius(btn_s, 4, 0);
+        lv_obj_set_style_border_width(btn_s, 1, 0);
+        lv_obj_set_style_border_color(btn_s, lv_color_hex(0xFFD700), 0);
+        lv_obj_set_style_pad_all(btn_s, 0, 0);
+        lv_obj_set_style_shadow_width(btn_s, 0, 0);
+        lv_obj_set_style_shadow_width(btn_s, 0, LV_STATE_PRESSED);
+        lv_obj_add_event_cb(btn_s, seq_solo_cb, LV_EVENT_PRESSED, (void*)(intptr_t)t);
+        lv_obj_t* lbl_s = lv_label_create(btn_s);
+        lv_label_set_text(lbl_s, "S");
+        lv_obj_set_style_text_font(lbl_s, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl_s, RED808_TEXT_DIM, 0);
+        lv_obj_center(lbl_s);
+        seq_solo_btns[t] = btn_s;
+
+        // M button (Mute) — bottom right
+        lv_obj_t* btn_m = lv_btn_create(panel);
+        lv_obj_set_size(btn_m, 32, 24);
+        lv_obj_align(btn_m, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+        lv_obj_set_style_bg_color(btn_m, RED808_SURFACE, 0);
+        lv_obj_set_style_bg_opa(btn_m, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(btn_m, RED808_SURFACE, LV_STATE_PRESSED);
+        lv_obj_set_style_radius(btn_m, 4, 0);
+        lv_obj_set_style_border_width(btn_m, 1, 0);
+        lv_obj_set_style_border_color(btn_m, lv_color_hex(0xFF3030), 0);
+        lv_obj_set_style_pad_all(btn_m, 0, 0);
+        lv_obj_set_style_shadow_width(btn_m, 0, 0);
+        lv_obj_set_style_shadow_width(btn_m, 0, LV_STATE_PRESSED);
+        lv_obj_add_event_cb(btn_m, seq_mute_cb, LV_EVENT_PRESSED, (void*)(intptr_t)t);
+        lv_obj_t* lbl_m = lv_label_create(btn_m);
+        lv_label_set_text(lbl_m, "M");
+        lv_obj_set_style_text_font(lbl_m, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl_m, RED808_TEXT_DIM, 0);
+        lv_obj_center(lbl_m);
+        seq_mute_btns[t] = btn_m;
     }
 
     // Step column highlights (sized for 8 tracks)
@@ -714,7 +886,7 @@ void ui_create_sequencer_screen() {
         seq_step_leds[s] = led;
     }
 
-    // Bottom bar: Step indicator + PAGE button + CIRCULAR button
+    // Bottom bar
     int bottom_y = led_y + 14;
 
     lbl_step_indicator = lv_label_create(scr_sequencer);

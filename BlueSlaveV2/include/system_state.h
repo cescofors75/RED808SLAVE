@@ -108,6 +108,7 @@ extern int sequencerVolume;
 extern int livePadsVolume;
 extern int trackVolumes[];
 extern bool trackMuted[];
+extern bool trackSolo[];
 extern bool livePadPressed[];
 extern bool byteButtonLivePressed[];
 extern uint8_t prevByteButtonState;  // ByteButton bitmask state for edge detection
