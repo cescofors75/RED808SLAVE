@@ -156,6 +156,7 @@ void receiveUDPData();
 void requestPatternFromMaster();
 void sendPlayStateCommand(bool shouldPlay);
 void selectPatternOnMaster(int patternIndex);
+void sendFullPatternToMaster(int pat);
 void sendLivePadTrigger(int pad, int velocity);
 void sendFilterUDP(int track, int fxType);
 void scanI2CHub();
@@ -184,6 +185,9 @@ static void requestMasterSync() {
     sendUDPCommand(doc);
     requestPatternFromMaster();
     requestTrackVolumesFromMaster();
+
+    // Upload demo pattern 7 (index 6) to master
+    sendFullPatternToMaster(6);
 }
 
 static int quantizeDFDelta(int index, int16_t delta) {
@@ -342,6 +346,35 @@ void initState() {
         char _nb[12]; snprintf(_nb, sizeof(_nb), "Pattern %d", p + 1);
         patterns[p].name = _nb;
     }
+
+    // ── DEMO PATTERN 7 (index 6): Full 808 beat with all 16 instruments ──
+    // Track layout: BD=0 SD=1 CH=2 OH=3 CL=4 CP=5 CB=6 TM=7
+    //               CY=8 MA=9 RS=10 LC=11 MC=12 HC=13 LT=14 HT=15
+    // Steps:        0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
+    {
+        const uint16_t demo[16] = {
+            0b1000100010001000,  //  0 BD:  1 . . . 5 . . . 9 . . . 13 . . .
+            0b0000100000001000,  //  1 SD:  . . . . 5 . . . . . . . 13 . . .
+            0b1010101010101010,  //  2 CH:  1 . 3 . 5 . 7 . 9 . 11 . 13 . 15 .
+            0b0000000010000000,  //  3 OH:  . . . . . . . . 9 . .  .  .  . .  .
+            0b0000100000001000,  //  4 CL:  . . . . 5 . . . . . . . 13 . . .
+            0b0000000000001000,  //  5 CP:  . . . . . . . . . . . . 13 . . .
+            0b1000001000100010,  //  6 CB:  1 . . . . . 7 . . 9 . . . . 15 .
+            0b0010000000100000,  //  7 TM:  . . 3 . . . . . . . 11 .  .  . .  .
+            0b1000000000000000,  //  8 CY:  1 . . . . . . . . . .  .  .  . .  .
+            0b0101010101010101,  //  9 MA:  . 2 . 4 . 6 . 8 . 10 . 12 . 14 . 16
+            0b0000100000000000,  // 10 RS:  . . . . 5 . . . . .  .  .  .  .  .  .
+            0b1000000010000000,  // 11 LC:  1 . . . . . . . 9 .  .  .  .  .  .  .
+            0b0000100000001000,  // 12 MC:  . . . . 5 . . . . . .  . 13 .  .  .
+            0b0010000000100000,  // 13 HC:  . . 3 . . . . . . . 11 .  .  .  .  .
+            0b1000000000001000,  // 14 LT:  1 . . . . . . . . .  .  . 13 .  .  .
+            0b0000000010000010,  // 15 HT:  . . . . . . . . 9 .  .  .  .  . 15 .
+        };
+        for (int t = 0; t < 16; t++)
+            for (int s = 0; s < 16; s++)
+                patterns[6].steps[t][s] = (demo[t] >> (15 - s)) & 1;
+        patterns[6].name = "FULL 808";
+    }
     for (int i = 0; i < Config::MAX_TRACKS; i++) prevM5Counter[i] = 0;
     for (int i = 0; i < DFROBOT_ENCODER_COUNT; i++) prevDFValue[i] = 0;
     prevByteButtonState = 0;
@@ -482,6 +515,32 @@ void selectPatternOnMaster(int patternIndex) {
 
     // Request the new pattern data from master
     requestPatternFromMaster();
+}
+
+// Send full local pattern to master (all 16 tracks × 16 steps)
+void sendFullPatternToMaster(int pat) {
+    if (pat < 0 || pat >= Config::MAX_PATTERNS) return;
+    // First select the pattern on master
+    {
+        JsonDocument doc;
+        doc["cmd"] = "selectPattern";
+        doc["index"] = pat;
+        sendUDPCommand(doc);
+    }
+    delay(50);  // give master time to switch
+    // Send each active step
+    for (int t = 0; t < Config::MAX_TRACKS; t++) {
+        for (int s = 0; s < Config::MAX_STEPS; s++) {
+            if (patterns[pat].steps[t][s]) {
+                char buf[80];
+                snprintf(buf, sizeof(buf),
+                    "{\"cmd\":\"setStep\",\"track\":%d,\"step\":%d,\"active\":true}", t, s);
+                sendUDPCommand(buf);
+                delay(5);  // small delay to avoid UDP flood
+            }
+        }
+    }
+    Serial.printf("[DEMO] Sent pattern %d to master (%d tracks)\n", pat, Config::MAX_TRACKS);
 }
 
 void sendLivePadTrigger(int pad, int velocity) {
