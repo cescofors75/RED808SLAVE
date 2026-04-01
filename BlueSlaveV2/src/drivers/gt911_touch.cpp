@@ -198,7 +198,8 @@ TouchPoint gt911_read() {
     if (!gt911_ok) return tp;
 
     // Use global I2C mutex (called from LVGL task on Core 1)
-    if (!i2c_lock(10)) return tp;
+    // Timeout must be short to avoid deadlock with Core 0 encoder reads
+    if (!i2c_lock(8)) return tp;
 
     uint8_t status = 0;
     if (!gt911_read_reg(GT911_REG_STATUS, &status, 1)) {

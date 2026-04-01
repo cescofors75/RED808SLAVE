@@ -438,7 +438,7 @@ void checkWiFiReconnect() {
         if (!wifiConnected) {
             wifiConnected = true;
             wifiReconnecting = false;
-            udp.stop();  // Asegura socket limpio antes de bind
+            udp.stop();
             udpConnected = udp.begin(WiFiConfig::UDP_PORT);
             diagInfo.wifiOk = true;
             diagInfo.udpConnected = udpConnected;
@@ -460,21 +460,21 @@ void checkWiFiReconnect() {
 
     unsigned long now_wifi = millis();
 
-    // FIX: wifiReconnecting nunca se reseteaba si WiFi no conectaba → ningún reintento
-    // Después del timeout de intento, volver a permitir un nuevo ciclo de reconexión
+    // Non-blocking reconnection: just issue WiFi.begin() and let
+    // WiFi.setAutoReconnect(true) handle it in the background.
+    // No polling loop — check result on next loop() iteration.
     if (wifiReconnecting && (now_wifi - lastWiFiCheck > WiFiConfig::RECONNECT_ATTEMPT_TIMEOUT_MS)) {
         wifiReconnecting = false;
-        Serial.println("[WiFi] Intento de reconexion agotado, reintentando...");
     }
 
     if (!wifiReconnecting && (now_wifi - lastWiFiCheck > WiFiConfig::RECONNECT_INTERVAL_MS)) {
         lastWiFiCheck = now_wifi;
         wifiReconnecting = true;
-        WiFi.disconnect(false);   // No bloqueante
+        WiFi.disconnect(false);
         WiFi.mode(WIFI_STA);
         WiFi.setSleep(false);
         WiFi.begin(WiFiConfig::SSID, WiFiConfig::PASSWORD);
-        Serial.printf("[WiFi] Reconectando a '%s'...\n", WiFiConfig::SSID);
+        // Returns immediately — no blocking wait!
     }
 }
 
@@ -1329,10 +1329,10 @@ void handleAnalogEncoder() {
     static int  calMax = 0;
     static int  calSamples = 0;
 
-    // 32-sample average per call — heavy averaging for ESP32-S3 ADC noise
+    // 16-sample average per call — sufficient for ESP32-S3 ADC noise
     long sum = 0;
-    for (int i = 0; i < 32; i++) sum += analogRead(Config::ANALOG_ENC_PIN);
-    int raw = (int)(sum / 32);
+    for (int i = 0; i < 16; i++) sum += analogRead(Config::ANALOG_ENC_PIN);
+    int raw = (int)(sum / 16);
 
     // Store in ring buffer
     ring[ringIdx] = raw;
@@ -1526,7 +1526,7 @@ void updateUI() {
         }
     }
 
-    if (!lvgl_port_lock(5)) return;
+    if (!lvgl_port_lock(15)) return;  // 15ms: give LVGL task time to finish
 
     ui_update_header();
 

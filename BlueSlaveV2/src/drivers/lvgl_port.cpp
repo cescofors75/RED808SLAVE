@@ -37,7 +37,7 @@ static bool IRAM_ATTR lvgl_on_vsync(esp_lcd_panel_handle_t panel,
 static inline void wait_vsync() {
     if (!vsync_sem) return;
     xSemaphoreTake(vsync_sem, 0);               // drain any stale signal
-    xSemaphoreTake(vsync_sem, pdMS_TO_TICKS(50)); // wait for real vsync
+    xSemaphoreTake(vsync_sem, pdMS_TO_TICKS(20)); // wait for real vsync (LCD ~16.7ms)
 }
 
 // Flush: direct_mode — LVGL rendered into our buffer, copy dirty rects to panel FB
@@ -78,8 +78,9 @@ static void lvgl_task(void* arg) {
             lv_timer_handler();
             lvgl_port_unlock();
         }
-        // Fixed 8ms period (~125 Hz timer handler, but actual LCD is ~60 Hz)
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(8));
+        // 16ms period — matches 60Hz LCD refresh. Halves Core 1 load &
+        // I2C contention vs 8ms, with no visible difference.
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(16));
     }
 }
 

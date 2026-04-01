@@ -137,7 +137,7 @@ namespace Config {
     constexpr int DEFAULT_TRACK_VOLUME = 75;
 
     // Timing
-    constexpr uint32_t ENCODER_READ_MS    = 10;
+    constexpr uint32_t ENCODER_READ_MS    = 20;  // 50Hz polling — encoders keep state, no loss
     constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
     constexpr uint32_t LED_FLASH_MS       = 100;
     constexpr uint32_t SCREEN_UPDATE_MS   = 33;  // ~30fps UI update from Core 0 — reduce LVGL lock contention
