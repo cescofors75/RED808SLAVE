@@ -978,6 +978,122 @@ static inline void m5_write_track_led(M5ROTATE8& mod, int enc, int track) {
     mod.writeRGB(enc, (rgb[0]*br)/255, (rgb[1]*br)/255, (rgb[2]*br)/255);
 }
 
+// =============================================================================
+// BOOT LED ANIMATION — sweeps all hardware LEDs as a tester
+// =============================================================================
+static int  bootLedPhase = 0;        // which LED we're lighting (0..24)
+static unsigned long bootLedLastMs = 0;
+static bool bootLedDone = false;
+
+// Ocean blue palette — 9 tones for ByteButton, cycling for M5
+static const uint32_t oceanBlues[] = {
+    0x001F5C, 0x003380, 0x0050A0, 0x0070C0, 0x0090E0,
+    0x00A8FF, 0x00C0FF, 0x00D4FF, 0x33E0FF,
+};
+
+static void setByteButtonLedDirect(int index, uint32_t color) {
+    if (!byteButtonConnected || !byteButtonLedInitialized) return;
+    if (index < 0 || index >= BYTEBUTTON_LED_COUNT) return;
+    if (!i2c_lock(15)) return;
+    if (byteButtonHubChannel >= 0) i2c_hub_select_raw(byteButtonHubChannel);
+    else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
+    byteButtonWriteBytes(BYTEBUTTON_LED_RGB888_REG + index * 4, (uint8_t*)&color, 4);
+    byteButtonLedCache[index] = color;
+    if (byteButtonHubChannel >= 0) i2c_hub_deselect_raw();
+    i2c_unlock();
+}
+
+static void setM5EncoderLedDirect(int module, int enc, uint8_t r, uint8_t g, uint8_t b) {
+    if (module < 0 || module >= M5_ENCODER_MODULES) return;
+    if (!m5encoderConnected[module]) return;
+    int ch = m5HubChannel[module];
+    if (ch < 0) return;
+    if (!i2c_lock(15)) return;
+    i2c_hub_select_raw(ch);
+    m5encoders[module].writeRGB(enc, r, g, b);
+    i2c_hub_deselect_raw();
+    i2c_unlock();
+}
+
+// Called from loop() while SCREEN_BOOT — lights LEDs one by one in a rainbow sweep
+void bootLedAnimation() {
+    if (bootLedDone) return;
+    unsigned long now = millis();
+    if (now - bootLedLastMs < 120) return;  // 120ms between LED activations
+    bootLedLastMs = now;
+
+    // Total LEDs: M5 module 0 (8) + M5 module 1 (8) + ByteButton (9) = 25
+    // Phase 0-7:   M5 #0 encoders 0-7 (rainbow sweep)
+    // Phase 8-15:  M5 #1 encoders 0-7 (rainbow sweep)
+    // Phase 16-24: ByteButton LEDs 0-8 (ocean blue)
+
+    if (bootLedPhase < 8) {
+        // M5 module 0 — rainbow test
+        uint8_t hue = bootLedPhase * 32;  // spread across hue wheel
+        uint8_t r, g, b;
+        // Simple HSV-like hue to RGB (s=1, v=200)
+        uint8_t region = hue / 43;
+        uint8_t remainder = (hue - (region * 43)) * 6;
+        switch (region) {
+            case 0: r = 200; g = remainder * 200 / 255; b = 0; break;
+            case 1: r = 200 - remainder * 200 / 255; g = 200; b = 0; break;
+            case 2: r = 0; g = 200; b = remainder * 200 / 255; break;
+            case 3: r = 0; g = 200 - remainder * 200 / 255; b = 200; break;
+            case 4: r = remainder * 200 / 255; g = 0; b = 200; break;
+            default: r = 200; g = 0; b = 200 - remainder * 200 / 255; break;
+        }
+        setM5EncoderLedDirect(0, bootLedPhase, r, g, b);
+    } else if (bootLedPhase < 16) {
+        // M5 module 1 — rainbow test
+        int enc = bootLedPhase - 8;
+        uint8_t hue = enc * 32;
+        uint8_t r, g, b;
+        uint8_t region = hue / 43;
+        uint8_t remainder = (hue - (region * 43)) * 6;
+        switch (region) {
+            case 0: r = 200; g = remainder * 200 / 255; b = 0; break;
+            case 1: r = 200 - remainder * 200 / 255; g = 200; b = 0; break;
+            case 2: r = 0; g = 200; b = remainder * 200 / 255; break;
+            case 3: r = 0; g = 200 - remainder * 200 / 255; b = 200; break;
+            case 4: r = remainder * 200 / 255; g = 0; b = 200; break;
+            default: r = 200; g = 0; b = 200 - remainder * 200 / 255; break;
+        }
+        setM5EncoderLedDirect(1, enc, r, g, b);
+    } else if (bootLedPhase < 25) {
+        // ByteButton — ocean blue tones
+        int idx = bootLedPhase - 16;
+        setByteButtonLedDirect(idx, oceanBlues[idx]);
+    }
+
+    bootLedPhase++;
+    if (bootLedPhase >= 25) {
+        bootLedDone = true;
+        Serial.println("[BOOT] LED test sequence complete");
+    }
+}
+
+// Set all LEDs to ocean blue palette (called when entering menu from boot)
+void setOceanBlueLeds() {
+    // M5 encoders — deep to bright blue gradient across 16 encoders
+    for (int mod = 0; mod < M5_ENCODER_MODULES; mod++) {
+        if (!m5encoderConnected[mod]) continue;
+        for (int enc = 0; enc < ENCODERS_PER_MODULE; enc++) {
+            int idx = mod * ENCODERS_PER_MODULE + enc;
+            // Gradient from dark navy (0,20,90) to bright cyan (0,180,255)
+            uint8_t r = 0;
+            uint8_t g = 20 + idx * 11;   // 20..195
+            uint8_t b = 90 + idx * 11;   // 90..265 → clamped
+            if (b > 255) b = 255;
+            setM5EncoderLedDirect(mod, enc, r, g, b);
+        }
+    }
+    // ByteButton — ocean blue palette with high contrast
+    for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
+        setByteButtonLedDirect(i, oceanBlues[i]);
+    }
+    Serial.println("[LED] Ocean blue theme applied");
+}
+
 void handleM5Encoders() {
     static bool prevBtnState[Config::MAX_TRACKS] = {};
     static unsigned long lastBtnToggle[Config::MAX_TRACKS] = {};
@@ -1202,45 +1318,81 @@ static void applyFxPreset(int pos) {
 
 void handleAnalogEncoder() {
     static int  lastPosition = -1;
-    static int  stableRaw    = -1;   // last accepted raw after deadband filter
     static unsigned long lastChangeMs = 0;
-    // Self-calibrating ADC range: tracks actual min/max seen from the hardware.
-    // Many analog rotary encoders only span a fraction of the 0-3.3V range;
-    // calibrating automatically avoids hard-coding wrong limits.
-    static int  calMin = 4095;  // lowest ADC value ever read
-    static int  calMax = 0;     // highest ADC value ever read
+    // Ring buffer for robust median filtering
+    static constexpr int RING_SIZE = 8;
+    static int ring[RING_SIZE] = {};
+    static int ringIdx = 0;
+    static bool ringFull = false;
+    // Self-calibrating ADC range with noise margin
+    static int  calMin = 4095;
+    static int  calMax = 0;
+    static int  calSamples = 0;
 
-    // 16-sample average — reduces ESP32-S3 ADC noise
+    // 32-sample average per call — heavy averaging for ESP32-S3 ADC noise
     long sum = 0;
-    for (int i = 0; i < 16; i++) sum += analogRead(Config::ANALOG_ENC_PIN);
-    int raw = (int)(sum / 16);
+    for (int i = 0; i < 32; i++) sum += analogRead(Config::ANALOG_ENC_PIN);
+    int raw = (int)(sum / 32);
 
-    // Update calibration bounds continuously
-    if (raw < calMin) calMin = raw;
-    if (raw > calMax) calMax = raw;
+    // Store in ring buffer
+    ring[ringIdx] = raw;
+    ringIdx = (ringIdx + 1) % RING_SIZE;
+    if (!ringFull && ringIdx == 0) ringFull = true;
 
-    // Deadband: ignore small fluctuations around the last stable reading.
-    if (stableRaw >= 0 && abs(raw - stableRaw) < 60) return;
-    stableRaw = raw;
+    // Need at least 4 samples before processing
+    int count = ringFull ? RING_SIZE : ringIdx;
+    if (count < 4) return;
 
-    // Map using calibrated range once we have seen enough spread (>= 200 ADC counts).
-    // Until calibrated, fall back to full-range formula.
-    int position;
-    if ((calMax - calMin) >= 200) {
-        position = constrain((int)map(raw, calMin, calMax, 0, 11), 0, 11);
-    } else {
-        position = constrain((raw * 12 + 2048) / 4096, 0, 11);
+    // Compute median of ring buffer (sort copy)
+    int sorted[RING_SIZE];
+    for (int i = 0; i < count; i++) sorted[i] = ring[i];
+    for (int i = 0; i < count - 1; i++)
+        for (int j = i + 1; j < count; j++)
+            if (sorted[j] < sorted[i]) { int t = sorted[i]; sorted[i] = sorted[j]; sorted[j] = t; }
+    int median = sorted[count / 2];
+
+    // Update calibration with median (rejects noise spikes)
+    calSamples++;
+    if (calSamples > 10) {
+        if (median < calMin) calMin = median;
+        if (median > calMax) calMax = median;
     }
 
-    if (position == lastPosition) return;
-    if ((millis() - lastChangeMs) < 150) return;  // short debounce after detent cross
+    // Map using calibrated range
+    int position;
+    if ((calMax - calMin) >= 250) {
+        int margin = (calMax - calMin) / 20;  // 5% margin on edges
+        position = constrain((int)map(median, calMin + margin, calMax - margin, 0, 11), 0, 11);
+    } else {
+        position = constrain((median * 12 + 2048) / 4096, 0, 11);
+    }
+
+    // Hysteresis: require 3 consecutive agreeing reads at new position
+    static int candidatePos = -1;
+    static int candidateCount = 0;
+    if (position != lastPosition) {
+        if (position == candidatePos) {
+            candidateCount++;
+        } else {
+            candidatePos = position;
+            candidateCount = 1;
+        }
+        if (candidateCount < 3) return;
+        if ((millis() - lastChangeMs) < 200) return;
+    } else {
+        candidatePos = -1;
+        candidateCount = 0;
+        return;
+    }
 
     lastPosition = position;
     lastChangeMs = millis();
+    candidatePos = -1;
+    candidateCount = 0;
 
     analogFxPreset = position;
     applyFxPreset(position);
-    Serial.printf("[ROTARY] raw=%d cal=[%d..%d] pos=%d\n", raw, calMin, calMax, position);
+    Serial.printf("[ROTARY] median=%d cal=[%d..%d] pos=%d\n", median, calMin, calMax, position);
 }
 
 // =============================================================================
@@ -1522,6 +1674,20 @@ void loop() {
         lastUDPCheck = now;
         Serial.println("[UDP] Master not responding, resending hello...");
         requestMasterSync();
+    }
+
+    // Boot LED animation — sweep all hardware LEDs while POST screen is showing
+    if (currentScreen == SCREEN_BOOT) {
+        bootLedAnimation();
+    }
+
+    // Transition from boot → menu: apply ocean blue LED theme
+    {
+        static bool bootLedTransitionDone = false;
+        if (!bootLedTransitionDone && currentScreen != SCREEN_BOOT && bootLedDone) {
+            bootLedTransitionDone = true;
+            setOceanBlueLeds();
+        }
     }
 
     handleLivePadTouchMatrix(now);

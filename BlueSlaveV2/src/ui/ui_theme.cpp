@@ -171,6 +171,15 @@ static void restyle_recursive(lv_obj_t* obj,
                                const lv_color_t p_track[16], const lv_color_t c_track[16],
                                const lv_color_t p_ui[13],   const lv_color_t c_ui[13]) {
     if (!obj) return;
+    // Skip objects flagged as theme-immune (e.g. theme selector buttons)
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_USER_1)) {
+        // Still recurse into children though
+        uint32_t cnt = lv_obj_get_child_cnt(obj);
+        for (uint32_t i = 0; i < cnt; i++) {
+            restyle_recursive(lv_obj_get_child(obj, i), p_track, c_track, p_ui, c_ui);
+        }
+        return;
+    }
 
     // Check bg color against UI palette and track palette
     lv_color_t bg = lv_obj_get_style_bg_color(obj, 0);
@@ -299,6 +308,10 @@ void ui_theme_apply(VisualTheme theme) {
     }
 
     lv_obj_invalidate(lv_scr_act());
+
+    // Force LivePads to redraw with new theme colors
+    extern void ui_live_pads_invalidate();
+    ui_live_pads_invalidate();
 
     // Invalidate ByteButton LED cache
     extern uint32_t byteButtonLedCache[];
