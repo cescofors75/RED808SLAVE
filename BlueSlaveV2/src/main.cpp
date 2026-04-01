@@ -169,6 +169,70 @@ void handleAnalogEncoder();
 void updateUI();
 static void encoder_task(void* arg);
 
+// =============================================================================
+// NVS PERSISTENCE — save/load user settings across reboots
+// =============================================================================
+#include "nvs.h"
+
+static constexpr const char* NVS_NAMESPACE = "red808";
+static unsigned long nvs_last_save_ms = 0;
+static bool nvs_dirty = false;
+
+static void nvs_load_settings() {
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        Serial.println("[NVS] No saved settings found");
+        return;
+    }
+    uint8_t val8;
+    int32_t val32;
+
+    if (nvs_get_u8(h, "theme", &val8) == ESP_OK && val8 < THEME_COUNT)
+        currentTheme = (VisualTheme)val8;
+    if (nvs_get_i32(h, "masterVol", &val32) == ESP_OK)
+        masterVolume = constrain((int)val32, 0, Config::MAX_VOLUME);
+    if (nvs_get_i32(h, "seqVol", &val32) == ESP_OK)
+        sequencerVolume = constrain((int)val32, 0, Config::MAX_VOLUME);
+    if (nvs_get_i32(h, "liveVol", &val32) == ESP_OK)
+        livePadsVolume = constrain((int)val32, 0, Config::MAX_VOLUME);
+    if (nvs_get_i32(h, "bpm", &val32) == ESP_OK)
+        currentBPM = constrain((int)val32, Config::MIN_BPM, Config::MAX_BPM);
+    if (nvs_get_u8(h, "volMode", &val8) == ESP_OK)
+        volumeMode = (val8 == 1) ? VOL_LIVE_PADS : VOL_SEQUENCER;
+
+    nvs_close(h);
+    Serial.printf("[NVS] Loaded: theme=%d bpm=%d vol=%d/%d/%d\n",
+                  currentTheme, currentBPM, masterVolume, sequencerVolume, livePadsVolume);
+}
+
+void nvs_save_settings() {
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+
+    nvs_set_u8(h, "theme", (uint8_t)currentTheme);
+    nvs_set_i32(h, "masterVol", masterVolume);
+    nvs_set_i32(h, "seqVol", sequencerVolume);
+    nvs_set_i32(h, "liveVol", livePadsVolume);
+    nvs_set_i32(h, "bpm", currentBPM);
+    nvs_set_u8(h, "volMode", volumeMode == VOL_LIVE_PADS ? 1 : 0);
+
+    nvs_commit(h);
+    nvs_close(h);
+    nvs_dirty = false;
+    nvs_last_save_ms = millis();
+}
+
+// Mark settings dirty — will be flushed on next periodic check
+void nvs_mark_dirty() { nvs_dirty = true; }
+
+// Call from loop() — debounced save every 5 seconds when dirty
+static void nvs_periodic_save() {
+    if (!nvs_dirty) return;
+    if ((millis() - nvs_last_save_ms) < 5000) return;
+    nvs_save_settings();
+    Serial.println("[NVS] Settings auto-saved");
+}
+
 static void requestTrackVolumesFromMaster() {
     if (!udpConnected) return;
 
@@ -390,15 +454,6 @@ void initState() {
 // =============================================================================
 
 void setupWiFi() {
-    Serial.println("[WiFi] Initializing NVS...");
-    esp_err_t nvs_err = nvs_flash_init();
-    if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        Serial.println("[WiFi] NVS corrupted, erasing...");
-        nvs_flash_erase();
-        nvs_err = nvs_flash_init();
-    }
-    Serial.printf("[WiFi] NVS init: %s\n", esp_err_to_name(nvs_err));
-
     Serial.println("[WiFi] Connecting...");
     WiFi.disconnect(true);
     delay(100);
@@ -659,18 +714,22 @@ void receiveUDPData() {
     }
     else if (strcmp(cmd, "tempo_sync") == 0 || strcmp(cmd, "tempo") == 0) {
         currentBPM = constrain(doc["value"] | Config::DEFAULT_BPM, Config::MIN_BPM, Config::MAX_BPM);
+        nvs_mark_dirty();
     }
     else if (strcmp(cmd, "volume_sync") == 0 ||
              strcmp(cmd, "master_volume_sync") == 0 ||
              strcmp(cmd, "volume_master_sync") == 0 ||
              strcmp(cmd, "setVolume") == 0) {
         masterVolume = constrain(doc["value"] | Config::DEFAULT_VOLUME, 0, Config::MAX_VOLUME);
+        nvs_mark_dirty();
     }
     else if (strcmp(cmd, "volume_seq_sync") == 0 || strcmp(cmd, "setSequencerVolume") == 0) {
         sequencerVolume = constrain(doc["value"] | Config::DEFAULT_VOLUME, 0, Config::MAX_VOLUME);
+        nvs_mark_dirty();
     }
     else if (strcmp(cmd, "volume_live_sync") == 0 || strcmp(cmd, "setLiveVolume") == 0) {
         livePadsVolume = constrain(doc["value"] | 100, 0, Config::MAX_VOLUME);
+        nvs_mark_dirty();
     }
     else if (strcmp(cmd, "trackVolumes") == 0 ||
              strcmp(cmd, "track_volumes") == 0 ||
@@ -1150,20 +1209,41 @@ void handleM5Encoders() {
         i2c_unlock();
     }
 
-    // Send all queued UDP messages OUTSIDE i2c lock (WiFi must not hold I2C mutex)
-    for (int i = 0; i < pendingCount; i++) {
-        JsonDocument doc;
-        if (pending[i].type == 0) {
-            doc["cmd"] = "setTrackVolume";
-            doc["track"] = pending[i].track;
-            doc["volume"] = pending[i].value;
+    // Send all queued UDP messages as a batch OUTSIDE i2c lock
+    if (pendingCount > 0 && udpConnected) {
+        if (pendingCount == 1) {
+            // Single message — send directly (no array overhead)
+            JsonDocument doc;
+            if (pending[0].type == 0) {
+                doc["cmd"] = "setTrackVolume";
+                doc["track"] = pending[0].track;
+                doc["volume"] = pending[0].value;
+            } else {
+                doc["cmd"] = "mute";
+                doc["track"] = pending[0].track;
+                doc["value"] = (bool)pending[0].value;
+                Serial.printf("[M5] Track %d %s\n", pending[0].track, pending[0].value ? "MUTED" : "UNMUTED");
+            }
+            sendUDPCommand(doc);
         } else {
-            doc["cmd"] = "mute";
-            doc["track"] = pending[i].track;
-            doc["value"] = (bool)pending[i].value;
-            Serial.printf("[M5] Track %d %s\n", pending[i].track, pending[i].value ? "MUTED" : "UNMUTED");
+            // Multiple messages — batch into JSON array, single UDP packet
+            JsonDocument doc;
+            JsonArray arr = doc.to<JsonArray>();
+            for (int i = 0; i < pendingCount; i++) {
+                JsonObject obj = arr.add<JsonObject>();
+                if (pending[i].type == 0) {
+                    obj["cmd"] = "setTrackVolume";
+                    obj["track"] = pending[i].track;
+                    obj["volume"] = pending[i].value;
+                } else {
+                    obj["cmd"] = "mute";
+                    obj["track"] = pending[i].track;
+                    obj["value"] = (bool)pending[i].value;
+                    Serial.printf("[M5] Track %d %s\n", pending[i].track, pending[i].value ? "MUTED" : "UNMUTED");
+                }
+            }
+            sendUDPCommand(doc);
         }
-        sendUDPCommand(doc);
     }
 }
 
@@ -1216,6 +1296,7 @@ void handleDFRobotEncoders() {
                     int newVol = constrain(livePadsVolume + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
                     if (newVol != livePadsVolume) {
                         livePadsVolume = newVol;
+                        nvs_mark_dirty();
                         JsonDocument doc;
                         doc["cmd"] = "setLiveVolume";
                         doc["value"] = livePadsVolume;
@@ -1226,6 +1307,7 @@ void handleDFRobotEncoders() {
                     int newVol = constrain(sequencerVolume + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
                     if (newVol != sequencerVolume) {
                         sequencerVolume = newVol;
+                        nvs_mark_dirty();
                         JsonDocument doc;
                         doc["cmd"] = "setSequencerVolume";
                         doc["value"] = sequencerVolume;
@@ -1245,6 +1327,7 @@ void handleDFRobotEncoders() {
                 int newBPM = constrain(currentBPM + logical_delta * Config::DF_BPM_STEP, Config::MIN_BPM, Config::MAX_BPM);
                 if (newBPM != currentBPM) {
                     currentBPM = newBPM;
+                    nvs_mark_dirty();
                     JsonDocument doc;
                     doc["cmd"] = "tempo";
                     doc["value"] = currentBPM;
@@ -1465,6 +1548,7 @@ void handleByteButton() {
                     break;
                 case 3: // Toggle volume mode SEQ <-> PAD
                     volumeMode = (volumeMode == VOL_SEQUENCER) ? VOL_LIVE_PADS : VOL_SEQUENCER;
+                    nvs_mark_dirty();
                     Serial.printf("[BB] Volume mode: %s\n", volumeMode == VOL_SEQUENCER ? "SEQ" : "PAD");
                     break;
                 case 4: { // FX Delay toggle
@@ -1572,6 +1656,21 @@ void setup() {
     // Init state
     initState();
     Serial.println("[STATE] Initialized");
+
+    // Init NVS flash (must be before nvs_load and setupWiFi)
+    {
+        esp_err_t nvs_err = nvs_flash_init();
+        if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            Serial.println("[NVS] Flash corrupted, erasing...");
+            nvs_flash_erase();
+            nvs_err = nvs_flash_init();
+        }
+        Serial.printf("[NVS] Flash init: %s\n", esp_err_to_name(nvs_err));
+    }
+
+    // Load saved settings from NVS (theme, volumes, BPM)
+    nvs_load_settings();
+    Serial.println("[NVS] Settings loaded");
 
     // 1. I2C bus
     i2c_init();
@@ -1761,6 +1860,10 @@ void loop() {
 
     // Debug heartbeat every 10s
     static unsigned long lastHeartbeat = 0;
+
+    // NVS periodic save (debounced every 5s when dirty)
+    nvs_periodic_save();
+
     static bool firstDiagDone = false;
     if (!firstDiagDone && now > 5000) {
         firstDiagDone = true;

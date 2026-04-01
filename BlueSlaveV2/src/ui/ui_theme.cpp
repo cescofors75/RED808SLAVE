@@ -323,6 +323,10 @@ void ui_theme_apply(VisualTheme theme) {
     // Signal main.cpp to refresh M5 encoder LEDs
     extern volatile bool themeJustChanged;
     themeJustChanged = true;
+
+    // Persist theme to NVS
+    extern void nvs_save_settings();
+    nvs_save_settings();
 }
 
 void ui_theme_init() {
