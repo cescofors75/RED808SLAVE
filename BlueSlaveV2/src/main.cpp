@@ -517,18 +517,23 @@ void selectPatternOnMaster(int patternIndex) {
     requestPatternFromMaster();
 }
 
-// Send full local pattern to master (all 16 tracks × 16 steps)
+// Send full local pattern to master (select pattern, send active steps, restore)
 void sendFullPatternToMaster(int pat) {
-    if (pat < 0 || pat >= Config::MAX_PATTERNS) return;
-    // First select the pattern on master
+    if (pat < 0 || pat >= Config::MAX_PATTERNS || !udpConnected) return;
+
+    int savedPattern = currentPattern;
+
+    // Switch master to target pattern
     {
         JsonDocument doc;
         doc["cmd"] = "selectPattern";
         doc["index"] = pat;
         sendUDPCommand(doc);
     }
-    delay(50);  // give master time to switch
-    // Send each active step
+    delay(30);
+
+    // Send each active step via setStep (same format the master expects)
+    int sent = 0;
     for (int t = 0; t < Config::MAX_TRACKS; t++) {
         for (int s = 0; s < Config::MAX_STEPS; s++) {
             if (patterns[pat].steps[t][s]) {
@@ -536,11 +541,21 @@ void sendFullPatternToMaster(int pat) {
                 snprintf(buf, sizeof(buf),
                     "{\"cmd\":\"setStep\",\"track\":%d,\"step\":%d,\"active\":true}", t, s);
                 sendUDPCommand(buf);
-                delay(5);  // small delay to avoid UDP flood
+                sent++;
+                if (sent % 8 == 0) delay(10);  // throttle every 8 packets
             }
         }
     }
-    Serial.printf("[DEMO] Sent pattern %d to master (%d tracks)\n", pat, Config::MAX_TRACKS);
+
+    // Restore master to previous pattern if different
+    if (savedPattern != pat) {
+        delay(30);
+        JsonDocument doc;
+        doc["cmd"] = "selectPattern";
+        doc["index"] = savedPattern;
+        sendUDPCommand(doc);
+    }
+    Serial.printf("[DEMO] Sent pattern %d to master (%d steps)\n", pat, sent);
 }
 
 void sendLivePadTrigger(int pad, int velocity) {
@@ -586,6 +601,25 @@ void receiveUDPData() {
         if (pat >= 0 && pat < Config::MAX_PATTERNS) {
             JsonArray data = doc["data"];
             if (data) {
+                // Check if incoming data is all-empty
+                bool incomingEmpty = true;
+                for (JsonArray track : data) {
+                    for (JsonVariant step : track) {
+                        if (step.as<bool>()) { incomingEmpty = false; break; }
+                    }
+                    if (!incomingEmpty) break;
+                }
+                // If pattern 6 (demo) has local data and master sends empty, keep local
+                if (pat == 6 && incomingEmpty) {
+                    bool localHasData = false;
+                    for (int t = 0; t < Config::MAX_TRACKS && !localHasData; t++)
+                        for (int s = 0; s < Config::MAX_STEPS && !localHasData; s++)
+                            if (patterns[6].steps[t][s]) localHasData = true;
+                    if (localHasData) {
+                        Serial.println("[UDP] Skipping empty pattern_sync for pattern 7 (demo)");
+                        continue;  // skip this packet, keep local demo
+                    }
+                }
                 int t = 0;
                 for (JsonArray track : data) {
                     if (t >= Config::MAX_TRACKS) break;

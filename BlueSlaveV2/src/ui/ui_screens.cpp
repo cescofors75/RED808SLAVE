@@ -85,6 +85,11 @@ static constexpr int LIVE_PAD_SIZE = 220;
 static constexpr int LIVE_PAD_GAP = 12;
 static constexpr int LIVE_PAD_AREA_TOP = 70;
 
+// LivePad sequencer sync
+static bool livePadSyncMode = false;
+static lv_obj_t* live_sync_btn = NULL;
+static lv_obj_t* live_sync_lbl = NULL;
+
 static uint32_t last_nav_ms = 0;
 
 // ============================================================================
@@ -98,18 +103,19 @@ static int boot_state = 0;
 
 static const char* const kBootLines[] = {
     "SYSTEM KERNEL V3.8.1..................... OK",
-    "ESP32-S3 240MHz DUAL CORE............... OK",
-    "PSRAM 8MB OPI FLASH...................... OK",
+    "ESP32-S3 N16R8 240MHz DUAL CORE........ OK",
+    "PSRAM 8MB OPI + FLASH 16MB QIO......... OK",
     "LVGL v8.4.0 DISPLAY ENGINE.............. OK",
-    "I2C BUS 400kHz........................... OK",
+    "I2C BUS 400kHz  PCA9548A HUB........... OK",
     "M5 ROTATE8 ENCODER [2x]................. OK",
     "DFROBOT VISUAL ENCODER [2x]............. OK",
     "BYTEBUTTON MATRIX [8x1]................. OK",
-    "IEEE 802.11b/g/n WLAN................... OK",
-    "UDP STACK PORT 8888..................... OK",
+    "SD CARD MMC 1-BIT  GPIO12/11/13........ OK",
+    "IEEE 802.11b/g/n WLAN  AP RED808....... OK",
+    "UDP STACK PORT 8888  MASTER 4.1........ OK",
     "> RED808 SURFACE CONTROLLER V6....... READY",
 };
-static constexpr int kBootLineCount = 11;
+static constexpr int kBootLineCount = 12;
 
 // ============================================================================
 // CIRCULAR SEQUENCER
@@ -445,7 +451,7 @@ void ui_create_menu_screen() {
         LV_SYMBOL_SETTINGS "  FILTERS FX",
         LV_SYMBOL_DRIVE "  PATTERNS",
         LV_SYMBOL_DRIVE "  SD BROWSER",
-        LV_SYMBOL_CHARGE "  PERFORMANCE",
+        LV_SYMBOL_SETTINGS "  HW ASSIGN",
         LV_SYMBOL_HOME "  SETTINGS",
         LV_SYMBOL_EYE_OPEN "  DIAGNOSTICS"
     };
@@ -494,6 +500,18 @@ int ui_live_pad_hit_test(int x, int y) {
         return pad;
     }
     return -1;
+}
+
+static void live_sync_cb(lv_event_t* e) {
+    livePadSyncMode = !livePadSyncMode;
+    if (live_sync_btn) {
+        lv_obj_set_style_bg_color(live_sync_btn,
+            livePadSyncMode ? lv_color_hex(0xFFD700) : RED808_SURFACE, 0);
+    }
+    if (live_sync_lbl) {
+        lv_obj_set_style_text_color(live_sync_lbl,
+            livePadSyncMode ? RED808_BG : RED808_TEXT_DIM, 0);
+    }
 }
 
 void ui_create_live_screen() {
@@ -569,6 +587,24 @@ void ui_create_live_screen() {
         live_pad_w[i] = LIVE_PAD_SIZE;
         live_pad_h[i] = h;
     }
+
+    // SYNC button — top-right corner
+    live_sync_btn = lv_obj_create(scr_live);
+    lv_obj_set_size(live_sync_btn, 90, 40);
+    lv_obj_set_pos(live_sync_btn, 1024 - 100, LIVE_PAD_AREA_TOP - 55);
+    lv_obj_clear_flag(live_sync_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(live_sync_btn, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_opa(live_sync_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(live_sync_btn, 8, 0);
+    lv_obj_set_style_border_color(live_sync_btn, lv_color_hex(0xFFD700), 0);
+    lv_obj_set_style_border_width(live_sync_btn, 1, 0);
+    lv_obj_add_event_cb(live_sync_btn, live_sync_cb, LV_EVENT_PRESSED, NULL);
+
+    live_sync_lbl = lv_label_create(live_sync_btn);
+    lv_label_set_text(live_sync_lbl, LV_SYMBOL_REFRESH " SYNC");
+    lv_obj_set_style_text_font(live_sync_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(live_sync_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_center(live_sync_lbl);
 }
 
 void ui_update_live_pads() {
@@ -579,6 +615,12 @@ void ui_update_live_pads() {
         bool active = livePadPressed[pad];
         if (pad < BYTEBUTTON_BUTTONS && byteButtonLivePressed[pad]) {
             active = true;
+        }
+        // Sequencer sync: flash pad when its track has a hit on currentStep
+        if (livePadSyncMode && isPlaying) {
+            if (patterns[currentPattern].steps[pad][currentStep]) {
+                active = true;
+            }
         }
         if (active) {
             state_mask |= (1UL << pad);
@@ -624,9 +666,9 @@ static void seq_step_cb(lv_event_t* e) {
     bool active = patterns[currentPattern].steps[track][step];
     lv_obj_set_style_bg_color(lv_event_get_target(e),
         active ? inst_colors[track] : RED808_SURFACE, 0);
-    // Send step toggle to master
+    // Send step update to master (same format as old controller)
     char buf[80];
-    snprintf(buf, sizeof(buf), "{\"cmd\":\"toggleStep\",\"track\":%d,\"step\":%d,\"active\":%s}",
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"setStep\",\"track\":%d,\"step\":%d,\"active\":%s}",
         track, step, active ? "true" : "false");
     sendUDPCommand(buf);
 }
@@ -1407,9 +1449,11 @@ void ui_create_settings_screen() {
 // ============================================================================
 // DIAGNOSTICS SCREEN
 // ============================================================================
-#define DIAG_ROWS 11
+#define DIAG_ROWS 17
 static lv_obj_t* diag_labels[DIAG_ROWS];
 static lv_obj_t* diag_values[DIAG_ROWS];
+
+extern bool sd_mounted;  // from SD card screen
 
 void ui_create_diagnostics_screen() {
     scr_diagnostics = lv_obj_create(NULL);
@@ -1418,54 +1462,108 @@ void ui_create_diagnostics_screen() {
 
     lv_obj_t* title = lv_label_create(scr_diagnostics);
     lv_label_set_text(title, LV_SYMBOL_EYE_OPEN " DIAGNOSTICS");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 56);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 52);
 
-    static const char* row_names[] = {
-        "WiFi",  "UDP",  "Touch GT911",  "LCD",  "I2C Hub",
-        "M5 Encoder #1", "M5 Encoder #2", "DFRobot #1", "DFRobot #2", "M5 ByteButton", "Memory"
+    // Two-column layout
+    // Left column (x=24): Hardware peripherals
+    // Right column (x=520): ESP32 system info
+    static const char* row_names[DIAG_ROWS] = {
+        // Left column — hardware (rows 0-10)
+        "WiFi",  "UDP",  "Touch GT911",  "LCD RGB",  "I2C Hub PCA9548A",
+        "M5 Encoder #1", "M5 Encoder #2", "DFRobot Enc #1", "DFRobot Enc #2",
+        "M5 ByteButton", "SD Card",
+        // Right column — ESP32 system (rows 11-16)
+        "CPU",  "Flash",  "PSRAM",  "Heap Free",  "PSRAM Free", "Uptime"
     };
 
-    int y = 100;
-    for (int i = 0; i < DIAG_ROWS; i++) {
+    // Left column: rows 0-10
+    int y = 86;
+    int row_h = 32;
+    for (int i = 0; i < 11; i++) {
         diag_labels[i] = lv_label_create(scr_diagnostics);
         lv_label_set_text(diag_labels[i], row_names[i]);
-        lv_obj_set_style_text_font(diag_labels[i], &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_font(diag_labels[i], &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(diag_labels[i], RED808_TEXT, 0);
-        lv_obj_set_pos(diag_labels[i], 60, y);
+        lv_obj_set_pos(diag_labels[i], 24, y);
 
         diag_values[i] = lv_label_create(scr_diagnostics);
         lv_label_set_text(diag_values[i], "---");
-        lv_obj_set_style_text_font(diag_values[i], &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_font(diag_values[i], &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(diag_values[i], RED808_TEXT_DIM, 0);
-        lv_obj_set_pos(diag_values[i], 320, y);
+        lv_obj_set_pos(diag_values[i], 220, y);
 
-        y += 46;
+        y += row_h;
     }
+
+    // Separator
+    lv_obj_t* sep = lv_obj_create(scr_diagnostics);
+    lv_obj_set_size(sep, 2, 11 * row_h - 6);
+    lv_obj_set_pos(sep, 498, 86);
+    lv_obj_set_style_bg_color(sep, RED808_TEXT_DIM, 0);
+    lv_obj_set_style_bg_opa(sep, LV_OPA_30, 0);
+    lv_obj_set_style_border_width(sep, 0, 0);
+    lv_obj_clear_flag(sep, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Right column title
+    lv_obj_t* sys_title = lv_label_create(scr_diagnostics);
+    lv_label_set_text(sys_title, "ESP32-S3 SYSTEM");
+    lv_obj_set_style_text_font(sys_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(sys_title, lv_color_hex(0x00D4FF), 0);
+    lv_obj_set_pos(sys_title, 520, 86 - 18);
+
+    // Right column: rows 11-16
+    y = 86;
+    for (int i = 11; i < DIAG_ROWS; i++) {
+        diag_labels[i] = lv_label_create(scr_diagnostics);
+        lv_label_set_text(diag_labels[i], row_names[i]);
+        lv_obj_set_style_text_font(diag_labels[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(diag_labels[i], RED808_TEXT, 0);
+        lv_obj_set_pos(diag_labels[i], 520, y);
+
+        diag_values[i] = lv_label_create(scr_diagnostics);
+        lv_label_set_text(diag_values[i], "---");
+        lv_obj_set_style_text_font(diag_values[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(diag_values[i], RED808_TEXT_DIM, 0);
+        lv_obj_set_pos(diag_values[i], 680, y);
+
+        y += row_h;
+    }
+
+    // Fill static ESP32 info once
+    lv_label_set_text_fmt(diag_values[11], "S3 %d MHz  Dual-Core", ESP.getCpuFreqMHz());
+    lv_obj_set_style_text_color(diag_values[11], RED808_INFO, 0);
+    lv_label_set_text_fmt(diag_values[12], "%lu KB  (%s)", ESP.getFlashChipSize() / 1024,
+        ESP.getFlashChipMode() == FM_QIO ? "QIO" : ESP.getFlashChipMode() == FM_DIO ? "DIO" : "SPI");
+    lv_obj_set_style_text_color(diag_values[12], RED808_INFO, 0);
+    lv_label_set_text_fmt(diag_values[13], "%lu KB total", ESP.getPsramSize() / 1024);
+    lv_obj_set_style_text_color(diag_values[13], RED808_INFO, 0);
 }
 
 void ui_update_diagnostics() {
     if (!scr_diagnostics) return;
 
-    static bool prev_vals[DIAG_ROWS + 1] = {};
+    static bool prev_vals[DIAG_ROWS] = {};
     static uint32_t prev_heap = 0;
-    static uint32_t last_heap_update_ms = 0;
+    static uint32_t prev_uptime = 0;
+    static uint32_t last_sys_update_ms = 0;
 
     struct { bool val; const char* ok; const char* fail; } rows[] = {
-        { diagInfo.wifiOk,       "Connected",  "Disconnected" },
-        { diagInfo.udpConnected, "Active",     "Inactive" },
-        { diagInfo.touchOk,      "OK (0x5D)",  "NOT FOUND" },
-        { diagInfo.lcdOk,        "OK 1024x600","ERROR" },
-        { diagInfo.i2cHubOk,     "PCA9548A OK","NOT FOUND" },
-        { diagInfo.m5encoder1Ok, "OK",         "Not detected" },
-        { diagInfo.m5encoder2Ok, "OK",         "Not detected" },
-        { diagInfo.dfrobot1Ok,   "OK",         "Not detected" },
-        { diagInfo.dfrobot2Ok,   "OK",         "Not detected" },
-        { diagInfo.byteButtonOk, "OK",         "Not detected" },
+        { diagInfo.wifiOk,       "Connected",     "Disconnected" },
+        { diagInfo.udpConnected, "Port 8888 OK",  "Inactive" },
+        { diagInfo.touchOk,      "OK (0x5D)",     "NOT FOUND" },
+        { diagInfo.lcdOk,        "1024x600 OK",   "ERROR" },
+        { diagInfo.i2cHubOk,     "OK (0x70)",     "NOT FOUND" },
+        { diagInfo.m5encoder1Ok, "OK",            "Not detected" },
+        { diagInfo.m5encoder2Ok, "OK",            "Not detected" },
+        { diagInfo.dfrobot1Ok,   "OK",            "Not detected" },
+        { diagInfo.dfrobot2Ok,   "OK",            "Not detected" },
+        { diagInfo.byteButtonOk, "OK (0x41)",     "Not detected" },
+        { diagInfo.sdOk || sd_mounted, sd_mounted ? "Mounted (SD_MMC)" : "Not mounted", "No card" },
     };
 
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 11; i++) {
         if (rows[i].val != prev_vals[i]) {
             prev_vals[i] = rows[i].val;
             lv_label_set_text(diag_values[i], rows[i].val ? rows[i].ok : rows[i].fail);
@@ -1473,16 +1571,30 @@ void ui_update_diagnostics() {
         }
     }
 
-    // Actualizar heap solo cada 2s para no generar dirty areas continuas (getFreeHeap() cambia cada 16ms)
+    // Update dynamic system info every 2s
     uint32_t now_ms = lv_tick_get();
-    if ((now_ms - last_heap_update_ms) >= 2000) {
-        last_heap_update_ms = now_ms;
+    if ((now_ms - last_sys_update_ms) >= 2000) {
+        last_sys_update_ms = now_ms;
+
         uint32_t heap = ESP.getFreeHeap() / 1024;
-        uint32_t psram = ESP.getFreePsram() / 1024;
         if (heap != prev_heap) {
             prev_heap = heap;
-            lv_label_set_text_fmt(diag_values[10], "Heap: %luK  PSRAM: %luK", heap, psram);
-            lv_obj_set_style_text_color(diag_values[10], RED808_INFO, 0);
+            lv_label_set_text_fmt(diag_values[14], "%lu KB", heap);
+            lv_obj_set_style_text_color(diag_values[14], heap > 100 ? RED808_SUCCESS : RED808_WARNING, 0);
+        }
+
+        uint32_t psram_free = ESP.getFreePsram() / 1024;
+        lv_label_set_text_fmt(diag_values[15], "%lu KB", psram_free);
+        lv_obj_set_style_text_color(diag_values[15], psram_free > 1000 ? RED808_SUCCESS : RED808_WARNING, 0);
+
+        uint32_t uptime_s = millis() / 1000;
+        if (uptime_s != prev_uptime) {
+            prev_uptime = uptime_s;
+            uint32_t h = uptime_s / 3600;
+            uint32_t m = (uptime_s % 3600) / 60;
+            uint32_t s = uptime_s % 60;
+            lv_label_set_text_fmt(diag_values[16], "%02lu:%02lu:%02lu", h, m, s);
+            lv_obj_set_style_text_color(diag_values[16], RED808_INFO, 0);
         }
     }
 }
@@ -1586,7 +1698,7 @@ static constexpr int SD_TOP     = 60;    // below header
 static constexpr int SD_H       = 540;   // panel height
 
 // SD state
-static bool sd_mounted = false;
+bool sd_mounted = false;
 static bool sd_init_attempted = false;
 
 // Navigation state
@@ -1962,23 +2074,30 @@ void ui_update_sdcard() {
 }
 
 // ============================================================================
-// PERFORMANCE SCREEN - Mute groups + transport + pattern chain
+// HW ASSIGN SCREEN - Button & Rotary function assignments
 // ============================================================================
-static lv_obj_t* perf_mute_btns[Config::MAX_TRACKS] = {};
-static lv_obj_t* perf_mute_labels[Config::MAX_TRACKS] = {};
 
-static void perf_mute_cb(lv_event_t* e) {
-    int track = (int)(intptr_t)lv_event_get_user_data(e);
-    if (track < 0 || track >= Config::MAX_TRACKS) return;
-    trackMuted[track] = !trackMuted[track];
+// Current HW assignment descriptions (read-only display of what each does)
+static const char* const byteButtonAssignNames[] = {
+    "Pattern --",
+    "Pattern ++",
+    "Pattern = 1",
+    "Vol Mode SEQ/PAD",
+    "FX Delay Toggle",
+    "FX Flanger Toggle",
+    "FX Compressor Toggle",
+    "Clear ALL FX"
+};
 
-    // Send mute command to master
-    JsonDocument doc;
-    doc["cmd"] = "mute";
-    doc["track"] = track;
-    doc["value"] = trackMuted[track];
-    sendUDPCommand(doc);
-}
+static const char* const dfRotaryAssignNames[] = {
+    "Volume SEQ/PAD  |  BTN: Play/Stop",
+    "BPM Tempo       |  BTN: Back/Menu"
+};
+
+static const char* const m5EncoderAssignNames[] = {
+    "Mod 1 (Tracks 0-3): Vol + Mute",
+    "Mod 2 (Tracks 4-7): Vol + Mute"
+};
 
 void ui_create_performance_screen() {
     scr_performance = lv_obj_create(NULL);
@@ -1986,58 +2105,149 @@ void ui_create_performance_screen() {
     ui_create_header(scr_performance);
 
     lv_obj_t* title = lv_label_create(scr_performance);
-    lv_label_set_text(title, "PERFORMANCE");
+    lv_label_set_text(title, LV_SYMBOL_SETTINGS "  HW ASSIGN");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 52);
 
-    // Mute grid: 4x4 buttons for 16 tracks
-    lv_obj_t* mute_title = lv_label_create(scr_performance);
-    lv_label_set_text(mute_title, "MUTE / UNMUTE TRACKS");
-    lv_obj_set_style_text_font(mute_title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(mute_title, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(mute_title, 28, 82);
+    int y = 86;
+    int col1_x = 24, col2_x = 300;
+    int section_gap = 8;
 
-    int btn_w = 220, btn_h = 105, gap = 16;
-    int x_start = (1024 - 4 * btn_w - 3 * gap) / 2;
-    int y_start = 108;
+    // ── SECTION: ByteButton (8 buttons) ──
+    lv_obj_t* bb_title = lv_label_create(scr_performance);
+    lv_label_set_text(bb_title, "M5 BYTEBUTTON  (8 Buttons)");
+    lv_obj_set_style_text_font(bb_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(bb_title, lv_color_hex(0x00D4FF), 0);
+    lv_obj_set_pos(bb_title, col1_x, y);
+    y += 24;
 
-    for (int i = 0; i < Config::MAX_TRACKS; i++) {
-        int col = i % 4;
-        int row = i / 4;
+    for (int i = 0; i < 8; i++) {
+        // Button number chip
+        lv_obj_t* chip = lv_obj_create(scr_performance);
+        lv_obj_set_size(chip, 42, 26);
+        lv_obj_set_pos(chip, col1_x, y);
+        lv_obj_set_style_bg_color(chip, lv_color_hex(0x1A3050), 0);
+        lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(chip, 4, 0);
+        lv_obj_set_style_border_width(chip, 1, 0);
+        lv_obj_set_style_border_color(chip, lv_color_hex(0x00D4FF), 0);
+        lv_obj_set_style_pad_all(chip, 0, 0);
+        lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
 
-        lv_obj_t* btn = lv_btn_create(scr_performance);
-        lv_obj_set_size(btn, btn_w, btn_h);
-        lv_obj_set_pos(btn, x_start + col * (btn_w + gap), y_start + row * (btn_h + gap));
-        apply_stable_button_style(btn, trackMuted[i] ? RED808_SURFACE : inst_colors[i], RED808_BORDER);
-        lv_obj_set_style_radius(btn, 12, 0);
-        lv_obj_set_style_border_width(btn, 2, 0);
-        lv_obj_add_event_cb(btn, perf_mute_cb, LV_EVENT_PRESSED, (void*)(intptr_t)i);
-        perf_mute_btns[i] = btn;
+        lv_obj_t* num = lv_label_create(chip);
+        lv_label_set_text_fmt(num, "B%d", i + 1);
+        lv_obj_set_style_text_font(num, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(num, lv_color_hex(0x00D4FF), 0);
+        lv_obj_center(num);
 
-        lv_obj_t* lbl = lv_label_create(btn);
-        lv_label_set_text_fmt(lbl, "%s\n%s", trackNames[i], trackMuted[i] ? "MUTED" : "ON");
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
-        lv_obj_set_style_text_color(lbl, trackMuted[i] ? RED808_TEXT_DIM : RED808_BG, 0);
-        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_center(lbl);
-        perf_mute_labels[i] = lbl;
-    }
-}
+        // Function label
+        lv_obj_t* fn = lv_label_create(scr_performance);
+        lv_label_set_text(fn, byteButtonAssignNames[i]);
+        lv_obj_set_style_text_font(fn, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(fn, RED808_TEXT, 0);
+        lv_obj_set_pos(fn, col1_x + 52, y + 4);
 
-static void ui_update_performance() {
-    for (int i = 0; i < Config::MAX_TRACKS; i++) {
-        if (perf_mute_btns[i]) {
-            lv_obj_set_style_bg_color(perf_mute_btns[i],
-                trackMuted[i] ? RED808_SURFACE : inst_colors[i], 0);
+        // In LIVE mode label (right side)
+        if (i < Config::MAX_SAMPLES) {
+            lv_obj_t* live_fn = lv_label_create(scr_performance);
+            lv_label_set_text_fmt(live_fn, "LIVE: Pad %d (%s)", i + 1, trackNames[i]);
+            lv_obj_set_style_text_font(live_fn, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(live_fn, RED808_TEXT_DIM, 0);
+            lv_obj_set_pos(live_fn, col2_x, y + 5);
         }
-        if (perf_mute_labels[i]) {
-            lv_label_set_text_fmt(perf_mute_labels[i], "%s\n%s",
-                trackNames[i], trackMuted[i] ? "MUTED" : "ON");
-            lv_obj_set_style_text_color(perf_mute_labels[i],
-                trackMuted[i] ? RED808_TEXT_DIM : RED808_BG, 0);
-        }
+
+        y += 30;
     }
+
+    y += section_gap;
+
+    // ── SECTION: DFRobot Rotary Encoders ──
+    lv_obj_t* df_title = lv_label_create(scr_performance);
+    lv_label_set_text(df_title, "DFROBOT ROTARY ENCODERS  (2x)");
+    lv_obj_set_style_text_font(df_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(df_title, lv_color_hex(0x39FF14), 0);
+    lv_obj_set_pos(df_title, col1_x, y);
+    y += 24;
+
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t* chip = lv_obj_create(scr_performance);
+        lv_obj_set_size(chip, 42, 26);
+        lv_obj_set_pos(chip, col1_x, y);
+        lv_obj_set_style_bg_color(chip, lv_color_hex(0x1A3020), 0);
+        lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(chip, 4, 0);
+        lv_obj_set_style_border_width(chip, 1, 0);
+        lv_obj_set_style_border_color(chip, lv_color_hex(0x39FF14), 0);
+        lv_obj_set_style_pad_all(chip, 0, 0);
+        lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t* num = lv_label_create(chip);
+        lv_label_set_text_fmt(num, "R%d", i + 1);
+        lv_obj_set_style_text_font(num, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(num, lv_color_hex(0x39FF14), 0);
+        lv_obj_center(num);
+
+        lv_obj_t* fn = lv_label_create(scr_performance);
+        lv_label_set_text(fn, dfRotaryAssignNames[i]);
+        lv_obj_set_style_text_font(fn, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(fn, RED808_TEXT, 0);
+        lv_obj_set_pos(fn, col1_x + 52, y + 4);
+
+        y += 30;
+    }
+
+    y += section_gap;
+
+    // ── SECTION: M5 ROTATE8 Encoders ──
+    lv_obj_t* m5_title = lv_label_create(scr_performance);
+    lv_label_set_text(m5_title, "M5 ROTATE8 ENCODERS  (2 modules x 8 enc)");
+    lv_obj_set_style_text_font(m5_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(m5_title, lv_color_hex(0xFF6B35), 0);
+    lv_obj_set_pos(m5_title, col1_x, y);
+    y += 24;
+
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t* chip = lv_obj_create(scr_performance);
+        lv_obj_set_size(chip, 42, 26);
+        lv_obj_set_pos(chip, col1_x, y);
+        lv_obj_set_style_bg_color(chip, lv_color_hex(0x301A0A), 0);
+        lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(chip, 4, 0);
+        lv_obj_set_style_border_width(chip, 1, 0);
+        lv_obj_set_style_border_color(chip, lv_color_hex(0xFF6B35), 0);
+        lv_obj_set_style_pad_all(chip, 0, 0);
+        lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t* num = lv_label_create(chip);
+        lv_label_set_text_fmt(num, "M%d", i + 1);
+        lv_obj_set_style_text_font(num, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(num, lv_color_hex(0xFF6B35), 0);
+        lv_obj_center(num);
+
+        lv_obj_t* fn = lv_label_create(scr_performance);
+        lv_label_set_text(fn, m5EncoderAssignNames[i]);
+        lv_obj_set_style_text_font(fn, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(fn, RED808_TEXT, 0);
+        lv_obj_set_pos(fn, col1_x + 52, y + 4);
+
+        y += 30;
+    }
+
+    // ── SECTION: Touch Screen ──
+    y += section_gap;
+    lv_obj_t* touch_title = lv_label_create(scr_performance);
+    lv_label_set_text(touch_title, "CAPACITIVE TOUCH  GT911 (5-point)");
+    lv_obj_set_style_text_font(touch_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(touch_title, lv_color_hex(0xFF00AA), 0);
+    lv_obj_set_pos(touch_title, col1_x, y);
+    y += 22;
+
+    lv_obj_t* touch_fn = lv_label_create(scr_performance);
+    lv_label_set_text(touch_fn, "UI Navigation + Live Pads + Sequencer Grid + All Screens");
+    lv_obj_set_style_text_font(touch_fn, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(touch_fn, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(touch_fn, col1_x + 52, y);
 }
 
 // ============================================================================
@@ -2182,13 +2392,13 @@ void ui_create_boot_screen() {
     lv_obj_clear_flag(sep, LV_OBJ_FLAG_SCROLLABLE);
 
     // Text lines hidden until timer reveals them one by one
-    // 11 lines × 42 px = 462 px from y=78 → last line at y=498 (screen 600px)
+    // 12 lines × 38 px = 456 px from y=78 → last line at y=496 (screen 600px)
     for (int i = 0; i < kBootLineCount; i++) {
         lv_obj_t* lbl = lv_label_create(scr_boot);
         lv_label_set_text(lbl, kBootLines[i]);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0x39FF14), 0);  // terminal green
-        lv_obj_set_pos(lbl, 40, 78 + i * 42);
+        lv_obj_set_pos(lbl, 40, 78 + i * 38);
         lv_obj_add_flag(lbl, LV_OBJ_FLAG_HIDDEN);
         boot_text_lines[i] = lbl;
     }
@@ -2198,7 +2408,7 @@ void ui_create_boot_screen() {
     lv_label_set_text(boot_cursor_lbl, "_ ");
     lv_obj_set_style_text_font(boot_cursor_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(boot_cursor_lbl, lv_color_hex(0x39FF14), 0);
-    lv_obj_set_pos(boot_cursor_lbl, 40, 78 + kBootLineCount * 42);
+    lv_obj_set_pos(boot_cursor_lbl, 40, 78 + kBootLineCount * 38);
     lv_obj_add_flag(boot_cursor_lbl, LV_OBJ_FLAG_HIDDEN);
 
     // Status bar at bottom
