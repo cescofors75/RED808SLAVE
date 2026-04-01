@@ -542,9 +542,14 @@ void sendUDPCommand(const char* cmd) {
 }
 
 void sendUDPCommand(JsonDocument& doc) {
-    String json;
-    serializeJson(doc, json);
-    sendUDPCommand(json.c_str());
+    if (!udpConnected) return;
+    char buf[512];
+    size_t len = serializeJson(doc, buf, sizeof(buf));
+    if (len > 0 && len < sizeof(buf)) {
+        udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
+        udp.write((const uint8_t*)buf, len);
+        udp.endPacket();
+    }
 }
 
 void requestPatternFromMaster() {
@@ -631,6 +636,9 @@ void sendLivePadTrigger(int pad, int velocity) {
 void receiveUDPData() {
     if (!udpConnected) return;
 
+    // Reuse JsonDocument across packets to avoid per-packet construction overhead
+    JsonDocument doc;
+
     // Drain ALL pending UDP packets each loop iteration
     for (int pkt = 0; pkt < 8; pkt++) {
     int packetSize = udp.parsePacket();
@@ -645,7 +653,7 @@ void receiveUDPData() {
     masterConnected = true;
     diagInfo.udpConnected = true;
 
-    JsonDocument doc;
+    doc.clear();
     DeserializationError err = deserializeJson(doc, buf);
     if (err) continue;
 
@@ -1751,7 +1759,7 @@ void setup() {
     Serial.printf("[HEAP] After UI: %d bytes  PSRAM: %d bytes\n", ESP.getFreeHeap(), ESP.getFreePsram());
 
     // 11. Encoder task — dedicated FreeRTOS task for I2C encoder polling
-    xTaskCreatePinnedToCore(encoder_task, "enc", 8192, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCore(encoder_task, "enc", 6144, NULL, 2, NULL, 0);
     Serial.println("[ENC] Encoder task started (Core 0, pri 2)");
 
     Serial.println("\n[SETUP] Complete! Entering main loop.\n");
@@ -1826,11 +1834,14 @@ void loop() {
         }
     }
 
-    for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
-        if (!livePadPressed[pad]) continue;
-        if ((now - lastLivePadTriggerMs[pad]) < Config::LIVE_PAD_REPEAT_MS) continue;
-        sendLivePadTrigger(pad, padVelocity);
-        lastLivePadTriggerMs[pad] = now;
+    // Repeat triggers only when on LIVE screen (avoids 16 iterations per loop on other screens)
+    if (currentScreen == SCREEN_LIVE) {
+        for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
+            if (!livePadPressed[pad]) continue;
+            if ((now - lastLivePadTriggerMs[pad]) < Config::LIVE_PAD_REPEAT_MS) continue;
+            sendLivePadTrigger(pad, padVelocity);
+            lastLivePadTriggerMs[pad] = now;
+        }
     }
 
     // ByteButton: single-shot on press edge only (no repeat — physical buttons sustain too long)

@@ -128,7 +128,7 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     lv_indev_drv_register(&indev_drv);
 
     // LVGL task — core 1, priority 3 (higher = less preemption during flush)
-    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 16384, NULL, 3, NULL, 1);
+    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 12288, NULL, 3, NULL, 1);
 
     ESP_LOGI(TAG, "LVGL port: %dx%d direct_mode, 2x full PSRAM buffers, vsync-synced",
              SCREEN_WIDTH, SCREEN_HEIGHT);
