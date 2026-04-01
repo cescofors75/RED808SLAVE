@@ -1036,12 +1036,8 @@ void ui_update_sequencer() {
     // On page change, force full grid refresh for visible tracks
     if (seq_page != prev_page) {
         prev_page = seq_page;
-        for (int t = page_start; t < page_end; t++) {
-            for (int s = 0; s < Config::MAX_STEPS; s++) {
-                prev_grid_state[t][s] = 0xFF;  // force redraw
-            }
-        }
-        prev_column = -2;  // force column highlight refresh
+        memset(prev_grid_state, 0xFF, sizeof(prev_grid_state));
+        prev_column = -2;
     }
 
     // Update step highlight label only when step changes
@@ -1051,7 +1047,7 @@ void ui_update_sequencer() {
 
     int active_column = isPlaying ? currentStep : -1;
     if (active_column != prev_column) {
-        // --- Previous column: hide overlay + dim LED strip ---
+        // --- Previous column: remove highlight ---
         if (prev_column >= 0 && prev_column < Config::MAX_STEPS) {
             if (seq_column_highlights[prev_column]) {
                 lv_obj_set_style_bg_opa(seq_column_highlights[prev_column], LV_OPA_0, 0);
@@ -1060,59 +1056,59 @@ void ui_update_sequencer() {
             if (seq_step_leds[prev_column]) {
                 lv_obj_set_style_bg_color(seq_step_leds[prev_column],
                     (prev_column % 4 == 0) ? lv_color_hex(0x2A2A2A) : lv_color_hex(0x1A1A1A), 0);
+                lv_obj_set_style_shadow_width(seq_step_leds[prev_column], 0, 0);
+            }
+            // Restyle prev column cells — mark dirty so diff loop handles them
+            for (int t = page_start; t < page_end; t++) {
+                prev_grid_state[t][prev_column] = 0xFF;
             }
         }
-        // --- Active column: show overlay + bright LED strip ---
+        // --- Active column: show highlight with neon glow ---
         if (active_column >= 0 && active_column < Config::MAX_STEPS) {
             if (seq_column_highlights[active_column]) {
-                lv_obj_set_style_bg_opa(seq_column_highlights[active_column], LV_OPA_30, 0);
-                lv_obj_set_style_border_opa(seq_column_highlights[active_column], LV_OPA_COVER, 0);
+                lv_obj_set_style_bg_opa(seq_column_highlights[active_column], LV_OPA_20, 0);
+                lv_obj_set_style_border_opa(seq_column_highlights[active_column], LV_OPA_70, 0);
             }
             if (seq_step_leds[active_column]) {
                 lv_obj_set_style_bg_color(seq_step_leds[active_column], RED808_WARNING, 0);
+                lv_obj_set_style_shadow_width(seq_step_leds[active_column], 12, 0);
+                lv_obj_set_style_shadow_color(seq_step_leds[active_column], RED808_WARNING, 0);
+                lv_obj_set_style_shadow_opa(seq_step_leds[active_column], LV_OPA_80, 0);
+                lv_obj_set_style_shadow_spread(seq_step_leds[active_column], 3, 0);
             }
-        }
-
-        // Update ONLY visible tracks (8) in the 2 changed columns
-        for (int t = page_start; t < page_end; t++) {
-            if (prev_column >= 0 && prev_column < Config::MAX_STEPS && seq_grid[t][prev_column]) {
-                bool active = patterns[currentPattern].steps[t][prev_column];
-                prev_grid_state[t][prev_column] = active ? 1 : 0;
-                lv_obj_set_style_bg_color(seq_grid[t][prev_column],
-                    active ? inst_colors[t] : RED808_SURFACE, 0);
-                lv_obj_set_style_border_width(seq_grid[t][prev_column], 0, 0);
-            }
-            if (active_column >= 0 && active_column < Config::MAX_STEPS && seq_grid[t][active_column]) {
-                bool active = patterns[currentPattern].steps[t][active_column];
-                prev_grid_state[t][active_column] = (active ? 1 : 0) | 2;
-                lv_obj_set_style_bg_color(seq_grid[t][active_column],
-                    active ? lv_color_white() : lv_color_hex(0x504000), 0);
-                lv_obj_set_style_border_width(seq_grid[t][active_column], 2, 0);
-                lv_obj_set_style_border_color(seq_grid[t][active_column], RED808_WARNING, 0);
+            // Mark active column cells dirty
+            for (int t = page_start; t < page_end; t++) {
+                prev_grid_state[t][active_column] = 0xFF;
             }
         }
         prev_column = active_column;
     }
 
-    // Update visible grid state - only cells whose pattern data changed (toggle)
+    // Diff loop — only restyle cells whose state actually changed
     for (int t = page_start; t < page_end; t++) {
         for (int s = 0; s < Config::MAX_STEPS; s++) {
             if (!seq_grid[t][s]) continue;
             bool active = patterns[currentPattern].steps[t][s];
-            bool isActive = (s == currentStep && isPlaying);
-            uint8_t state = (isActive ? 2 : 0) | (active ? 1 : 0);
-            if (state != prev_grid_state[t][s]) {
-                prev_grid_state[t][s] = state;
-                if (isActive) {
-                    lv_obj_set_style_bg_color(seq_grid[t][s],
-                        active ? lv_color_white() : lv_color_hex(0x504000), 0);
-                    lv_obj_set_style_border_width(seq_grid[t][s], 2, 0);
-                    lv_obj_set_style_border_color(seq_grid[t][s], RED808_WARNING, 0);
-                } else {
-                    lv_obj_set_style_bg_color(seq_grid[t][s],
-                        active ? inst_colors[t] : RED808_SURFACE, 0);
-                    lv_obj_set_style_border_width(seq_grid[t][s], 0, 0);
-                }
+            bool isHit = (s == active_column);
+            uint8_t state = (isHit ? 2 : 0) | (active ? 1 : 0);
+            if (state == prev_grid_state[t][s]) continue;
+            prev_grid_state[t][s] = state;
+
+            if (isHit) {
+                // Active step — bright with neon border
+                lv_obj_set_style_bg_color(seq_grid[t][s],
+                    active ? lv_color_white() : lv_color_hex(0x504000), 0);
+                lv_obj_set_style_border_width(seq_grid[t][s], 2, 0);
+                lv_obj_set_style_border_color(seq_grid[t][s], RED808_WARNING, 0);
+                lv_obj_set_style_shadow_width(seq_grid[t][s], active ? 10 : 0, 0);
+                lv_obj_set_style_shadow_color(seq_grid[t][s], inst_colors[t], 0);
+                lv_obj_set_style_shadow_opa(seq_grid[t][s], active ? LV_OPA_60 : LV_OPA_0, 0);
+            } else {
+                // Inactive step — normal
+                lv_obj_set_style_bg_color(seq_grid[t][s],
+                    active ? inst_colors[t] : RED808_SURFACE, 0);
+                lv_obj_set_style_border_width(seq_grid[t][s], 0, 0);
+                lv_obj_set_style_shadow_width(seq_grid[t][s], 0, 0);
             }
         }
     }
