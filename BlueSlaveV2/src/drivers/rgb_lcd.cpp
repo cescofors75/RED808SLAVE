@@ -1,5 +1,6 @@
 // =============================================================================
 // rgb_lcd.cpp - RGB LCD driver for Waveshare ESP32-S3-Touch-LCD-7B
+// ESP-IDF 5.x — bounce buffers + register_event_callbacks API
 // =============================================================================
 #include "rgb_lcd.h"
 #include "io_extension.h"
@@ -8,28 +9,12 @@
 static const char* TAG = "RGB_LCD";
 static esp_lcd_panel_handle_t panel_handle = NULL;
 
-// Vsync callback for LVGL (set from lvgl_port)
-static bool (*_vsync_cb)(esp_lcd_panel_handle_t, esp_lcd_rgb_panel_event_data_t*, void*) = NULL;
-static void* _vsync_user_ctx = NULL;
-
-static bool IRAM_ATTR on_frame_done(esp_lcd_panel_handle_t panel,
-                                     esp_lcd_rgb_panel_event_data_t* edata,
-                                     void* user_ctx) {
-    if (_vsync_cb) return _vsync_cb(panel, edata, user_ctx);
-    return false;
-}
-
-void rgb_lcd_set_vsync_cb(bool (*cb)(esp_lcd_panel_handle_t, esp_lcd_rgb_panel_event_data_t*, void*), void* ctx) {
-    _vsync_cb = cb;
-    _vsync_user_ctx = ctx;
-}
-
 esp_lcd_panel_handle_t rgb_lcd_init() {
     // Reset LCD via IO extension
     io_ext_lcd_reset();
 
     esp_lcd_rgb_panel_config_t panel_config = {};
-    panel_config.clk_src = LCD_CLK_SRC_PLL160M;
+    panel_config.clk_src = LCD_CLK_SRC_DEFAULT;
     panel_config.timings.pclk_hz = LCD_PCLK_HZ;
     panel_config.timings.h_res = SCREEN_WIDTH;
     panel_config.timings.v_res = SCREEN_HEIGHT;
@@ -41,8 +26,7 @@ esp_lcd_panel_handle_t rgb_lcd_init() {
     panel_config.timings.vsync_front_porch = LCD_VSYNC_FRONT_PORCH;
     panel_config.timings.flags.pclk_active_neg = true;
     panel_config.data_width = 16;
-    panel_config.psram_trans_align = 64;
-    panel_config.on_frame_trans_done = on_frame_done;
+    panel_config.num_fbs = 2;   // Double buffer for zero-copy swap
     panel_config.hsync_gpio_num = LCD_HSYNC;
     panel_config.vsync_gpio_num = LCD_VSYNC;
     panel_config.de_gpio_num    = LCD_DE;
@@ -68,13 +52,30 @@ esp_lcd_panel_handle_t rgb_lcd_init() {
     panel_config.data_gpio_nums[15] = LCD_R7;
 
     panel_config.flags.fb_in_psram = true;
+    panel_config.flags.bb_invalidate_cache = 1;
+
+    // Bounce buffers: DMA reads from internal SRAM instead of PSRAM.
+    // Eliminates PSRAM bus contention between LCD DMA, CPU, and WiFi.
+    panel_config.bounce_buffer_size_px = LCD_BOUNCE_BUF;
 
     ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_config, &panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
 
-    ESP_LOGI(TAG, "RGB LCD initialized: %dx%d @ %dMHz",
-             SCREEN_WIDTH, SCREEN_HEIGHT, LCD_PCLK_HZ / 1000000);
+    ESP_LOGI(TAG, "RGB LCD initialized: %dx%d @ %dMHz, bounce=%d px",
+             SCREEN_WIDTH, SCREEN_HEIGHT, LCD_PCLK_HZ / 1000000, LCD_BOUNCE_BUF);
 
     return panel_handle;
+}
+
+void rgb_lcd_get_frame_buffers(esp_lcd_panel_handle_t panel, void** fb0, void** fb1) {
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel, 2, fb0, fb1));
+}
+
+void rgb_lcd_register_vsync_cb(esp_lcd_panel_handle_t panel,
+                                bool (*cb)(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t*, void*),
+                                void* user_ctx) {
+    esp_lcd_rgb_panel_event_callbacks_t cbs = {};
+    cbs.on_vsync = cb;
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel, &cbs, user_ctx));
 }

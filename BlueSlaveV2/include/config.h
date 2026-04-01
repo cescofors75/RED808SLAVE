@@ -18,7 +18,7 @@
 #define LCD_HSYNC      GPIO_NUM_46
 #define LCD_DE         GPIO_NUM_5
 #define LCD_PCLK       GPIO_NUM_7
-#define LCD_PCLK_HZ    (16 * 1000 * 1000)  // 16MHz → ~17fps LCD refresh (up from 12MHz/13fps)
+#define LCD_PCLK_HZ    (21 * 1000 * 1000)  // 21MHz — bounce buffers eliminate PSRAM→DMA contention
 
 // RGB565 Data (16-bit)
 #define LCD_B3         GPIO_NUM_14

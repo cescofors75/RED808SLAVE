@@ -1,6 +1,6 @@
 // =============================================================================
 // lvgl_port.cpp - LVGL port for Waveshare ESP32-S3-Touch-LCD-7B
-// ESP-IDF 4.4 single-framebuffer RGB panel — vsync-aligned direct_mode
+// ESP-IDF 5.x — zero-copy double-buffer via bounce buffers
 // =============================================================================
 #include "lvgl_port.h"
 #include "gt911_touch.h"
@@ -20,12 +20,10 @@ static esp_lcd_panel_handle_t lcd_panel = NULL;
 static lv_disp_draw_buf_t draw_buf;
 static lv_disp_drv_t disp_drv;
 static lv_indev_drv_t indev_drv;
-static lv_color_t* draw_buf_1 = NULL;
-static lv_color_t* draw_buf_2 = NULL;
 
 // Vsync ISR — signals that the current frame scan just finished
 static bool IRAM_ATTR lvgl_on_vsync(esp_lcd_panel_handle_t panel,
-                                     esp_lcd_rgb_panel_event_data_t* edata,
+                                     const esp_lcd_rgb_panel_event_data_t* edata,
                                      void* user_ctx) {
     (void)panel; (void)edata; (void)user_ctx;
     BaseType_t woken = pdFALSE;
@@ -33,23 +31,19 @@ static bool IRAM_ATTR lvgl_on_vsync(esp_lcd_panel_handle_t panel,
     return woken == pdTRUE;
 }
 
-// Wait for vsync — call right before writing to the panel framebuffer
-static inline void wait_vsync() {
-    if (!vsync_sem) return;
-    xSemaphoreTake(vsync_sem, 0);               // drain any stale signal
-    xSemaphoreTake(vsync_sem, pdMS_TO_TICKS(20)); // wait for real vsync (LCD ~16.7ms)
-}
-
-// Flush: direct_mode — LVGL rendered into our buffer, copy dirty rects to panel FB
+// Flush: zero-copy framebuffer swap.
+// LVGL rendered directly into one of the panel's own PSRAM framebuffers.
+// draw_bitmap recognises the pointer and atomically swaps the active FB
+// — no memcpy happens. Then we wait for vsync so DMA starts reading the
+// new buffer before LVGL writes to the old one (now the back buffer).
 static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
     esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)drv->user_data;
 
-    // Wait for vsync so DMA just started a new scan → we have ~16ms to write
-    wait_vsync();
+    // Zero-copy swap: panel driver recognises its own FB pointer
+    esp_lcd_panel_draw_bitmap(panel, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, color_p);
 
-    // Copy the dirty area to the panel framebuffer
-    esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1,
-                              area->x2 + 1, area->y2 + 1, color_p);
+    // Wait for vsync — ensures DMA switched to new FB before we return
+    xSemaphoreTake(vsync_sem, pdMS_TO_TICKS(100));
 
     lv_disp_flush_ready(drv);
 }
@@ -91,33 +85,29 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     vsync_sem  = xSemaphoreCreateBinary();
 
     lv_init();
-    rgb_lcd_set_vsync_cb(lvgl_on_vsync, NULL);
+    rgb_lcd_register_vsync_cb(lcd_panel, lvgl_on_vsync, NULL);
 
-    // Two full-screen buffers in PSRAM — required for direct_mode
-    // Align to 64 bytes for optimal DMA transfer bandwidth
+    // Get the panel's own PSRAM framebuffers — LVGL renders directly into
+    // these. On flush, draw_bitmap recognises the pointer and does a
+    // zero-copy swap instead of memcpy. Saves 2.4MB PSRAM and eliminates
+    // the entire copy step.
+    void* fb0 = NULL;
+    void* fb1 = NULL;
+    rgb_lcd_get_frame_buffers(lcd_panel, &fb0, &fb1);
+
     const size_t buf_pixels = SCREEN_WIDTH * SCREEN_HEIGHT;
-    draw_buf_1 = (lv_color_t*)heap_caps_aligned_alloc(64, buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    draw_buf_2 = (lv_color_t*)heap_caps_aligned_alloc(64, buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    if (!draw_buf_1 || !draw_buf_2) {
-        ESP_LOGE(TAG, "FATAL: Cannot allocate LVGL draw buffers in PSRAM!");
-        return;
-    }
-    // Zero both buffers so first frame is clean black
-    memset(draw_buf_1, 0, buf_pixels * sizeof(lv_color_t));
-    memset(draw_buf_2, 0, buf_pixels * sizeof(lv_color_t));
+    lv_disp_draw_buf_init(&draw_buf, fb0, fb1, buf_pixels);
 
-    lv_disp_draw_buf_init(&draw_buf, draw_buf_1, draw_buf_2, buf_pixels);
-
-    // direct_mode: LVGL renders only dirty areas into the buffer.
-    // On flush we copy just those dirty rect(s) to the panel FB.
-    // This is MUCH faster than full_refresh (which copies 1.2MB every frame).
+    // direct_mode: LVGL renders only dirty areas into the panel FB.
+    // Flush swaps the active FB (zero-copy). LVGL then syncs dirty areas
+    // from the old front buffer to the new back buffer automatically.
     lv_disp_drv_init(&disp_drv);
     disp_drv.hor_res      = SCREEN_WIDTH;
     disp_drv.ver_res      = SCREEN_HEIGHT;
     disp_drv.flush_cb     = disp_flush_cb;
     disp_drv.draw_buf     = &draw_buf;
     disp_drv.user_data    = lcd_panel;
-    disp_drv.direct_mode  = 1;   // Only flush changed regions
+    disp_drv.direct_mode  = 1;
     disp_drv.full_refresh = 0;
     lv_disp_drv_register(&disp_drv);
 
@@ -130,7 +120,7 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     // LVGL task — core 1, priority 3 (higher = less preemption during flush)
     xTaskCreatePinnedToCore(lvgl_task, "lvgl", 12288, NULL, 3, NULL, 1);
 
-    ESP_LOGI(TAG, "LVGL port: %dx%d direct_mode, 2x full PSRAM buffers, vsync-synced",
+    ESP_LOGI(TAG, "LVGL port: %dx%d direct_mode, zero-copy double-buffer, bounce DMA",
              SCREEN_WIDTH, SCREEN_HEIGHT);
 }
 

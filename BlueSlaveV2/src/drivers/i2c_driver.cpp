@@ -21,6 +21,7 @@ void i2c_init() {
         i2c_bus_mutex = xSemaphoreCreateMutex();
     }
     Wire.begin(I2C_SDA, I2C_SCL, I2C_FREQ);
+    Wire.setBufferSize(256);  // Arduino 3.x: increase I2C buffer from default 128
     Wire.setTimeOut(8);
 }
 
