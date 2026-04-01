@@ -1426,44 +1426,10 @@ void ui_create_settings_screen() {
     lv_obj_set_style_bg_color(scr_settings, RED808_BG, 0);
     ui_create_header(scr_settings);
 
-    // ── DRUM KIT Card ──
-    lv_obj_t* kit_card = lv_obj_create(scr_settings);
-    lv_obj_set_size(kit_card, 460, 160);
-    lv_obj_set_pos(kit_card, 30, 75);
-    lv_obj_clear_flag(kit_card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(kit_card, RED808_PANEL, 0);
-    lv_obj_set_style_bg_opa(kit_card, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(kit_card, 12, 0);
-    lv_obj_set_style_border_color(kit_card, RED808_BORDER, 0);
-    lv_obj_set_style_border_width(kit_card, 1, 0);
-    lv_obj_set_style_pad_all(kit_card, 16, 0);
-
-    lv_obj_t* kit_icon = lv_label_create(kit_card);
-    lv_label_set_text(kit_icon, LV_SYMBOL_AUDIO " DRUM KIT");
-    lv_obj_set_style_text_font(kit_icon, &lv_font_montserrat_22, 0);
-    lv_obj_set_style_text_color(kit_icon, RED808_ACCENT, 0);
-    lv_obj_set_pos(kit_icon, 0, 0);
-
-    lv_obj_t* dd = lv_dropdown_create(kit_card);
-    lv_dropdown_set_options(dd, "808 CLASSIC\n808 BRIGHT\n808 DRY");
-    lv_obj_set_size(dd, 380, 50);
-    lv_obj_set_pos(dd, 20, 50);
-    lv_obj_set_style_text_font(dd, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_bg_color(dd, RED808_SURFACE, 0);
-    lv_obj_set_style_text_color(dd, RED808_TEXT, 0);
-    lv_obj_set_style_border_color(dd, RED808_BORDER, 0);
-    lv_obj_set_style_radius(dd, 8, 0);
-
-    lv_obj_t* kit_desc = lv_label_create(kit_card);
-    lv_label_set_text(kit_desc, "Selecciona el kit de samples activo");
-    lv_obj_set_style_text_font(kit_desc, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(kit_desc, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(kit_desc, 20, 110);
-
-    // ── NETWORK Card ──
+    // ── NETWORK Card (full width) ──
     lv_obj_t* net_card = lv_obj_create(scr_settings);
-    lv_obj_set_size(net_card, 480, 160);
-    lv_obj_set_pos(net_card, 520, 75);
+    lv_obj_set_size(net_card, 970, 130);
+    lv_obj_set_pos(net_card, 30, 75);
     lv_obj_clear_flag(net_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(net_card, RED808_PANEL, 0);
     lv_obj_set_style_bg_opa(net_card, LV_OPA_COVER, 0);
@@ -1478,22 +1444,32 @@ void ui_create_settings_screen() {
     lv_obj_set_style_text_color(net_icon, RED808_INFO, 0);
     lv_obj_set_pos(net_icon, 0, 0);
 
+    // Left info block
     lv_obj_t* wifi_info = lv_label_create(net_card);
     lv_label_set_text_fmt(wifi_info,
         "SSID:    %s\n"
-        "Master:  %s:%d\n"
-        "Role:    SURFACE CONTROLLER",
+        "Master:  %s:%d",
         WiFiConfig::SSID,
         WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
     lv_obj_set_style_text_font(wifi_info, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(wifi_info, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(wifi_info, 20, 45);
+    lv_obj_set_pos(wifi_info, 20, 40);
     lv_obj_set_style_text_line_space(wifi_info, 8, 0);
+
+    // Right info block
+    lv_obj_t* role_info = lv_label_create(net_card);
+    lv_label_set_text_fmt(role_info,
+        "Role:     SURFACE CONTROLLER\n"
+        "Cores:    %d x %d MHz", 2, ESP.getCpuFreqMHz());
+    lv_obj_set_style_text_font(role_info, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(role_info, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(role_info, 480, 40);
+    lv_obj_set_style_text_line_space(role_info, 8, 0);
 
     // ── THEME SELECTOR Section ──
     lv_obj_t* theme_card = lv_obj_create(scr_settings);
-    lv_obj_set_size(theme_card, 970, 280);
-    lv_obj_set_pos(theme_card, 30, 260);
+    lv_obj_set_size(theme_card, 970, 340);
+    lv_obj_set_pos(theme_card, 30, 220);
     lv_obj_clear_flag(theme_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(theme_card, RED808_PANEL, 0);
     lv_obj_set_style_bg_opa(theme_card, LV_OPA_COVER, 0);
@@ -1513,12 +1489,13 @@ void ui_create_settings_screen() {
         0xFF4444, 0x4A9EFF, 0x39FF14, 0xFF6B35, 0xFF00AA, 0x999999
     };
     int btn_w = 140;
+    int btn_h = 220;
     int btn_gap = 12;
     int btn_x_start = (970 - 32 - THEME_COUNT * btn_w - (THEME_COUNT - 1) * btn_gap) / 2;
 
     for (int i = 0; i < THEME_COUNT; i++) {
         lv_obj_t* btn = lv_btn_create(theme_card);
-        lv_obj_set_size(btn, btn_w, 180);
+        lv_obj_set_size(btn, btn_w, btn_h);
         lv_obj_set_pos(btn, btn_x_start + i * (btn_w + btn_gap), 45);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_USER_1);  // protect from theme restyling
         lv_obj_set_style_bg_color(btn, lv_color_hex(theme_presets[i].bg), 0);
@@ -1544,8 +1521,8 @@ void ui_create_settings_screen() {
         // 4 small color dots showing track palette preview
         for (int c = 0; c < 4; c++) {
             lv_obj_t* dot = lv_obj_create(btn);
-            lv_obj_set_size(dot, 22, 22);
-            lv_obj_set_pos(dot, 14 + c * 28, 30);
+            lv_obj_set_size(dot, 24, 24);
+            lv_obj_set_pos(dot, 10 + c * 30, 32);
             lv_obj_add_flag(dot, LV_OBJ_FLAG_USER_1);
             lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_set_style_bg_color(dot, lv_color_hex(theme_presets[i].track_colors[c * 4]), 0);
@@ -1554,21 +1531,34 @@ void ui_create_settings_screen() {
             lv_obj_set_style_border_width(dot, 0, 0);
         }
 
+        // 4 more color dots — second row of palette preview
+        for (int c = 0; c < 4; c++) {
+            lv_obj_t* dot = lv_obj_create(btn);
+            lv_obj_set_size(dot, 24, 24);
+            lv_obj_set_pos(dot, 10 + c * 30, 62);
+            lv_obj_add_flag(dot, LV_OBJ_FLAG_USER_1);
+            lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_style_bg_color(dot, lv_color_hex(theme_presets[i].track_colors[c * 4 + 2]), 0);
+            lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_border_width(dot, 0, 0);
+        }
+
         // Theme name
         lv_obj_t* lbl = lv_label_create(btn);
         lv_label_set_text(lbl, theme_presets[i].name);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
         lv_obj_set_style_text_color(lbl, lv_color_hex(theme_presets[i].text), 0);
-        lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -12);
+        lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -14);
         lv_obj_add_flag(lbl, LV_OBJ_FLAG_USER_1);
 
         // Active indicator
         if (i == currentTheme) {
             lv_obj_t* check = lv_label_create(btn);
             lv_label_set_text(check, LV_SYMBOL_OK);
-            lv_obj_set_style_text_font(check, &lv_font_montserrat_18, 0);
+            lv_obj_set_style_text_font(check, &lv_font_montserrat_22, 0);
             lv_obj_set_style_text_color(check, lv_color_hex(btn_colors[i]), 0);
-            lv_obj_align(check, LV_ALIGN_BOTTOM_MID, 0, -30);
+            lv_obj_align(check, LV_ALIGN_BOTTOM_MID, 0, -38);
             lv_obj_add_flag(check, LV_OBJ_FLAG_USER_1);
         }
 
@@ -1597,7 +1587,7 @@ void ui_create_diagnostics_screen() {
     lv_label_set_text(title, LV_SYMBOL_EYE_OPEN " DIAGNOSTICS");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 52);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 72);
 
     // Two-column layout
     // Left column (x=24): Hardware peripherals
@@ -1612,7 +1602,7 @@ void ui_create_diagnostics_screen() {
     };
 
     // Left column: rows 0-10
-    int y = 86;
+    int y = 108;
     int row_h = 32;
     for (int i = 0; i < 11; i++) {
         diag_labels[i] = lv_label_create(scr_diagnostics);
@@ -1633,7 +1623,7 @@ void ui_create_diagnostics_screen() {
     // Separator
     lv_obj_t* sep = lv_obj_create(scr_diagnostics);
     lv_obj_set_size(sep, 2, 11 * row_h - 6);
-    lv_obj_set_pos(sep, 498, 86);
+    lv_obj_set_pos(sep, 498, 108);
     lv_obj_set_style_bg_color(sep, RED808_TEXT_DIM, 0);
     lv_obj_set_style_bg_opa(sep, LV_OPA_30, 0);
     lv_obj_set_style_border_width(sep, 0, 0);
@@ -1644,10 +1634,10 @@ void ui_create_diagnostics_screen() {
     lv_label_set_text(sys_title, "ESP32-S3 SYSTEM");
     lv_obj_set_style_text_font(sys_title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(sys_title, lv_color_hex(0x00D4FF), 0);
-    lv_obj_set_pos(sys_title, 520, 86 - 18);
+    lv_obj_set_pos(sys_title, 520, 108 - 18);
 
     // Right column: rows 11-16
-    y = 86;
+    y = 108;
     for (int i = 11; i < DIAG_ROWS; i++) {
         diag_labels[i] = lv_label_create(scr_diagnostics);
         lv_label_set_text(diag_labels[i], row_names[i]);
