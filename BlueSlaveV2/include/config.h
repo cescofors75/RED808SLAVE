@@ -140,7 +140,7 @@ namespace Config {
     constexpr uint32_t ENCODER_READ_MS    = 20;  // 50Hz polling — encoders keep state, no loss
     constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
     constexpr uint32_t LED_FLASH_MS       = 100;
-    constexpr uint32_t SCREEN_UPDATE_MS   = 33;  // ~30fps UI update from Core 0 — reduce LVGL lock contention
+    constexpr uint32_t SCREEN_UPDATE_MS   = 16;  // ~60fps UI update — matches LCD refresh rate
     constexpr uint32_t UDP_CHECK_MS       = 30000;
 
     // Touch tuning (Waveshare 7B). Fine tune offsets if hitboxes feel shifted.

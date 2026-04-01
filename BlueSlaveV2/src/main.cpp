@@ -167,6 +167,7 @@ void updateByteButtonLeds();
 void updateTrackEncoderLED(int track);
 void handleAnalogEncoder();
 void updateUI();
+static void encoder_task(void* arg);
 
 static void requestTrackVolumesFromMaster() {
     if (!udpConnected) return;
@@ -1650,11 +1651,32 @@ void setup() {
     }
     Serial.printf("[HEAP] After UI: %d bytes  PSRAM: %d bytes\n", ESP.getFreeHeap(), ESP.getFreePsram());
 
+    // 11. Encoder task — dedicated FreeRTOS task for I2C encoder polling
+    xTaskCreatePinnedToCore(encoder_task, "enc", 8192, NULL, 2, NULL, 0);
+    Serial.println("[ENC] Encoder task started (Core 0, pri 2)");
+
     Serial.println("\n[SETUP] Complete! Entering main loop.\n");
 }
 
 // =============================================================================
-// LOOP (Core 0 - hardware polling + network)
+// ENCODER TASK (Core 0, priority 2 — dedicated I2C polling)
+// Runs independently of loop(), so I2C reads never block network/UI/touch.
+// =============================================================================
+
+static void encoder_task(void* arg) {
+    (void)arg;
+    TickType_t last_wake = xTaskGetTickCount();
+    while (true) {
+        handleM5Encoders();
+        handleDFRobotEncoders();
+        handleAnalogEncoder();
+        handleByteButton();
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(Config::ENCODER_READ_MS));
+    }
+}
+
+// =============================================================================
+// LOOP (Core 0 - network + touch + UI)
 // =============================================================================
 
 void loop() {
@@ -1729,14 +1751,7 @@ void loop() {
         lastLocalStepMs = now;
     }
 
-    // Encoder polling (50ms interval)
-    if (now - lastEncoderRead >= Config::ENCODER_READ_MS) {
-        lastEncoderRead = now;
-        handleM5Encoders();
-        handleDFRobotEncoders();
-        handleAnalogEncoder();
-        handleByteButton();  // calls updateByteButtonLeds() internally
-    }
+    // Encoders run in dedicated encoder_task — no polling here
 
     // UI update (~60fps)
     if (now - lastScreenUpdate >= Config::SCREEN_UPDATE_MS) {
@@ -1766,5 +1781,5 @@ void loop() {
         Serial.printf("[ALIVE] %lus Heap:%d PSRAM:%d\n", now/1000, ESP.getFreeHeap(), ESP.getFreePsram());
     }
 
-    delay(1); // Yield to other tasks
+    taskYIELD(); // Yield to encoder_task and other Core 0 tasks
 }
