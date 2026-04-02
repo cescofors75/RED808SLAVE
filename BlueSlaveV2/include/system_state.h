@@ -89,7 +89,7 @@ struct DiagnosticInfo {
 // =============================================================================
 
 // Screen
-extern Screen currentScreen;
+extern volatile Screen currentScreen;
 extern Screen previousScreen;
 extern bool needsFullRedraw;
 

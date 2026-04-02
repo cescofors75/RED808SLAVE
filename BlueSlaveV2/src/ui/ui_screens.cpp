@@ -639,9 +639,6 @@ void ui_update_live_pads() {
 
     for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
         bool active = livePadPressed[pad];
-        if (pad < BYTEBUTTON_BUTTONS && byteButtonLivePressed[pad]) {
-            active = true;
-        }
         if (livePadSyncMode && isPlaying) {
             if (patterns[currentPattern].steps[pad][currentStep]) {
                 active = true;

@@ -51,7 +51,7 @@ static SramAllocator sramAllocator;
 // =============================================================================
 
 // Screen
-Screen currentScreen = SCREEN_BOOT;
+volatile Screen currentScreen = SCREEN_BOOT;
 Screen previousScreen = SCREEN_BOOT;
 bool needsFullRedraw = true;
 volatile bool themeJustChanged = false;
@@ -135,6 +135,8 @@ uint8_t encoderLEDColors[Config::MAX_TRACKS][3] = {
 // Live pad touch guard (prevent phantom triggers on screen enter)
 unsigned long liveScreenEnteredMs = 0;
 static constexpr unsigned long LIVE_TOUCH_GUARD_MS = 500;
+static constexpr unsigned long TOUCH_RELEASE_DEBOUNCE_MS = 40;  // ignore brief touch gaps (GT911 bounce)
+static unsigned long livePadReleaseMs[Config::MAX_SAMPLES] = {}; // when each pad last went untouched
 
 // Timing
 unsigned long lastEncoderRead = 0;
@@ -148,6 +150,7 @@ unsigned long lastLocalStepMs  = 0;   // last local-clock step advance (independ
 int32_t prevM5Counter[Config::MAX_TRACKS];
 uint16_t prevDFValue[DFROBOT_ENCODER_COUNT];
 unsigned long lastLivePadTriggerMs[Config::MAX_SAMPLES];
+unsigned long livePadHoldStartMs[Config::MAX_SAMPLES];
 uint8_t prevByteButtonState = 0;
 bool byteButtonLivePressed[BYTEBUTTON_BUTTONS] = {false, false, false, false, false, false, false, false};
 uint32_t byteButtonLedCache[BYTEBUTTON_BUTTONS + 1] = {};
@@ -321,14 +324,29 @@ static void handleLivePadTouchMatrix(unsigned long now) {
 
     bool anyChanged = false;
     for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
-        if (new_state[pad] && !livePadPressed[pad]) {
-            pendingLivePadTriggerMask |= (1UL << pad);
-            lastLivePadTriggerMs[pad] = now;
-            anyChanged = true;
-        } else if (!new_state[pad] && livePadPressed[pad]) {
-            anyChanged = true;  // release → needs immediate visual update
+        if (new_state[pad]) {
+            // Finger is on pad — reset release timer
+            livePadReleaseMs[pad] = 0;
+            if (!livePadPressed[pad]) {
+                // Rising edge — new press
+                pendingLivePadTriggerMask |= (1UL << pad);
+                lastLivePadTriggerMs[pad] = now;
+                livePadHoldStartMs[pad] = now;
+                livePadPressed[pad] = true;
+                anyChanged = true;
+            }
+        } else if (livePadPressed[pad]) {
+            // Finger lifted — start/check release debounce
+            if (livePadReleaseMs[pad] == 0) {
+                livePadReleaseMs[pad] = now;  // start debounce timer
+            } else if ((now - livePadReleaseMs[pad]) >= TOUCH_RELEASE_DEBOUNCE_MS) {
+                // Confirmed release after debounce period
+                livePadPressed[pad] = false;
+                livePadReleaseMs[pad] = 0;
+                anyChanged = true;
+            }
+            // else: still within debounce window — keep pad pressed (ignore brief gap)
         }
-        livePadPressed[pad] = new_state[pad];
     }
 
     // Immediate visual update on release (press is handled after sendLivePadTrigger)
@@ -436,6 +454,7 @@ void initState() {
     for (int i = 0; i < Config::MAX_SAMPLES; i++) {
         livePadPressed[i] = false;
         lastLivePadTriggerMs[i] = 0;
+        livePadHoldStartMs[i] = 0;
     }
     for (int p = 0; p < Config::MAX_PATTERNS; p++) {
         memset(patterns[p].steps, 0, sizeof(patterns[p].steps));
@@ -1619,39 +1638,8 @@ void handleByteButton() {
     prevByteButtonState = status;
 
     unsigned long now = millis();
-    if (currentScreen == SCREEN_LIVE) {
-        // Guard: skip ByteButton triggers during guard period (avoids phantom pads on entry)
-        extern unsigned long liveScreenEnteredMs;
-        if ((now - liveScreenEnteredMs) < LIVE_TOUCH_GUARD_MS) {
-            memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
-            return;
-        }
-        int velocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
-
-        // Track press/release via edges — avoids phantom pads on entry
-        bool anyVisualChange = false;
-        for (int button = 0; button < BYTEBUTTON_BUTTONS && button < Config::MAX_SAMPLES; button++) {
-            bool isPressed  = (status & (1U << button)) != 0;
-            bool wasPressed = (previousState & (1U << button)) != 0;
-            if (isPressed && !wasPressed) {
-                // Rising edge — new press
-                byteButtonLivePressed[button] = true;
-                sendLivePadTrigger(button, velocity);
-                lastLivePadTriggerMs[button] = now;
-                anyVisualChange = true;
-            } else if (!isPressed && wasPressed) {
-                // Falling edge — release
-                byteButtonLivePressed[button] = false;
-                anyVisualChange = true;
-            }
-        }
-
-        // Immediate visual update only when state actually changed
-        if (anyVisualChange && lvgl_port_lock(5)) {
-            ui_update_live_pads();
-            lvgl_port_unlock();
-        }
-    } else {
+    // ByteButton always uses navigation functions (all screens including LIVE)
+    {
         memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
         for (int button = 0; button < BYTEBUTTON_BUTTONS; button++) {
             if ((pressedEdges & (1U << button)) == 0) continue;
@@ -1959,11 +1947,12 @@ void loop() {
         }
     }
 
-    // Repeat triggers — touch pads + ByteButton held
+    // Repeat triggers — touch pads held (only after initial hold delay)
     if (currentScreen == SCREEN_LIVE) {
         for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
-            bool held = livePadPressed[pad] || (pad < BYTEBUTTON_BUTTONS && byteButtonLivePressed[pad]);
-            if (!held) continue;
+            if (!livePadPressed[pad]) continue;
+            // Require hold for REPEAT_DELAY before any repeat fires
+            if ((now - livePadHoldStartMs[pad]) < Config::LIVE_PAD_REPEAT_DELAY_MS) continue;
             if ((now - lastLivePadTriggerMs[pad]) < Config::LIVE_PAD_REPEAT_MS) continue;
             sendLivePadTrigger(pad, padVelocity);
             lastLivePadTriggerMs[pad] = now;

@@ -173,7 +173,8 @@ namespace Config {
     constexpr int DF_VOLUME_STEP = 3;   // Master volume change per encoder step
     constexpr int DF_BPM_STEP = 1;      // BPM change per encoder step
     constexpr uint32_t DF_BUTTON_GUARD_MS = 250;
-    constexpr uint32_t LIVE_PAD_REPEAT_MS = 50;  // 20Hz pad repeat — tighter response
+    constexpr uint32_t LIVE_PAD_REPEAT_MS = 50;       // 20Hz pad repeat — tighter response
+    constexpr uint32_t LIVE_PAD_REPEAT_DELAY_MS = 250; // Hold 250ms before repeat starts
 
     // GPIO analog rotary encoder (pattern select)
     constexpr int ANALOG_ENC_PIN = 6;        // GPIO6 signal pin
