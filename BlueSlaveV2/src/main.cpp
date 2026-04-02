@@ -1206,6 +1206,20 @@ static void setM5EncoderLedDirect(int module, int enc, uint8_t r, uint8_t g, uin
 }
 
 // Called from loop() while SCREEN_BOOT — lights LEDs one by one in a rainbow sweep
+// HSV-like hue to RGB (s=1, v=200)
+static void hue_to_rgb(uint8_t hue, uint8_t &r, uint8_t &g, uint8_t &b) {
+    uint8_t region = hue / 43;
+    uint8_t remainder = (hue - (region * 43)) * 6;
+    switch (region) {
+        case 0: r = 200; g = remainder * 200 / 255; b = 0; break;
+        case 1: r = 200 - remainder * 200 / 255; g = 200; b = 0; break;
+        case 2: r = 0; g = 200; b = remainder * 200 / 255; break;
+        case 3: r = 0; g = 200 - remainder * 200 / 255; b = 200; break;
+        case 4: r = remainder * 200 / 255; g = 0; b = 200; break;
+        default: r = 200; g = 0; b = 200 - remainder * 200 / 255; break;
+    }
+}
+
 void bootLedAnimation() {
     if (bootLedDone) return;
     unsigned long now = millis();
@@ -1218,36 +1232,13 @@ void bootLedAnimation() {
     // Phase 16-24: ByteButton LEDs 0-8 (ocean blue)
 
     if (bootLedPhase < 8) {
-        // M5 module 0 — rainbow test
-        uint8_t hue = bootLedPhase * 32;  // spread across hue wheel
         uint8_t r, g, b;
-        // Simple HSV-like hue to RGB (s=1, v=200)
-        uint8_t region = hue / 43;
-        uint8_t remainder = (hue - (region * 43)) * 6;
-        switch (region) {
-            case 0: r = 200; g = remainder * 200 / 255; b = 0; break;
-            case 1: r = 200 - remainder * 200 / 255; g = 200; b = 0; break;
-            case 2: r = 0; g = 200; b = remainder * 200 / 255; break;
-            case 3: r = 0; g = 200 - remainder * 200 / 255; b = 200; break;
-            case 4: r = remainder * 200 / 255; g = 0; b = 200; break;
-            default: r = 200; g = 0; b = 200 - remainder * 200 / 255; break;
-        }
+        hue_to_rgb(bootLedPhase * 32, r, g, b);
         setM5EncoderLedDirect(0, bootLedPhase, r, g, b);
     } else if (bootLedPhase < 16) {
-        // M5 module 1 — rainbow test
         int enc = bootLedPhase - 8;
-        uint8_t hue = enc * 32;
         uint8_t r, g, b;
-        uint8_t region = hue / 43;
-        uint8_t remainder = (hue - (region * 43)) * 6;
-        switch (region) {
-            case 0: r = 200; g = remainder * 200 / 255; b = 0; break;
-            case 1: r = 200 - remainder * 200 / 255; g = 200; b = 0; break;
-            case 2: r = 0; g = 200; b = remainder * 200 / 255; break;
-            case 3: r = 0; g = 200 - remainder * 200 / 255; b = 200; break;
-            case 4: r = remainder * 200 / 255; g = 0; b = 200; break;
-            default: r = 200; g = 0; b = 200 - remainder * 200 / 255; break;
-        }
+        hue_to_rgb(enc * 32, r, g, b);
         setM5EncoderLedDirect(1, enc, r, g, b);
     } else if (bootLedPhase < 25) {
         // ByteButton — ocean blue tones

@@ -14,6 +14,18 @@
 extern void sendUDPCommand(JsonDocument& doc);
 extern void sendUDPCommand(const char* cmd);
 
+// SRAM allocator — same as main.cpp, avoids PSRAM bus contention with LCD DMA
+struct SramAllocatorUI : ArduinoJson::Allocator {
+    void* allocate(size_t size) override {
+        return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    void deallocate(void* ptr) override { heap_caps_free(ptr); }
+    void* reallocate(void* ptr, size_t new_size) override {
+        return heap_caps_realloc(ptr, new_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+};
+static SramAllocatorUI sramAllocUI;
+
 // Screen objects
 lv_obj_t* scr_menu = NULL;
 lv_obj_t* scr_live = NULL;
@@ -1198,10 +1210,16 @@ void ui_update_sequencer() {
 static void vol_slider_cb(lv_event_t* e) {
     int track = (int)(intptr_t)lv_event_get_user_data(e);
     lv_obj_t* slider = lv_event_get_target(e);
-    trackVolumes[track] = lv_slider_get_value(slider);
+    int newVol = lv_slider_get_value(slider);
+    if (newVol == trackVolumes[track]) return;
+    trackVolumes[track] = newVol;
     if (vol_labels[track]) {
         lv_label_set_text_fmt(vol_labels[track], "%d", trackVolumes[track]);
     }
+    // Send volume to master
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"setTrackVolume\",\"track\":%d,\"volume\":%d}", track, newVol);
+    sendUDPCommand(buf);
 }
 
 static void ui_apply_volume_track_style(int track) {
@@ -1811,11 +1829,10 @@ static void pattern_select_cb(lv_event_t* e) {
     if (idx < 0 || idx >= VISIBLE_PATTERNS) return;
     currentPattern = idx;
 
-    // Send selectPattern to master
-    JsonDocument doc;
-    doc["cmd"] = "selectPattern";
-    doc["index"] = idx;
-    sendUDPCommand(doc);
+    // Send selectPattern to master (pre-formatted to avoid PSRAM contention)
+    char buf[48];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"selectPattern\",\"index\":%d}", idx);
+    sendUDPCommand(buf);
 
     // Update button visuals immediately
     for (int i = 0; i < VISIBLE_PATTERNS; i++) {
@@ -1870,6 +1887,10 @@ void ui_create_patterns_screen() {
 }
 
 void ui_update_patterns() {
+    static int prevPattern = -1;
+    if (currentPattern == prevPattern) return;
+    prevPattern = currentPattern;
+
     for (int i = 0; i < VISIBLE_PATTERNS; i++) {
         if (!pattern_btns[i]) continue;
         bool active = (i == currentPattern);
@@ -1928,7 +1949,7 @@ static void sd_back_btn_cb(lv_event_t* e);
 
 // Send loadSample UDP  (also callable from outside)
 void ui_sdcard_send_load_sample(int pad, const char* family, const char* filename) {
-    JsonDocument doc;
+    JsonDocument doc(&sramAllocUI);
     doc["cmd"]      = "loadSample";
     doc["family"]   = family;
     doc["filename"] = filename;
@@ -1960,12 +1981,24 @@ static bool sd_try_mount() {
     return true;
 }
 
+// Free heap-allocated user data from file buttons before clearing the list
+static void sd_free_file_userdata() {
+    if (!sd_file_list) return;
+    uint32_t cnt = lv_obj_get_child_cnt(sd_file_list);
+    for (uint32_t i = 0; i < cnt; i++) {
+        lv_obj_t* child = lv_obj_get_child(sd_file_list, i);
+        void* ud = lv_obj_get_user_data(child);
+        if (ud) { lv_mem_free(ud); lv_obj_set_user_data(child, NULL); }
+    }
+}
+
 // Populate file list from sd_current_dir
 static void sd_refresh_filelist() {
     if (!sd_left_panel) return;
     if (!sd_file_list) return;
 
-    // Clear existing items
+    // Free user data before clearing items (prevents memory leak)
+    sd_free_file_userdata();
     lv_obj_clean(sd_file_list);
 
     // Update path label

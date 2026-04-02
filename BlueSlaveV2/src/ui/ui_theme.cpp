@@ -153,7 +153,7 @@ void theme_encoder_color(int track, uint8_t out_rgb[3]) {
         out_rgb[1] = tc().encoder_rgb[1];
         out_rgb[2] = tc().encoder_rgb[2];
     } else {
-        // Default per-track colors from inst_colors
+        if (track < 0 || track >= 16) { out_rgb[0] = out_rgb[1] = out_rgb[2] = 0; return; }
         extern uint8_t encoderLEDColors[16][3];
         out_rgb[0] = encoderLEDColors[track][0];
         out_rgb[1] = encoderLEDColors[track][1];
@@ -183,13 +183,15 @@ static void restyle_recursive(lv_obj_t* obj,
 
     // Check bg color against UI palette and track palette
     lv_color_t bg = lv_obj_get_style_bg_color(obj, 0);
-    for (int i = 0; i < 13; i++) {
-        if (color_eq(bg, p_ui[i])) { lv_obj_set_style_bg_color(obj, c_ui[i], 0); goto bg_done; }
+    {
+        bool matched = false;
+        for (int i = 0; i < 13 && !matched; i++) {
+            if (color_eq(bg, p_ui[i])) { lv_obj_set_style_bg_color(obj, c_ui[i], 0); matched = true; }
+        }
+        for (int i = 0; i < 16 && !matched; i++) {
+            if (color_eq(bg, p_track[i])) { lv_obj_set_style_bg_color(obj, c_track[i], 0); matched = true; }
+        }
     }
-    for (int i = 0; i < 16; i++) {
-        if (color_eq(bg, p_track[i])) { lv_obj_set_style_bg_color(obj, c_track[i], 0); break; }
-    }
-    bg_done:
 
     // Check border color
     lv_color_t bd = lv_obj_get_style_border_color(obj, 0);
@@ -199,13 +201,15 @@ static void restyle_recursive(lv_obj_t* obj,
 
     // Check text color
     lv_color_t tx = lv_obj_get_style_text_color(obj, 0);
-    for (int i = 0; i < 13; i++) {
-        if (color_eq(tx, p_ui[i])) { lv_obj_set_style_text_color(obj, c_ui[i], 0); goto tx_done; }
+    {
+        bool matched = false;
+        for (int i = 0; i < 13 && !matched; i++) {
+            if (color_eq(tx, p_ui[i])) { lv_obj_set_style_text_color(obj, c_ui[i], 0); matched = true; }
+        }
+        for (int i = 0; i < 16 && !matched; i++) {
+            if (color_eq(tx, p_track[i])) { lv_obj_set_style_text_color(obj, c_track[i], 0); matched = true; }
+        }
     }
-    for (int i = 0; i < 16; i++) {
-        if (color_eq(tx, p_track[i])) { lv_obj_set_style_text_color(obj, c_track[i], 0); break; }
-    }
-    tx_done:
 
     // Slider/arc indicator bg
     lv_color_t ind = lv_obj_get_style_bg_color(obj, LV_PART_INDICATOR);
