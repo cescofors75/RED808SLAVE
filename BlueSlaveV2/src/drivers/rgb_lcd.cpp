@@ -72,6 +72,10 @@ void rgb_lcd_get_frame_buffers(esp_lcd_panel_handle_t panel, void** fb0, void** 
     ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel, 2, fb0, fb1));
 }
 
+void rgb_lcd_refresh(esp_lcd_panel_handle_t panel) {
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_refresh(panel));
+}
+
 void rgb_lcd_register_vsync_cb(esp_lcd_panel_handle_t panel,
                                 bool (*cb)(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t*, void*),
                                 void* user_ctx) {

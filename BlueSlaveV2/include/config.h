@@ -18,7 +18,7 @@
 #define LCD_HSYNC      GPIO_NUM_46
 #define LCD_DE         GPIO_NUM_5
 #define LCD_PCLK       GPIO_NUM_7
-#define LCD_PCLK_HZ    (21 * 1000 * 1000)  // 21MHz — bounce buffers eliminate PSRAM→DMA contention
+#define LCD_PCLK_HZ    (16 * 1000 * 1000)  // 16MHz — max time per bounce fill = min PSRAM contention with WiFi
 
 // RGB565 Data (16-bit)
 #define LCD_B3         GPIO_NUM_14
@@ -48,7 +48,11 @@
 
 // Frame buffers
 #define LCD_NUM_FB     2   // Double buffer
-#define LCD_BOUNCE_BUF (SCREEN_WIDTH * 10)
+// Bounce buffer size: larger = fewer fills/frame = less WiFi-induced DMA underruns.
+// * 10 = 60 fills/frame (~720µs/fill window) — underruns when WiFi is active
+// * 20 = 30 fills/frame (~1.7ms/fill window at 18MHz) — fits WiFi DMA comfortably
+// Each buffer: 20480px × 2B = 40KB SRAM. Total: 80KB internal SRAM.
+#define LCD_BOUNCE_BUF (SCREEN_WIDTH * 20)
 
 // =============================================================================
 // I2C BUS (shared: GT911 touch + CH32V003 IO + PCA9548A hub)
@@ -115,6 +119,9 @@ namespace WiFiConfig {
     constexpr uint32_t TIMEOUT_MS  = 8000;
     constexpr uint32_t RECONNECT_INTERVAL_MS       = 5000;
     constexpr uint32_t RECONNECT_ATTEMPT_TIMEOUT_MS = 8000;
+    constexpr uint32_t DISCONNECT_GRACE_MS = 1500;
+    constexpr uint32_t MASTER_HELLO_RETRY_MS = 8000;
+    constexpr uint32_t UDP_RECEIVE_MS = 30;
 }
 
 // =============================================================================

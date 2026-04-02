@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include "nvs_flash.h"
+#include "esp_heap_caps.h"
 #include <M5ROTATE8.h>
 #include <DFRobot_VisualRotaryEncoder.h>
 #include "lvgl.h"
@@ -121,6 +122,7 @@ static constexpr unsigned long LIVE_TOUCH_GUARD_MS = 500;
 // Timing
 unsigned long lastEncoderRead = 0;
 unsigned long lastWiFiCheck = 0;
+unsigned long lastWiFiConnectedMs = 0;
 unsigned long lastScreenUpdate = 0;
 unsigned long lastUDPCheck = 0;
 unsigned long lastMasterPacketMs = 0;
@@ -150,6 +152,9 @@ static constexpr uint8_t BYTEBUTTON_BRIGHTNESS = 180;
 void initState();
 void setupWiFi();
 void checkWiFiReconnect();
+static void finalizeWiFiConnection();
+static void startWiFiReconnectAttempt();
+static void requestMasterSync(bool requestState);
 void sendUDPCommand(const char* cmd);
 void sendUDPCommand(JsonDocument& doc);
 void receiveUDPData();
@@ -241,18 +246,18 @@ static void requestTrackVolumesFromMaster() {
     sendUDPCommand(doc);
 }
 
-static void requestMasterSync() {
+static void requestMasterSync(bool requestState) {
     if (!udpConnected) return;
 
     JsonDocument doc;
     doc["cmd"] = "hello";
     doc["device"] = "SURFACE";
     sendUDPCommand(doc);
-    requestPatternFromMaster();
-    requestTrackVolumesFromMaster();
 
-    // Upload demo pattern 7 (index 6) to master
-    sendFullPatternToMaster(6);
+    if (requestState) {
+        requestPatternFromMaster();
+        requestTrackVolumesFromMaster();
+    }
 }
 
 static int quantizeDFDelta(int index, int16_t delta) {
@@ -453,6 +458,28 @@ void initState() {
 // WiFi / UDP
 // =============================================================================
 
+static void finalizeWiFiConnection() {
+    wifiConnected = true;
+    wifiReconnecting = false;
+    lastWiFiConnectedMs = millis();
+    lastWiFiCheck = lastWiFiConnectedMs;
+
+    udp.stop();
+    udpConnected = udp.begin(WiFiConfig::UDP_PORT);
+
+    diagInfo.wifiOk = true;
+    diagInfo.udpConnected = udpConnected;
+}
+
+static void startWiFiReconnectAttempt() {
+    lastWiFiCheck = millis();
+    wifiReconnecting = true;
+
+    if (!WiFi.reconnect()) {
+        WiFi.begin(WiFiConfig::SSID, WiFiConfig::PASSWORD);
+    }
+}
+
 void setupWiFi() {
     Serial.println("[WiFi] Connecting...");
     WiFi.disconnect(true);
@@ -470,67 +497,65 @@ void setupWiFi() {
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-        wifiConnected = true;
-        udp.stop();
-        udpConnected = udp.begin(WiFiConfig::UDP_PORT);
+        finalizeWiFiConnection();
         Serial.printf("\n[WiFi] Connected! IP: %s  UDP: %s\n",
                       WiFi.localIP().toString().c_str(),
                       udpConnected ? "OK" : "FALLO");
 
         if (udpConnected) {
-            requestMasterSync();
+            requestMasterSync(true);
         }
     } else {
         Serial.println("\n[WiFi] Initial connect timeout - will retry in background");
         wifiConnected = false;
+        wifiReconnecting = false;
+        udpConnected = false;
+        diagInfo.wifiOk = false;
+        diagInfo.udpConnected = false;
     }
-    diagInfo.wifiOk = wifiConnected;
-    diagInfo.udpConnected = udpConnected;
     lastWiFiCheck = millis();
 }
 
 void checkWiFiReconnect() {
-    if (WiFi.status() == WL_CONNECTED) {
+    unsigned long now_wifi = millis();
+    wl_status_t wifiStatus = WiFi.status();
+
+    if (wifiStatus == WL_CONNECTED) {
+        lastWiFiConnectedMs = now_wifi;
         if (!wifiConnected) {
-            wifiConnected = true;
-            wifiReconnecting = false;
-            udp.stop();
-            udpConnected = udp.begin(WiFiConfig::UDP_PORT);
-            diagInfo.wifiOk = true;
-            diagInfo.udpConnected = udpConnected;
+            finalizeWiFiConnection();
             Serial.printf("[WiFi] Reconectado! IP: %s  UDP: %s\n",
                           WiFi.localIP().toString().c_str(),
                           udpConnected ? "OK" : "FALLO");
             if (udpConnected) {
-                requestMasterSync();
+                requestMasterSync(true);
             }
         }
         return;
     }
 
-    wifiConnected = false;
-    udpConnected = false;
-    masterConnected = false;
-    diagInfo.wifiOk = false;
-    diagInfo.udpConnected = false;
+    if (wifiConnected && (now_wifi - lastWiFiConnectedMs) < WiFiConfig::DISCONNECT_GRACE_MS) {
+        return;
+    }
 
-    unsigned long now_wifi = millis();
+    if (wifiConnected || udpConnected || masterConnected) {
+        wifiConnected = false;
+        masterConnected = false;
+        if (udpConnected) {
+            udp.stop();
+        }
+        udpConnected = false;
+        diagInfo.wifiOk = false;
+        diagInfo.udpConnected = false;
+        Serial.println("[WiFi] Link lost, waiting for background reconnect");
+    }
 
-    // Non-blocking reconnection: just issue WiFi.begin() and let
-    // WiFi.setAutoReconnect(true) handle it in the background.
-    // No polling loop — check result on next loop() iteration.
     if (wifiReconnecting && (now_wifi - lastWiFiCheck > WiFiConfig::RECONNECT_ATTEMPT_TIMEOUT_MS)) {
         wifiReconnecting = false;
     }
 
     if (!wifiReconnecting && (now_wifi - lastWiFiCheck > WiFiConfig::RECONNECT_INTERVAL_MS)) {
-        lastWiFiCheck = now_wifi;
-        wifiReconnecting = true;
-        WiFi.disconnect(false);
-        WiFi.mode(WIFI_STA);
-        WiFi.setSleep(false);
-        WiFi.begin(WiFiConfig::SSID, WiFiConfig::PASSWORD);
-        // Returns immediately — no blocking wait!
+        startWiFiReconnectAttempt();
     }
 }
 
@@ -633,18 +658,30 @@ void sendLivePadTrigger(int pad, int velocity) {
 // UDP RECEIVE
 // =============================================================================
 
+// ArduinoJson allocator that forces internal SRAM (avoids PSRAM bus contention
+// with LCD bounce-buffer DMA during UDP packet parsing).
+struct SramAllocator : ArduinoJson::Allocator {
+    void* allocate(size_t size) override {
+        return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    void deallocate(void* ptr) override {
+        heap_caps_free(ptr);
+    }
+    void* reallocate(void* ptr, size_t new_size) override {
+        return heap_caps_realloc(ptr, new_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+};
+static SramAllocator sramAllocator;
+
 void receiveUDPData() {
     if (!udpConnected) return;
 
-    // Reuse JsonDocument across packets to avoid per-packet construction overhead
-    JsonDocument doc;
-
-    // Drain ALL pending UDP packets each loop iteration
-    for (int pkt = 0; pkt < 8; pkt++) {
+    // Process only 1 UDP packet per call (called every 30ms).
+    // Minimises PSRAM bus contention between JSON parsing and LCD DMA.
     int packetSize = udp.parsePacket();
     if (packetSize == 0) return;
 
-    char buf[1024];
+    char buf[512];
     int len = udp.read(buf, sizeof(buf) - 1);
     if (len <= 0) return;
     buf[len] = '\0';
@@ -653,12 +690,13 @@ void receiveUDPData() {
     masterConnected = true;
     diagInfo.udpConnected = true;
 
-    doc.clear();
+    // Parse JSON using internal SRAM only — no PSRAM access
+    JsonDocument doc(&sramAllocator);
     DeserializationError err = deserializeJson(doc, buf);
-    if (err) continue;
+    if (err) return;
 
     const char* cmd = doc["cmd"];
-    if (!cmd) continue;
+    if (!cmd) return;
 
     if (strcmp(cmd, "pattern_sync") == 0) {
         int pat = doc["pattern"] | 0;
@@ -681,7 +719,7 @@ void receiveUDPData() {
                             if (patterns[6].steps[t][s]) localHasData = true;
                     if (localHasData) {
                         Serial.println("[UDP] Skipping empty pattern_sync for pattern 7 (demo)");
-                        continue;  // skip this packet, keep local demo
+                        return;  // skip this packet, keep local demo
                     }
                 }
                 int t = 0;
@@ -762,7 +800,7 @@ void receiveUDPData() {
             trackVolumes[track] = constrain(value, 0, Config::MAX_VOLUME);
         }
     }
-    } // end drain loop
+    // end receiveUDPData
 }
 
 // =============================================================================
@@ -1796,13 +1834,17 @@ void loop() {
     // WiFi reconnection check
     checkWiFiReconnect();
 
-    // Receive UDP data
-    receiveUDPData();
+    // Receive UDP data (throttled to reduce PSRAM bus contention with LCD)
+    static unsigned long lastUDPReceiveMs = 0;
+    if (now - lastUDPReceiveMs >= WiFiConfig::UDP_RECEIVE_MS) {
+        lastUDPReceiveMs = now;
+        receiveUDPData();
+    }
 
-    if (wifiConnected && udpConnected && !masterConnected && (now - lastUDPCheck >= 2000)) {
+    if (wifiConnected && udpConnected && !masterConnected && (now - lastUDPCheck >= WiFiConfig::MASTER_HELLO_RETRY_MS)) {
         lastUDPCheck = now;
         Serial.println("[UDP] Master not responding, resending hello...");
-        requestMasterSync();
+        requestMasterSync(false);
     }
 
     // Boot LED animation — sweep all hardware LEDs while POST screen is showing

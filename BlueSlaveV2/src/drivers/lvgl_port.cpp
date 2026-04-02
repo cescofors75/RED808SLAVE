@@ -1,6 +1,6 @@
 // =============================================================================
 // lvgl_port.cpp - LVGL port for Waveshare ESP32-S3-Touch-LCD-7B
-// ESP-IDF 5.x — zero-copy double-buffer via bounce buffers
+// ESP-IDF 5.x — zero-copy double-buffer, dual-semaphore vsync sync (Espressif pattern)
 // =============================================================================
 #include "lvgl_port.h"
 #include "gt911_touch.h"
@@ -13,37 +13,56 @@
 
 static const char* TAG = "LVGL_PORT";
 
-static SemaphoreHandle_t lvgl_mutex = NULL;
-static SemaphoreHandle_t vsync_sem = NULL;
+static SemaphoreHandle_t lvgl_mutex   = NULL;
+static SemaphoreHandle_t sem_vsync_end = NULL;  // vsync that acked our swap
+static SemaphoreHandle_t sem_gui_ready = NULL;  // swap is pending, wait for vsync
 static volatile bool task_started = false;
 static esp_lcd_panel_handle_t lcd_panel = NULL;
 static lv_disp_draw_buf_t draw_buf;
 static lv_disp_drv_t disp_drv;
 static lv_indev_drv_t indev_drv;
 
-// Vsync ISR — signals that the current frame scan just finished
+// Vsync ISR — Espressif dual-semaphore handshake pattern.
+//
+// Only unblocks flush() when a swap is genuinely pending (sem_gui_ready was given
+// by the flush callback AFTER draw_bitmap).  Spurious vsyncs that fire before
+// any swap are silently ignored, making the busy-drain loop unnecessary and
+// eliminating the race where a valid post-swap vsync can be accidentally drained.
 static bool IRAM_ATTR lvgl_on_vsync(esp_lcd_panel_handle_t panel,
                                      const esp_lcd_rgb_panel_event_data_t* edata,
                                      void* user_ctx) {
     (void)panel; (void)edata; (void)user_ctx;
     BaseType_t woken = pdFALSE;
-    if (vsync_sem) xSemaphoreGiveFromISR(vsync_sem, &woken);
+    // Consume the gui_ready token; if one was present, release vsync_end.
+    if (sem_gui_ready && xSemaphoreTakeFromISR(sem_gui_ready, &woken) == pdTRUE) {
+        xSemaphoreGiveFromISR(sem_vsync_end, &woken);
+    }
     return woken == pdTRUE;
 }
 
-// Flush: zero-copy framebuffer swap.
-// LVGL rendered directly into one of the panel's own PSRAM framebuffers.
-// draw_bitmap recognises the pointer and atomically swaps the active FB
-// — no memcpy happens. Then we wait for vsync so DMA starts reading the
-// new buffer before LVGL writes to the old one (now the back buffer).
+// Flush: zero-copy swap + vsync-gated completion (Espressif recommended pattern).
+//
+// Flow:
+//   1. draw_bitmap(FB_B) — sets cur_fb_index=B (bounce buffers still serve FB_A)
+//   2. give sem_gui_ready — signals ISR "a swap is waiting for vsync ack"
+//   3. Frame N finishes: bb_fb_index wraps to B (end-of-frame bounce wrap)
+//   4. Vsync fires → ISR takes sem_gui_ready → gives sem_vsync_end
+//   5. We take sem_vsync_end — FB_A is no longer displayed, safe for LVGL
+//   6. flush_ready — LVGL renders next frame into FB_A
+//
+// Because sem_gui_ready is given AFTER draw_bitmap, the ISR cannot fire for a
+// vsync that precedes the swap, eliminating the drain-loop race condition.
 static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
     esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)drv->user_data;
 
-    // Zero-copy swap: panel driver recognises its own FB pointer
+    // Step 1: swap FB index (bounce buffers defer display switch to frame end)
     esp_lcd_panel_draw_bitmap(panel, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, color_p);
 
-    // Wait for vsync — ensures DMA switched to new FB before we return
-    xSemaphoreTake(vsync_sem, pdMS_TO_TICKS(100));
+    // Step 2: arm the handshake — must come AFTER draw_bitmap
+    xSemaphoreGive(sem_gui_ready);
+
+    // Step 3-5: wait for the first vsync that fires after our swap
+    xSemaphoreTake(sem_vsync_end, pdMS_TO_TICKS(500));
 
     lv_disp_flush_ready(drv);
 }
@@ -81,8 +100,9 @@ static void lvgl_task(void* arg) {
 void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     lcd_panel = lcd_handle;
 
-    lvgl_mutex = xSemaphoreCreateMutex();
-    vsync_sem  = xSemaphoreCreateBinary();
+    lvgl_mutex    = xSemaphoreCreateMutex();
+    sem_vsync_end = xSemaphoreCreateBinary();
+    sem_gui_ready = xSemaphoreCreateBinary();
 
     lv_init();
     rgb_lcd_register_vsync_cb(lcd_panel, lvgl_on_vsync, NULL);
@@ -98,9 +118,9 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     const size_t buf_pixels = SCREEN_WIDTH * SCREEN_HEIGHT;
     lv_disp_draw_buf_init(&draw_buf, fb0, fb1, buf_pixels);
 
-    // direct_mode: LVGL renders only dirty areas into the panel FB.
-    // Flush swaps the active FB (zero-copy). LVGL then syncs dirty areas
-    // from the old front buffer to the new back buffer automatically.
+    // full_refresh: LVGL calls flush once per frame with full screen area.
+    // The swap is zero-copy so sending the "full screen" costs nothing.
+    // This avoids multi-flush sync issues that cause flickering in direct_mode.
     lv_disp_drv_init(&disp_drv);
     disp_drv.hor_res      = SCREEN_WIDTH;
     disp_drv.ver_res      = SCREEN_HEIGHT;
@@ -108,7 +128,7 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     disp_drv.draw_buf     = &draw_buf;
     disp_drv.user_data    = lcd_panel;
     disp_drv.direct_mode  = 1;
-    disp_drv.full_refresh = 0;
+    disp_drv.full_refresh = 1;
     lv_disp_drv_register(&disp_drv);
 
     // Touch
@@ -120,7 +140,7 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     // LVGL task — core 1, priority 3 (higher = less preemption during flush)
     xTaskCreatePinnedToCore(lvgl_task, "lvgl", 12288, NULL, 3, NULL, 1);
 
-    ESP_LOGI(TAG, "LVGL port: %dx%d direct_mode, zero-copy double-buffer, bounce DMA",
+    ESP_LOGI(TAG, "LVGL port: %dx%d zero-copy double-buf, dual-semaphore vsync sync",
              SCREEN_WIDTH, SCREEN_HEIGHT);
 }
 
