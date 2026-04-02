@@ -30,6 +30,23 @@
 #include "ui/ui_screens.h"
 
 // =============================================================================
+// SRAM ALLOCATOR — forces ArduinoJson to use internal SRAM (not PSRAM)
+// Avoids PSRAM bus contention with LCD bounce-buffer DMA.
+// =============================================================================
+struct SramAllocator : ArduinoJson::Allocator {
+    void* allocate(size_t size) override {
+        return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    void deallocate(void* ptr) override {
+        heap_caps_free(ptr);
+    }
+    void* reallocate(void* ptr, size_t new_size) override {
+        return heap_caps_realloc(ptr, new_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+};
+static SramAllocator sramAllocator;
+
+// =============================================================================
 // GLOBAL STATE DEFINITIONS
 // =============================================================================
 
@@ -241,7 +258,7 @@ static void nvs_periodic_save() {
 static void requestTrackVolumesFromMaster() {
     if (!udpConnected) return;
 
-    JsonDocument doc;
+    JsonDocument doc(&sramAllocator);
     doc["cmd"] = "getTrackVolumes";
     sendUDPCommand(doc);
 }
@@ -249,7 +266,7 @@ static void requestTrackVolumesFromMaster() {
 static void requestMasterSync(bool requestState) {
     if (!udpConnected) return;
 
-    JsonDocument doc;
+    JsonDocument doc(&sramAllocator);
     doc["cmd"] = "hello";
     doc["device"] = "SURFACE";
     sendUDPCommand(doc);
@@ -493,7 +510,7 @@ static void startWiFiReconnectAttempt() {
 void setupWiFi() {
     Serial.println("[WiFi] Connecting...");
     WiFi.disconnect(true);
-    delay(100);
+    delay(20);
     WiFi.mode(WIFI_STA);
     WiFi.persistent(false);
     WiFi.setAutoReconnect(true);
@@ -588,7 +605,7 @@ void sendUDPCommand(JsonDocument& doc) {
 }
 
 void requestPatternFromMaster() {
-    JsonDocument doc;
+    JsonDocument doc(&sramAllocator);
     doc["cmd"] = "get_pattern";
     doc["pattern"] = currentPattern;
     sendUDPCommand(doc);
@@ -596,7 +613,7 @@ void requestPatternFromMaster() {
 
 void sendPlayStateCommand(bool shouldPlay) {
     isPlaying = shouldPlay;
-    JsonDocument doc;
+    JsonDocument doc(&sramAllocator);
     doc["cmd"] = isPlaying ? "start" : "stop";
     sendUDPCommand(doc);
 }
@@ -604,7 +621,7 @@ void sendPlayStateCommand(bool shouldPlay) {
 void selectPatternOnMaster(int patternIndex) {
     currentPattern = constrain(patternIndex, 0, Config::MAX_PATTERNS - 1);
 
-    JsonDocument doc;
+    JsonDocument doc(&sramAllocator);
     doc["cmd"] = "selectPattern";
     doc["index"] = currentPattern;
     sendUDPCommand(doc);
@@ -621,7 +638,7 @@ void sendFullPatternToMaster(int pat) {
 
     // Switch master to target pattern
     {
-        JsonDocument doc;
+        JsonDocument doc(&sramAllocator);
         doc["cmd"] = "selectPattern";
         doc["index"] = pat;
         sendUDPCommand(doc);
@@ -646,30 +663,13 @@ void sendFullPatternToMaster(int pat) {
     // Restore master to previous pattern if different
     if (savedPattern != pat) {
         delay(30);
-        JsonDocument doc;
+        JsonDocument doc(&sramAllocator);
         doc["cmd"] = "selectPattern";
         doc["index"] = savedPattern;
         sendUDPCommand(doc);
     }
     Serial.printf("[DEMO] Sent pattern %d to master (%d steps)\n", pat, sent);
 }
-
-// =============================================================================
-// SRAM ALLOCATOR — forces ArduinoJson to use internal SRAM (not PSRAM)
-// Avoids PSRAM bus contention with LCD bounce-buffer DMA.
-// =============================================================================
-struct SramAllocator : ArduinoJson::Allocator {
-    void* allocate(size_t size) override {
-        return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
-    void deallocate(void* ptr) override {
-        heap_caps_free(ptr);
-    }
-    void* reallocate(void* ptr, size_t new_size) override {
-        return heap_caps_realloc(ptr, new_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
-};
-static SramAllocator sramAllocator;
 
 // =============================================================================
 // MICROTIMING ENGINE — humanizes pad triggers with subtle timing offsets
@@ -849,6 +849,14 @@ void receiveUDPData() {
             trackVolumes[track] = constrain(value, 0, Config::MAX_VOLUME);
         }
     }
+    else if (strcmp(cmd, "selectPattern") == 0 || strcmp(cmd, "pattern_select") == 0 ||
+             strcmp(cmd, "current_pattern") == 0) {
+        int pat = doc["index"] | (doc["pattern"] | -1);
+        if (pat >= 0 && pat < Config::MAX_PATTERNS) {
+            currentPattern = pat;
+            requestPatternFromMaster();
+        }
+    }
     // end receiveUDPData
 }
 
@@ -861,7 +869,7 @@ void sendFilterUDP(int track, int fxType) {
 
     if (track == -1) {
         // Master effects
-        JsonDocument doc;
+        JsonDocument doc(&sramAllocator);
         switch (fxType) {
             case FILTER_DELAY:
                 doc["cmd"] = "setDelayActive"; doc["value"] = f.enabled ? 1 : 0; sendUDPCommand(doc); doc.clear();
@@ -882,7 +890,7 @@ void sendFilterUDP(int track, int fxType) {
         }
     } else {
         // Per-track effects
-        JsonDocument doc;
+        JsonDocument doc(&sramAllocator);
         switch (fxType) {
             case FILTER_DELAY:
                 doc["cmd"] = "setTrackEcho";
@@ -1308,7 +1316,7 @@ void handleM5Encoders() {
     if (pendingCount > 0 && udpConnected) {
         if (pendingCount == 1) {
             // Single message — send directly (no array overhead)
-            JsonDocument doc;
+            JsonDocument doc(&sramAllocator);
             if (pending[0].type == 0) {
                 doc["cmd"] = "setTrackVolume";
                 doc["track"] = pending[0].track;
@@ -1322,7 +1330,7 @@ void handleM5Encoders() {
             sendUDPCommand(doc);
         } else {
             // Multiple messages — batch into JSON array, single UDP packet
-            JsonDocument doc;
+            JsonDocument doc(&sramAllocator);
             JsonArray arr = doc.to<JsonArray>();
             for (int i = 0; i < pendingCount; i++) {
                 JsonObject obj = arr.add<JsonObject>();
@@ -1392,7 +1400,7 @@ void handleDFRobotEncoders() {
                     if (newVol != livePadsVolume) {
                         livePadsVolume = newVol;
                         nvs_mark_dirty();
-                        JsonDocument doc;
+                        JsonDocument doc(&sramAllocator);
                         doc["cmd"] = "setLiveVolume";
                         doc["value"] = livePadsVolume;
                         sendUDPCommand(doc);
@@ -1403,7 +1411,7 @@ void handleDFRobotEncoders() {
                     if (newVol != sequencerVolume) {
                         sequencerVolume = newVol;
                         nvs_mark_dirty();
-                        JsonDocument doc;
+                        JsonDocument doc(&sramAllocator);
                         doc["cmd"] = "setSequencerVolume";
                         doc["value"] = sequencerVolume;
                         sendUDPCommand(doc);
@@ -1423,7 +1431,7 @@ void handleDFRobotEncoders() {
                 if (newBPM != currentBPM) {
                     currentBPM = newBPM;
                     nvs_mark_dirty();
-                    JsonDocument doc;
+                    JsonDocument doc(&sramAllocator);
                     doc["cmd"] = "tempo";
                     doc["value"] = currentBPM;
                     sendUDPCommand(doc);
@@ -1620,11 +1628,28 @@ void handleByteButton() {
         }
         int velocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
 
-        // Edge-only: fire once per physical press, no repeat
+        // Track press/release via edges — avoids phantom pads on entry
+        bool anyVisualChange = false;
         for (int button = 0; button < BYTEBUTTON_BUTTONS && button < Config::MAX_SAMPLES; button++) {
-            byteButtonLivePressed[button] = false;  // don't feed repeat loop
-            if ((pressedEdges & (1U << button)) == 0) continue;
-            sendLivePadTrigger(button, velocity);
+            bool isPressed  = (status & (1U << button)) != 0;
+            bool wasPressed = (previousState & (1U << button)) != 0;
+            if (isPressed && !wasPressed) {
+                // Rising edge — new press
+                byteButtonLivePressed[button] = true;
+                sendLivePadTrigger(button, velocity);
+                lastLivePadTriggerMs[button] = now;
+                anyVisualChange = true;
+            } else if (!isPressed && wasPressed) {
+                // Falling edge — release
+                byteButtonLivePressed[button] = false;
+                anyVisualChange = true;
+            }
+        }
+
+        // Immediate visual update only when state actually changed
+        if (anyVisualChange && lvgl_port_lock(5)) {
+            ui_update_live_pads();
+            lvgl_port_unlock();
         }
     } else {
         memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
@@ -1732,11 +1757,11 @@ void updateUI() {
 
 void setup() {
     Serial.begin(115200);
-    // Wait up to 3s for USB CDC, skip wait if no monitor connected
-    { unsigned long _t = millis(); while (!Serial && (millis()-_t) < 3000) delay(10); }
-    delay(50);
+    // Wait up to 500ms for USB CDC, skip wait if no monitor connected
+    { unsigned long _t = millis(); while (!Serial && (millis()-_t) < 500) delay(10); }
+    delay(5);
     Serial.println("\n====================================");
-    Serial.println("  RED808 V6 - BlueSlaveV2");
+    Serial.println("  Blu808Slave V6");
     Serial.println("  Waveshare ESP32-S3-Touch-LCD-7B");
     Serial.println("====================================\n");
 
@@ -1769,7 +1794,7 @@ void setup() {
 
     // 1. I2C bus
     i2c_init();
-    delay(50);
+    delay(10);
     Serial.println("[I2C] Bus initialized");
 
     // 2. IO Extension (CH32V003) - backlight, resets
@@ -1934,17 +1959,16 @@ void loop() {
         }
     }
 
-    // Repeat triggers only when on LIVE screen (avoids 16 iterations per loop on other screens)
+    // Repeat triggers — touch pads + ByteButton held
     if (currentScreen == SCREEN_LIVE) {
         for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
-            if (!livePadPressed[pad]) continue;
+            bool held = livePadPressed[pad] || (pad < BYTEBUTTON_BUTTONS && byteButtonLivePressed[pad]);
+            if (!held) continue;
             if ((now - lastLivePadTriggerMs[pad]) < Config::LIVE_PAD_REPEAT_MS) continue;
             sendLivePadTrigger(pad, padVelocity);
             lastLivePadTriggerMs[pad] = now;
         }
     }
-
-    // ByteButton: single-shot on press edge only (no repeat — physical buttons sustain too long)
 
     // Local step clock: PRIMARY driver of currentStep (same approach as old project).
     // Master step_update is ignored for position — UDP packet loss makes it unreliable.

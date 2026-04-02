@@ -18,7 +18,7 @@
 #define LCD_HSYNC      GPIO_NUM_46
 #define LCD_DE         GPIO_NUM_5
 #define LCD_PCLK       GPIO_NUM_7
-#define LCD_PCLK_HZ    (16 * 1000 * 1000)  // 16MHz — max time per bounce fill = min PSRAM contention with WiFi
+#define LCD_PCLK_HZ    (14 * 1000 * 1000)  // 14MHz — slow enough for bounce fills with WiFi active
 
 // RGB565 Data (16-bit)
 #define LCD_B3         GPIO_NUM_14
@@ -116,7 +116,7 @@ namespace WiFiConfig {
     constexpr const char* PASSWORD = "red808esp32";
     constexpr const char* MASTER_IP = "192.168.4.1";
     constexpr uint16_t UDP_PORT    = 8888;
-    constexpr uint32_t TIMEOUT_MS  = 8000;
+    constexpr uint32_t TIMEOUT_MS  = 3000;
     constexpr uint32_t RECONNECT_INTERVAL_MS       = 5000;
     constexpr uint32_t RECONNECT_ATTEMPT_TIMEOUT_MS = 8000;
     constexpr uint32_t DISCONNECT_GRACE_MS = 1500;

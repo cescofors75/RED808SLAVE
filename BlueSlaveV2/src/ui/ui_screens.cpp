@@ -118,7 +118,7 @@ static const char* const kBootLines[] = {
     "[WLAN]  802.11b/g/n STA  AP RED808  CH AUTO....... OK",
     "[UDP ]  PORT 8888  MASTER 192.168.4.1............. OK",
     "[SEQ ]  16 TRACKS x 16 STEPS  64 PATTERNS........ OK",
-    "\n> RED808 SURFACE CONTROLLER V6 .............. READY",
+    "\n> BLU808 SLAVE CONTROLLER V6 ............... READY",
 };
 
 // ============================================================================
@@ -301,7 +301,7 @@ void ui_create_header(lv_obj_t* parent) {
 
     // Logo
     lv_obj_t* logo = lv_label_create(header);
-    lv_label_set_text(logo, LV_SYMBOL_AUDIO " RED808 V6");
+    lv_label_set_text(logo, LV_SYMBOL_AUDIO " Blu808Slave");
     lv_obj_set_style_text_font(logo, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(logo, RED808_ACCENT, 0);
 
@@ -672,8 +672,8 @@ void ui_update_live_pads() {
             lv_obj_set_style_border_width(live_pads[pad], 4, 0);
             lv_obj_set_style_border_opa(live_pads[pad], LV_OPA_COVER, 0);
             lv_obj_set_style_shadow_color(live_pads[pad], inst_colors[pad], 0);
-            lv_obj_set_style_shadow_width(live_pads[pad], 55, 0);
-            lv_obj_set_style_shadow_spread(live_pads[pad], 16, 0);
+            lv_obj_set_style_shadow_width(live_pads[pad], 20, 0);
+            lv_obj_set_style_shadow_spread(live_pads[pad], 4, 0);
             lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_80, 0);
             if (live_pad_names[pad])
                 lv_obj_set_style_text_color(live_pad_names[pad], lv_color_white(), 0);
@@ -686,9 +686,9 @@ void ui_update_live_pads() {
             lv_obj_set_style_border_width(live_pads[pad], 0, 0);
             lv_obj_set_style_border_opa(live_pads[pad], LV_OPA_TRANSP, 0);
             lv_obj_set_style_shadow_color(live_pads[pad], lv_color_black(), 0);
-            lv_obj_set_style_shadow_width(live_pads[pad], 20, 0);
+            lv_obj_set_style_shadow_width(live_pads[pad], 8, 0);
             lv_obj_set_style_shadow_spread(live_pads[pad], 0, 0);
-            lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_40, 0);
+            lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_30, 0);
             if (live_pad_names[pad])
                 lv_obj_set_style_text_color(live_pad_names[pad], inst_colors[pad], 0);
             if (live_pad_desc[pad])
@@ -1071,10 +1071,10 @@ void ui_update_sequencer() {
             }
             if (seq_step_leds[active_column]) {
                 lv_obj_set_style_bg_color(seq_step_leds[active_column], RED808_WARNING, 0);
-                lv_obj_set_style_shadow_width(seq_step_leds[active_column], 12, 0);
+                lv_obj_set_style_shadow_width(seq_step_leds[active_column], 6, 0);
                 lv_obj_set_style_shadow_color(seq_step_leds[active_column], RED808_WARNING, 0);
-                lv_obj_set_style_shadow_opa(seq_step_leds[active_column], LV_OPA_80, 0);
-                lv_obj_set_style_shadow_spread(seq_step_leds[active_column], 3, 0);
+                lv_obj_set_style_shadow_opa(seq_step_leds[active_column], LV_OPA_60, 0);
+                lv_obj_set_style_shadow_spread(seq_step_leds[active_column], 2, 0);
             }
             // Mark active column cells dirty
             for (int t = page_start; t < page_end; t++) {
@@ -1100,9 +1100,8 @@ void ui_update_sequencer() {
                     active ? lv_color_white() : lv_color_hex(0x504000), 0);
                 lv_obj_set_style_border_width(seq_grid[t][s], 2, 0);
                 lv_obj_set_style_border_color(seq_grid[t][s], RED808_WARNING, 0);
-                lv_obj_set_style_shadow_width(seq_grid[t][s], active ? 10 : 0, 0);
-                lv_obj_set_style_shadow_color(seq_grid[t][s], inst_colors[t], 0);
-                lv_obj_set_style_shadow_opa(seq_grid[t][s], active ? LV_OPA_60 : LV_OPA_0, 0);
+                lv_obj_set_style_shadow_width(seq_grid[t][s], 0, 0);
+                lv_obj_set_style_shadow_opa(seq_grid[t][s], LV_OPA_0, 0);
             } else {
                 // Inactive step — normal
                 lv_obj_set_style_bg_color(seq_grid[t][s],
@@ -2529,7 +2528,7 @@ void ui_create_boot_screen() {
 
     // ── Title row ──
     lv_obj_t* title = lv_label_create(scr_boot);
-    lv_label_set_text(title, "RED808 SURFACE CONTROLLER");
+    lv_label_set_text(title, "BLU808 SLAVE CONTROLLER");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0x00D4FF), 0);
     lv_obj_set_pos(title, 42, 10);
@@ -2565,7 +2564,7 @@ void ui_create_boot_screen() {
 
     // ── Blinking cursor ──
     boot_cursor_lbl = lv_label_create(scr_boot);
-    lv_label_set_text(boot_cursor_lbl, "root@red808:~$ _");
+    lv_label_set_text(boot_cursor_lbl, "root@blu808:~$ _");
     lv_obj_set_style_text_font(boot_cursor_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(boot_cursor_lbl, lv_color_hex(0x39FF14), 0);
     lv_obj_set_pos(boot_cursor_lbl, 42, 62 + kBootLineCount * 30);
@@ -2594,7 +2593,7 @@ void ui_create_boot_screen() {
     lv_obj_set_pos(build_info, 780, 62);
 
     boot_state = 0;
-    boot_timer = lv_timer_create(boot_timer_cb, 180, NULL);
+    boot_timer = lv_timer_create(boot_timer_cb, 80, NULL);
 }
 
 // ============================================================================
