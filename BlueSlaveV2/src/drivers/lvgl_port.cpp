@@ -91,9 +91,9 @@ static void lvgl_task(void* arg) {
             lv_timer_handler();
             lvgl_port_unlock();
         }
-        // 16ms period — matches 60Hz LCD refresh. Halves Core 1 load &
-        // I2C contention vs 8ms, with no visible difference.
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(16));
+        // 10ms period — faster LVGL tick for snappier pad/step response.
+        // At 16MHz PCLK, LCD refresh ~47Hz so LVGL can run ahead.
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(10));
     }
 }
 

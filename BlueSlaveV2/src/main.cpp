@@ -302,12 +302,22 @@ static void handleLivePadTouchMatrix(unsigned long now) {
         }
     }
 
+    bool anyChanged = false;
     for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
         if (new_state[pad] && !livePadPressed[pad]) {
             pendingLivePadTriggerMask |= (1UL << pad);
             lastLivePadTriggerMs[pad] = now;
+            anyChanged = true;
+        } else if (!new_state[pad] && livePadPressed[pad]) {
+            anyChanged = true;  // release → needs immediate visual update
         }
         livePadPressed[pad] = new_state[pad];
+    }
+
+    // Immediate visual update on release (press is handled after sendLivePadTrigger)
+    if (anyChanged && pendingLivePadTriggerMask == 0 && lvgl_port_lock(5)) {
+        ui_update_live_pads();
+        lvgl_port_unlock();
     }
 }
 
@@ -644,22 +654,10 @@ void sendFullPatternToMaster(int pat) {
     Serial.printf("[DEMO] Sent pattern %d to master (%d steps)\n", pat, sent);
 }
 
-void sendLivePadTrigger(int pad, int velocity) {
-    if (pad < 0 || pad >= Config::MAX_SAMPLES) return;
-
-    JsonDocument doc;
-    doc["cmd"] = "trigger";
-    doc["pad"] = pad;
-    doc["vel"] = constrain(velocity, 1, 127);
-    sendUDPCommand(doc);
-}
-
 // =============================================================================
-// UDP RECEIVE
+// SRAM ALLOCATOR — forces ArduinoJson to use internal SRAM (not PSRAM)
+// Avoids PSRAM bus contention with LCD bounce-buffer DMA.
 // =============================================================================
-
-// ArduinoJson allocator that forces internal SRAM (avoids PSRAM bus contention
-// with LCD bounce-buffer DMA during UDP packet parsing).
 struct SramAllocator : ArduinoJson::Allocator {
     void* allocate(size_t size) override {
         return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -672,6 +670,57 @@ struct SramAllocator : ArduinoJson::Allocator {
     }
 };
 static SramAllocator sramAllocator;
+
+// =============================================================================
+// MICROTIMING ENGINE — humanizes pad triggers with subtle timing offsets
+// =============================================================================
+// Adds ±0-4ms random jitter to trigger timing, simulating human feel.
+// Uses a fast xorshift32 PRNG seeded from esp_random() at boot.
+static uint32_t mtRngState = 0;
+
+static void microtiming_init() {
+    mtRngState = esp_random();  // hardware RNG seed
+    if (mtRngState == 0) mtRngState = 0xDEADBEEF;
+}
+
+static inline uint32_t xorshift32() {
+    mtRngState ^= mtRngState << 13;
+    mtRngState ^= mtRngState >> 17;
+    mtRngState ^= mtRngState << 5;
+    return mtRngState;
+}
+
+// Returns a humanization offset in ms: range [-maxJitterMs, +maxJitterMs]
+static int microtiming_jitter(int maxJitterMs) {
+    if (maxJitterMs <= 0) return 0;
+    return (int)(xorshift32() % (2 * maxJitterMs + 1)) - maxJitterMs;
+}
+
+// Velocity humanization: ±5% random variation
+static int microtiming_velocity(int velocity) {
+    int jitter = (int)(xorshift32() % 13) - 6;  // -6 to +6
+    return constrain(velocity + jitter, 1, 127);
+}
+
+void sendLivePadTrigger(int pad, int velocity) {
+    if (pad < 0 || pad >= Config::MAX_SAMPLES) return;
+
+    // Humanize velocity with subtle random variation
+    int humanVel = microtiming_velocity(velocity);
+
+    JsonDocument doc(&sramAllocator);
+    doc["cmd"] = "trigger";
+    doc["pad"] = pad;
+    doc["vel"] = humanVel;
+    // Include microtiming offset so master can apply it to playback
+    int jitterMs = microtiming_jitter(4);  // ±4ms
+    if (jitterMs != 0) doc["mt"] = jitterMs;
+    sendUDPCommand(doc);
+}
+
+// =============================================================================
+// UDP RECEIVE
+// =============================================================================
 
 void receiveUDPData() {
     if (!udpConnected) return;
@@ -1800,6 +1849,9 @@ void setup() {
     xTaskCreatePinnedToCore(encoder_task, "enc", 6144, NULL, 2, NULL, 0);
     Serial.println("[ENC] Encoder task started (Core 0, pri 2)");
 
+    // 12. Microtiming engine — seed PRNG from hardware RNG
+    microtiming_init();
+
     Serial.println("\n[SETUP] Complete! Entering main loop.\n");
 }
 
@@ -1873,6 +1925,12 @@ void loop() {
             if ((pendingMask & (1UL << pad)) == 0) continue;
             sendLivePadTrigger(pad, padVelocity);
             lastLivePadTriggerMs[pad] = now;
+        }
+        // Immediate visual feedback — bypass SCREEN_UPDATE_MS gate
+        if (currentScreen == SCREEN_LIVE && lvgl_port_lock(5)) {
+            ui_update_live_pads();
+            lvgl_port_unlock();
+            lastScreenUpdate = now;  // reset timer to avoid double update
         }
     }
 
