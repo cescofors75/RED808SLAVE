@@ -121,7 +121,7 @@ namespace WiFiConfig {
     constexpr uint32_t RECONNECT_ATTEMPT_TIMEOUT_MS = 8000;
     constexpr uint32_t DISCONNECT_GRACE_MS = 1500;
     constexpr uint32_t MASTER_HELLO_RETRY_MS = 8000;
-    constexpr uint32_t UDP_RECEIVE_MS = 30;
+    constexpr uint32_t UDP_RECEIVE_MS = 8;
 }
 
 // =============================================================================
@@ -144,10 +144,10 @@ namespace Config {
     constexpr int DEFAULT_TRACK_VOLUME = 75;
 
     // Timing
-    constexpr uint32_t ENCODER_READ_MS    = 20;  // 50Hz polling — encoders keep state, no loss
-    constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
+    constexpr uint32_t ENCODER_READ_MS    = 10;  // 100Hz polling — snappier encoder response
+    constexpr uint32_t BUTTON_DEBOUNCE_MS = 25;
     constexpr uint32_t LED_FLASH_MS       = 100;
-    constexpr uint32_t SCREEN_UPDATE_MS   = 16;  // ~60fps UI update — matches LCD refresh rate
+    constexpr uint32_t SCREEN_UPDATE_MS   = 12;  // ~83fps UI update — smoother step animation
     constexpr uint32_t UDP_CHECK_MS       = 30000;
 
     // Touch tuning (Waveshare 7B). Fine tune offsets if hitboxes feel shifted.
@@ -173,7 +173,7 @@ namespace Config {
     constexpr int DF_VOLUME_STEP = 3;   // Master volume change per encoder step
     constexpr int DF_BPM_STEP = 1;      // BPM change per encoder step
     constexpr uint32_t DF_BUTTON_GUARD_MS = 250;
-    constexpr uint32_t LIVE_PAD_REPEAT_MS = 85;
+    constexpr uint32_t LIVE_PAD_REPEAT_MS = 50;  // 20Hz pad repeat — tighter response
 
     // GPIO analog rotary encoder (pattern select)
     constexpr int ANALOG_ENC_PIN = 6;        // GPIO6 signal pin
