@@ -6,6 +6,8 @@
 #include "gt911_touch.h"
 #include "rgb_lcd.h"
 #include "../../include/config.h"
+#include "../../include/system_state.h"
+#include "../ui/ui_screens.h"
 #include "esp_lcd_panel_rgb.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -88,6 +90,11 @@ static void lvgl_task(void* arg) {
     TickType_t last_wake = xTaskGetTickCount();
     while (true) {
         if (lvgl_port_lock(15)) {
+            // Check if live pads need visual refresh (set by Core 0 loop)
+            if (livePadsVisualDirty && currentScreen == SCREEN_LIVE) {
+                livePadsVisualDirty = false;
+                ui_update_live_pads();
+            }
             lv_timer_handler();
             lvgl_port_unlock();
         }

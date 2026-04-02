@@ -81,9 +81,12 @@ static lv_coord_t live_pad_w[Config::MAX_SAMPLES] = {};
 static lv_coord_t live_pad_h[Config::MAX_SAMPLES] = {};
 
 static constexpr int LIVE_PAD_COLS = 4;
-static constexpr int LIVE_PAD_SIZE = 220;
+static constexpr int LIVE_PAD_SIZE = 200;
 static constexpr int LIVE_PAD_GAP = 12;
 static constexpr int LIVE_PAD_AREA_TOP = 70;
+
+// Ratchet controls (repeat count 1-16)
+static lv_obj_t* live_ratchet_label = NULL;
 
 // LivePad sequencer sync
 static bool livePadSyncMode = false;
@@ -494,8 +497,31 @@ void ui_create_menu_screen() {
 }
 
 // ============================================================================
-// LIVE PADS SCREEN - 4x4 grid of pads
+// LIVE PADS SCREEN - 4x4 grid of pads + ratchet buttons
 // ============================================================================
+
+static void ratchet_minus_cb(lv_event_t* e) {
+    (void)e;
+    if (livePadRepeatCount > 1) {
+        livePadRepeatCount = livePadRepeatCount - 1;
+        if (live_ratchet_label) {
+            char buf[8]; snprintf(buf, sizeof(buf), "%dx", (int)livePadRepeatCount);
+            lv_label_set_text(live_ratchet_label, buf);
+        }
+    }
+}
+
+static void ratchet_plus_cb(lv_event_t* e) {
+    (void)e;
+    if (livePadRepeatCount < 16) {
+        livePadRepeatCount = livePadRepeatCount + 1;
+        if (live_ratchet_label) {
+            char buf[8]; snprintf(buf, sizeof(buf), "%dx", (int)livePadRepeatCount);
+            lv_label_set_text(live_ratchet_label, buf);
+        }
+    }
+}
+
 int ui_live_pad_hit_test(int x, int y) {
     for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
         if (x < live_pad_x[pad] || y < live_pad_y[pad]) continue;
@@ -609,6 +635,61 @@ void ui_create_live_screen() {
     lv_obj_set_style_text_font(live_sync_lbl, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(live_sync_lbl, RED808_TEXT_DIM, 0);
     lv_obj_center(live_sync_lbl);
+
+    // Ratchet controls — right side of pad grid: [ - ] Nx [ + ]
+    {
+        int grid_right = (1024 - LIVE_PAD_COLS * LIVE_PAD_SIZE - 3 * LIVE_PAD_GAP) / 2
+                         + LIVE_PAD_COLS * LIVE_PAD_SIZE + 3 * LIVE_PAD_GAP;
+        int ctrl_x = grid_right + 4;
+        int ctrl_w = 1024 - ctrl_x - 8;  // fill remaining width
+        int btn_h = 80;
+        int label_h = 50;
+        int total_h = btn_h + label_h + btn_h + 12*2;  // 2 gaps of 12
+        int y_start = LIVE_PAD_AREA_TOP + (600 - LIVE_PAD_AREA_TOP - total_h) / 2;
+
+        // Title
+        lv_obj_t* title = lv_label_create(scr_live);
+        lv_label_set_text(title, "RPT");
+        lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(title, RED808_TEXT_DIM, 0);
+        lv_obj_set_pos(title, ctrl_x + ctrl_w / 2 - 10, y_start - 18);
+
+        // [ + ] button (top = increase)
+        lv_obj_t* btn_plus = lv_btn_create(scr_live);
+        lv_obj_set_size(btn_plus, ctrl_w, btn_h);
+        lv_obj_set_pos(btn_plus, ctrl_x, y_start);
+        lv_obj_set_style_bg_color(btn_plus, RED808_SURFACE, 0);
+        lv_obj_set_style_bg_color(btn_plus, RED808_ACCENT, LV_STATE_PRESSED);
+        lv_obj_set_style_radius(btn_plus, 10, 0);
+        lv_obj_add_event_cb(btn_plus, ratchet_plus_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_t* lbl_plus = lv_label_create(btn_plus);
+        lv_label_set_text(lbl_plus, "+");
+        lv_obj_set_style_text_font(lbl_plus, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(lbl_plus, RED808_ACCENT, 0);
+        lv_obj_center(lbl_plus);
+
+        // Value label (middle)
+        live_ratchet_label = lv_label_create(scr_live);
+        char buf[8]; snprintf(buf, sizeof(buf), "%dx", livePadRepeatCount);
+        lv_label_set_text(live_ratchet_label, buf);
+        lv_obj_set_style_text_font(live_ratchet_label, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(live_ratchet_label, RED808_ACCENT, 0);
+        lv_obj_set_pos(live_ratchet_label, ctrl_x + ctrl_w / 2 - 16, y_start + btn_h + 12 + 8);
+
+        // [ - ] button (bottom = decrease)
+        lv_obj_t* btn_minus = lv_btn_create(scr_live);
+        lv_obj_set_size(btn_minus, ctrl_w, btn_h);
+        lv_obj_set_pos(btn_minus, ctrl_x, y_start + btn_h + 12 + label_h + 12);
+        lv_obj_set_style_bg_color(btn_minus, RED808_SURFACE, 0);
+        lv_obj_set_style_bg_color(btn_minus, RED808_ACCENT, LV_STATE_PRESSED);
+        lv_obj_set_style_radius(btn_minus, 10, 0);
+        lv_obj_add_event_cb(btn_minus, ratchet_minus_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_t* lbl_minus = lv_label_create(btn_minus);
+        lv_label_set_text(lbl_minus, "-");
+        lv_obj_set_style_text_font(lbl_minus, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(lbl_minus, RED808_ACCENT, 0);
+        lv_obj_center(lbl_minus);
+    }
 }
 
 static bool livePadsNeedFullRedraw = false;
@@ -2499,62 +2580,54 @@ static void boot_timer_cb(lv_timer_t* timer) {
 
 void ui_create_boot_screen() {
     scr_boot = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr_boot, lv_color_hex(0x0A0A0A), 0);
+    lv_obj_set_style_bg_color(scr_boot, lv_color_hex(0x080810), 0);
     lv_obj_set_style_bg_opa(scr_boot, LV_OPA_COVER, 0);
     lv_obj_clear_flag(scr_boot, LV_OBJ_FLAG_SCROLLABLE);
 
-    // ── Scanline overlay (subtle CRT effect) ──
-    for (int y = 0; y < 600; y += 4) {
-        lv_obj_t* scanline = lv_obj_create(scr_boot);
-        lv_obj_set_size(scanline, 1024, 1);
-        lv_obj_set_pos(scanline, 0, y);
-        lv_obj_set_style_bg_color(scanline, lv_color_hex(0x000000), 0);
-        lv_obj_set_style_bg_opa(scanline, LV_OPA_10, 0);
-        lv_obj_set_style_border_width(scanline, 0, 0);
-        lv_obj_clear_flag(scanline, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    }
+    // ── Top accent line (cyan glow) ──
+    lv_obj_t* top_line = lv_obj_create(scr_boot);
+    lv_obj_set_size(top_line, 1024, 2);
+    lv_obj_set_pos(top_line, 0, 0);
+    lv_obj_set_style_bg_color(top_line, lv_color_hex(0x00D4FF), 0);
+    lv_obj_set_style_bg_opa(top_line, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(top_line, 0, 0);
+    lv_obj_set_style_shadow_width(top_line, 12, 0);
+    lv_obj_set_style_shadow_color(top_line, lv_color_hex(0x00D4FF), 0);
+    lv_obj_set_style_shadow_opa(top_line, LV_OPA_30, 0);
+    lv_obj_clear_flag(top_line, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
-    // ── Left accent bar (neon green) ──
-    lv_obj_t* side_bar = lv_obj_create(scr_boot);
-    lv_obj_set_size(side_bar, 3, 540);
-    lv_obj_set_pos(side_bar, 28, 10);
-    lv_obj_set_style_bg_color(side_bar, lv_color_hex(0x39FF14), 0);
-    lv_obj_set_style_bg_opa(side_bar, LV_OPA_30, 0);
-    lv_obj_set_style_border_width(side_bar, 0, 0);
-    lv_obj_clear_flag(side_bar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    // ── Brand name (large, centered) ──
+    lv_obj_t* brand = lv_label_create(scr_boot);
+    lv_label_set_text(brand, "BLU808");
+    lv_obj_set_style_text_font(brand, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(brand, lv_color_hex(0x00D4FF), 0);
+    lv_obj_set_style_text_letter_space(brand, 8, 0);
+    lv_obj_align(brand, LV_ALIGN_TOP_MID, 0, 18);
 
-    // ── Title row ──
-    lv_obj_t* title = lv_label_create(scr_boot);
-    lv_label_set_text(title, "BLU808 SLAVE CONTROLLER");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0x00D4FF), 0);
-    lv_obj_set_pos(title, 42, 10);
+    // ── Subtitle ──
+    lv_obj_t* subtitle = lv_label_create(scr_boot);
+    lv_label_set_text(subtitle, "SLAVE CONTROLLER  V6");
+    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(subtitle, lv_color_hex(0x39FF14), 0);
+    lv_obj_set_style_text_letter_space(subtitle, 4, 0);
+    lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 72);
 
-    lv_obj_t* ver = lv_label_create(scr_boot);
-    lv_label_set_text(ver, "V6.0");
-    lv_obj_set_style_text_font(ver, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(ver, lv_color_hex(0x39FF14), 0);
-    lv_obj_set_pos(ver, 530, 10);
-
-    // ── Separator with glow ──
+    // ── Separator line ──
     lv_obj_t* sep = lv_obj_create(scr_boot);
-    lv_obj_set_size(sep, 950, 2);
-    lv_obj_set_pos(sep, 38, 52);
-    lv_obj_set_style_bg_color(sep, lv_color_hex(0x39FF14), 0);
-    lv_obj_set_style_bg_opa(sep, LV_OPA_60, 0);
+    lv_obj_set_size(sep, 600, 1);
+    lv_obj_align(sep, LV_ALIGN_TOP_MID, 0, 98);
+    lv_obj_set_style_bg_color(sep, lv_color_hex(0x222233), 0);
+    lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(sep, 0, 0);
-    lv_obj_set_style_shadow_width(sep, 8, 0);
-    lv_obj_set_style_shadow_color(sep, lv_color_hex(0x39FF14), 0);
-    lv_obj_set_style_shadow_opa(sep, LV_OPA_40, 0);
     lv_obj_clear_flag(sep, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
-    // ── POST lines — 16 lines × 30px = 480px from y=62 ──
+    // ── POST lines (compact, left-aligned block) ──
     for (int i = 0; i < kBootLineCount; i++) {
         lv_obj_t* lbl = lv_label_create(scr_boot);
         lv_label_set_text(lbl, kBootLines[i]);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0x39FF14), 0);
-        lv_obj_set_pos(lbl, 42, 62 + i * 30);
+        lv_obj_set_pos(lbl, 42, 110 + i * 27);
         lv_obj_add_flag(lbl, LV_OBJ_FLAG_HIDDEN);
         boot_text_lines[i] = lbl;
     }
@@ -2564,30 +2637,38 @@ void ui_create_boot_screen() {
     lv_label_set_text(boot_cursor_lbl, "root@blu808:~$ _");
     lv_obj_set_style_text_font(boot_cursor_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(boot_cursor_lbl, lv_color_hex(0x39FF14), 0);
-    lv_obj_set_pos(boot_cursor_lbl, 42, 62 + kBootLineCount * 30);
+    lv_obj_set_pos(boot_cursor_lbl, 42, 110 + kBootLineCount * 27);
     lv_obj_add_flag(boot_cursor_lbl, LV_OBJ_FLAG_HIDDEN);
+
+    // ── Right-side build info ──
+    lv_obj_t* build_info = lv_label_create(scr_boot);
+    lv_label_set_text(build_info,
+        "BUILD " __DATE__ "\n"
+        "ESP32-S3  N16R8\n"
+        "PLATFORMIO  IDF 5.5\n"
+        "LVGL 8.4  DIRECT");
+    lv_obj_set_style_text_font(build_info, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(build_info, lv_color_hex(0x00D4FF), 0);
+    lv_obj_set_style_text_opa(build_info, LV_OPA_30, 0);
+    lv_obj_set_style_text_line_space(build_info, 4, 0);
+    lv_obj_set_pos(build_info, 780, 110);
 
     // ── Bottom status bar ──
     boot_status_lbl = lv_label_create(scr_boot);
-    lv_label_set_text(boot_status_lbl, "[ POST SEQUENCE RUNNING... ]");
+    lv_label_set_text(boot_status_lbl, "INITIALIZING...");
     lv_obj_set_style_text_font(boot_status_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(boot_status_lbl, lv_color_hex(0x39FF14), 0);
+    lv_obj_set_style_text_color(boot_status_lbl, lv_color_hex(0x00D4FF), 0);
     lv_obj_set_style_text_opa(boot_status_lbl, LV_OPA_40, 0);
-    lv_obj_set_pos(boot_status_lbl, 42, 565);
+    lv_obj_align(boot_status_lbl, LV_ALIGN_BOTTOM_MID, 0, -12);
 
-    // ── Right-side build info (retro style) ──
-    lv_obj_t* build_info = lv_label_create(scr_boot);
-    lv_label_set_text(build_info,
-        "COMPILED: " __DATE__ "\n"
-        "ARDUINO FRAMEWORK\n"
-        "PLATFORMIO ESP32\n"
-        "FREE HEAP: --\n"
-        "PSRAM FREE: --");
-    lv_obj_set_style_text_font(build_info, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(build_info, lv_color_hex(0x00D4FF), 0);
-    lv_obj_set_style_text_opa(build_info, LV_OPA_40, 0);
-    lv_obj_set_style_text_line_space(build_info, 4, 0);
-    lv_obj_set_pos(build_info, 780, 62);
+    // ── Bottom accent line ──
+    lv_obj_t* bot_line = lv_obj_create(scr_boot);
+    lv_obj_set_size(bot_line, 1024, 2);
+    lv_obj_set_pos(bot_line, 0, 598);
+    lv_obj_set_style_bg_color(bot_line, lv_color_hex(0x00D4FF), 0);
+    lv_obj_set_style_bg_opa(bot_line, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(bot_line, 0, 0);
+    lv_obj_clear_flag(bot_line, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
     boot_state = 0;
     boot_timer = lv_timer_create(boot_timer_cb, 80, NULL);

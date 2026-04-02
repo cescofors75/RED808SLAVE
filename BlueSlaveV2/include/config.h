@@ -18,7 +18,7 @@
 #define LCD_HSYNC      GPIO_NUM_46
 #define LCD_DE         GPIO_NUM_5
 #define LCD_PCLK       GPIO_NUM_7
-#define LCD_PCLK_HZ    (14 * 1000 * 1000)  // 14MHz — slow enough for bounce fills with WiFi active
+#define LCD_PCLK_HZ    (21 * 1000 * 1000)  // 21MHz — ~23Hz refresh with ESPHome timings (was 14MHz=15Hz flicker)
 
 // RGB565 Data (16-bit)
 #define LCD_B3         GPIO_NUM_14
@@ -38,7 +38,9 @@
 #define LCD_R6         GPIO_NUM_41
 #define LCD_R7         GPIO_NUM_40
 
-// LCD Timing (ST7262) - Waveshare official for 1024x600
+// LCD Timing (ST7262) — ESPHome confirmed values for ESP-IDF rgb_panel driver
+// Small timings (4,8,8) don't work with bounce buffers — panel fails to sync
+// h_total=1386, v_total=661 → 21MHz/916146 = 22.9Hz
 #define LCD_HSYNC_PULSE_WIDTH  162
 #define LCD_HSYNC_BACK_PORCH   152
 #define LCD_HSYNC_FRONT_PORCH  48
@@ -173,8 +175,7 @@ namespace Config {
     constexpr int DF_VOLUME_STEP = 3;   // Master volume change per encoder step
     constexpr int DF_BPM_STEP = 1;      // BPM change per encoder step
     constexpr uint32_t DF_BUTTON_GUARD_MS = 250;
-    constexpr uint32_t LIVE_PAD_REPEAT_MS = 50;       // 20Hz pad repeat — tighter response
-    constexpr uint32_t LIVE_PAD_REPEAT_DELAY_MS = 250; // Hold 250ms before repeat starts
+    constexpr uint32_t LIVE_PAD_REPEAT_MS = 50;       // (legacy, kept for reference)
 
     // GPIO analog rotary encoder (pattern select)
     constexpr int ANALOG_ENC_PIN = 6;        // GPIO6 signal pin

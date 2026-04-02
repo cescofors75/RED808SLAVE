@@ -251,12 +251,6 @@ TouchPoint gt911_read() {
                     break;
                 }
             }
-
-            static uint32_t dbg_cnt = 0;
-            if (valid_points > 0 && ++dbg_cnt % 30 == 1) {
-                Serial.printf("[TOUCH] raw=[%02X %02X %02X %02X] xy=%d,%d valid=%d\n",
-                    data[0], data[1], data[2], data[3], tp.x, tp.y, tp.pressed);
-            }
         }
     } else {
         prev_valid = false;

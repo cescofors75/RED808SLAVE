@@ -69,12 +69,14 @@ int currentKit = 0;
 int masterVolume = Config::DEFAULT_VOLUME;
 int sequencerVolume = Config::DEFAULT_VOLUME;
 int livePadsVolume = 100;
+volatile int livePadRepeatCount = 1;  // 1-16: how many triggers per single tap (volatile: written by LVGL Core 1, read by loop Core 0)
 int trackVolumes[Config::MAX_TRACKS];
 VolumeMode volumeMode = VOL_SEQUENCER;
 bool trackMuted[Config::MAX_TRACKS];
 bool trackSolo[Config::MAX_TRACKS];
 bool livePadPressed[Config::MAX_SAMPLES];
 volatile uint32_t pendingLivePadTriggerMask = 0;
+volatile bool livePadsVisualDirty = false;
 
 // Filters
 TrackFilter trackFilters[Config::MAX_TRACKS];
@@ -311,6 +313,8 @@ static void handleLivePadTouchMatrix(unsigned long now) {
         return;
     }
 
+    // Read multi-touch from cache (updated by LVGL task every 10ms on Core 1).
+    // Cache read is lock-free (~0us) so loop() runs at full speed for rapid tapping.
     TouchPoint points[Config::TOUCH_MAX_POINTS] = {};
     uint8_t count = gt911_get_points(points, Config::TOUCH_MAX_POINTS);
 
@@ -349,10 +353,9 @@ static void handleLivePadTouchMatrix(unsigned long now) {
         }
     }
 
-    // Immediate visual update on release (press is handled after sendLivePadTrigger)
-    if (anyChanged && pendingLivePadTriggerMask == 0 && lvgl_port_lock(5)) {
-        ui_update_live_pads();
-        lvgl_port_unlock();
+    // Mark visual dirty — LVGL task (Core 1) will pick it up on next cycle (~10ms)
+    if (anyChanged) {
+        livePadsVisualDirty = true;
     }
 }
 
@@ -723,18 +726,23 @@ static int microtiming_velocity(int velocity) {
 
 void sendLivePadTrigger(int pad, int velocity) {
     if (pad < 0 || pad >= Config::MAX_SAMPLES) return;
+    if (!udpConnected) return;
 
     // Humanize velocity with subtle random variation
     int humanVel = microtiming_velocity(velocity);
-
-    JsonDocument doc(&sramAllocator);
-    doc["cmd"] = "trigger";
-    doc["pad"] = pad;
-    doc["vel"] = humanVel;
-    // Include microtiming offset so master can apply it to playback
     int jitterMs = microtiming_jitter(4);  // ±4ms
-    if (jitterMs != 0) doc["mt"] = jitterMs;
-    sendUDPCommand(doc);
+
+    // Pre-formatted UDP — NO ArduinoJson overhead (~10x faster)
+    char buf[80];
+    int len;
+    if (jitterMs != 0) {
+        len = snprintf(buf, sizeof(buf), "{\"cmd\":\"trigger\",\"pad\":%d,\"vel\":%d,\"mt\":%d}", pad, humanVel, jitterMs);
+    } else {
+        len = snprintf(buf, sizeof(buf), "{\"cmd\":\"trigger\",\"pad\":%d,\"vel\":%d}", pad, humanVel);
+    }
+    udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
+    udp.write((const uint8_t*)buf, len);
+    udp.endPacket();
 }
 
 // =============================================================================
@@ -1892,14 +1900,36 @@ static void encoder_task(void* arg) {
 void loop() {
     unsigned long now = millis();
 
+    // === TOUCH + TRIGGER: highest priority — process FIRST for lowest latency ===
+    handleLivePadTouchMatrix(now);
+
+    const int padVelocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
+
+    uint32_t pendingMask = pendingLivePadTriggerMask;
+    if (pendingMask != 0) {
+        pendingLivePadTriggerMask = 0;
+        // Send UDP triggers FIRST (lowest latency to audio)
+        int rpt = livePadRepeatCount;  // read volatile once
+        for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
+            if ((pendingMask & (1UL << pad)) == 0) continue;
+            for (int r = 0; r < rpt; r++) {
+                sendLivePadTrigger(pad, padVelocity);
+            }
+            lastLivePadTriggerMs[pad] = now;
+        }
+        // Mark visual dirty — LVGL task picks it up within ~10ms (no lock contention)
+        if (currentScreen == SCREEN_LIVE) {
+            livePadsVisualDirty = true;
+        }
+    }
+
+    // === NETWORK + STATUS ===
     if (masterConnected && (now - lastMasterPacketMs > 3000)) {
         masterConnected = false;
     }
 
-    // WiFi reconnection check
     checkWiFiReconnect();
 
-    // Receive UDP data (throttled to reduce PSRAM bus contention with LCD)
     static unsigned long lastUDPReceiveMs = 0;
     if (now - lastUDPReceiveMs >= WiFiConfig::UDP_RECEIVE_MS) {
         lastUDPReceiveMs = now;
@@ -1912,7 +1942,7 @@ void loop() {
         requestMasterSync(false);
     }
 
-    // Boot LED animation — sweep all hardware LEDs while POST screen is showing
+    // Boot LED animation
     if (currentScreen == SCREEN_BOOT) {
         bootLedAnimation();
     }
@@ -1926,38 +1956,7 @@ void loop() {
         }
     }
 
-    handleLivePadTouchMatrix(now);
-
-    // Velocity computed once for all pad triggers this frame
-    const int padVelocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
-
-    uint32_t pendingMask = pendingLivePadTriggerMask;
-    if (pendingMask != 0) {
-        pendingLivePadTriggerMask = 0;
-        for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
-            if ((pendingMask & (1UL << pad)) == 0) continue;
-            sendLivePadTrigger(pad, padVelocity);
-            lastLivePadTriggerMs[pad] = now;
-        }
-        // Immediate visual feedback — bypass SCREEN_UPDATE_MS gate
-        if (currentScreen == SCREEN_LIVE && lvgl_port_lock(5)) {
-            ui_update_live_pads();
-            lvgl_port_unlock();
-            lastScreenUpdate = now;  // reset timer to avoid double update
-        }
-    }
-
-    // Repeat triggers — touch pads held (only after initial hold delay)
-    if (currentScreen == SCREEN_LIVE) {
-        for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
-            if (!livePadPressed[pad]) continue;
-            // Require hold for REPEAT_DELAY before any repeat fires
-            if ((now - livePadHoldStartMs[pad]) < Config::LIVE_PAD_REPEAT_DELAY_MS) continue;
-            if ((now - lastLivePadTriggerMs[pad]) < Config::LIVE_PAD_REPEAT_MS) continue;
-            sendLivePadTrigger(pad, padVelocity);
-            lastLivePadTriggerMs[pad] = now;
-        }
-    }
+    // (Hold-repeat removed — repeat count is controlled by RPT buttons)
 
     // Local step clock: PRIMARY driver of currentStep (same approach as old project).
     // Master step_update is ignored for position — UDP packet loss makes it unreliable.

@@ -53,7 +53,7 @@ esp_lcd_panel_handle_t rgb_lcd_init() {
 
     panel_config.flags.fb_in_psram = true;
     panel_config.flags.bb_invalidate_cache = 1;
-    panel_config.psram_trans_align = 64;  // DMA burst alignment
+    panel_config.dma_burst_size = 64;  // DMA burst alignment
 
     // Bounce buffers: DMA reads from internal SRAM instead of PSRAM.
     // Eliminates PSRAM bus contention between LCD DMA, CPU, and WiFi.

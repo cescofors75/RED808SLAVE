@@ -106,6 +106,7 @@ extern int currentKit;
 extern int masterVolume;
 extern int sequencerVolume;
 extern int livePadsVolume;
+extern volatile int livePadRepeatCount;
 extern int trackVolumes[];
 extern bool trackMuted[];
 extern bool trackSolo[];
@@ -113,6 +114,7 @@ extern bool livePadPressed[];
 extern bool byteButtonLivePressed[];
 extern uint8_t prevByteButtonState;  // ByteButton bitmask state for edge detection
 extern volatile uint32_t pendingLivePadTriggerMask;
+extern volatile bool livePadsVisualDirty;
 extern VolumeMode volumeMode;
 
 // Filters
