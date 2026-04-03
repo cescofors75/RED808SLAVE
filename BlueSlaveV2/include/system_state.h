@@ -123,6 +123,12 @@ extern TrackFilter trackFilters[];
 extern TrackFilter masterFilter;
 extern int filterSelectedTrack;   // -1 = MASTER
 extern int filterSelectedFX;
+extern int fxFilterType;
+extern int fxFilterCutoffHz;
+extern int fxFilterResonanceX10;
+extern int fxBitCrushBits;
+extern int fxDistortionPercent;
+extern int fxSampleRateHz;
 extern EncoderMode encoderMode;
 extern int analogFxPreset;        // 0=OFF, 1..11=FX preset (analog rotary)
 

@@ -83,6 +83,12 @@ TrackFilter trackFilters[Config::MAX_TRACKS];
 TrackFilter masterFilter = {false, 0, 0, 0};
 int filterSelectedTrack = -1;  // -1 = master
 int filterSelectedFX = FILTER_DELAY;
+int fxFilterType = 0;
+int fxFilterCutoffHz = 2000;
+int fxFilterResonanceX10 = 30;
+int fxBitCrushBits = 16;
+int fxDistortionPercent = 0;
+int fxSampleRateHz = 44100;
 EncoderMode encoderMode = ENC_MODE_VOLUME;
 int analogFxPreset = 0;  // 0=OFF, 1..11=FX presets (set by analog rotary)
 
@@ -247,7 +253,7 @@ static bool nvs_dirty = false;
 static void nvs_load_settings() {
     nvs_handle_t h;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
-        Serial.println("[NVS] No saved settings found");
+        RED808_LOG_PRINTLN("[NVS] No saved settings found");
         return;
     }
     uint8_t val8;
@@ -267,7 +273,7 @@ static void nvs_load_settings() {
         volumeMode = (val8 == 1) ? VOL_LIVE_PADS : VOL_SEQUENCER;
 
     nvs_close(h);
-    Serial.printf("[NVS] Loaded: theme=%d bpm=%d vol=%d/%d/%d\n",
+    RED808_LOG_PRINTF("[NVS] Loaded: theme=%d bpm=%d vol=%d/%d/%d\n",
                   currentTheme, currentBPM, masterVolume, sequencerVolume, livePadsVolume);
 }
 
@@ -296,7 +302,7 @@ static void nvs_periodic_save() {
     if (!nvs_dirty) return;
     if ((millis() - nvs_last_save_ms) < 5000) return;
     nvs_save_settings();
-    Serial.println("[NVS] Settings auto-saved");
+    RED808_LOG_PRINTLN("[NVS] Settings auto-saved");
 }
 
 static void requestTrackVolumesFromMaster() {
@@ -576,7 +582,7 @@ static void startWiFiReconnectAttempt() {
 }
 
 void setupWiFi() {
-    Serial.println("[WiFi] Connecting...");
+    RED808_LOG_PRINTLN("[WiFi] Connecting...");
     WiFi.disconnect(true);
     delay(20);
     WiFi.mode(WIFI_STA);
@@ -588,12 +594,12 @@ void setupWiFi() {
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && (millis() - start) < WiFiConfig::TIMEOUT_MS) {
         delay(250);
-        Serial.print(".");
+        RED808_LOG_PRINT(".");
     }
 
     if (WiFi.status() == WL_CONNECTED) {
         finalizeWiFiConnection();
-        Serial.printf("\n[WiFi] Connected! IP: %s  UDP: %s\n",
+        RED808_LOG_PRINTF("\n[WiFi] Connected! IP: %s  UDP: %s\n",
                       WiFi.localIP().toString().c_str(),
                       udpConnected ? "OK" : "FALLO");
 
@@ -601,7 +607,7 @@ void setupWiFi() {
             requestMasterSync(true);
         }
     } else {
-        Serial.println("\n[WiFi] Initial connect timeout - will retry in background");
+        RED808_LOG_PRINTLN("\n[WiFi] Initial connect timeout - will retry in background");
         wifiConnected = false;
         wifiReconnecting = false;
         udpConnected = false;
@@ -619,7 +625,7 @@ void checkWiFiReconnect() {
         lastWiFiConnectedMs = now_wifi;
         if (!wifiConnected) {
             finalizeWiFiConnection();
-            Serial.printf("[WiFi] Reconectado! IP: %s  UDP: %s\n",
+            RED808_LOG_PRINTF("[WiFi] Reconectado! IP: %s  UDP: %s\n",
                           WiFi.localIP().toString().c_str(),
                           udpConnected ? "OK" : "FALLO");
             if (udpConnected) {
@@ -642,7 +648,7 @@ void checkWiFiReconnect() {
         udpConnected = false;
         diagInfo.wifiOk = false;
         diagInfo.udpConnected = false;
-        Serial.println("[WiFi] Link lost, waiting for background reconnect");
+        RED808_LOG_PRINTLN("[WiFi] Link lost, waiting for background reconnect");
     }
 
     if (wifiReconnecting && (now_wifi - lastWiFiCheck > WiFiConfig::RECONNECT_ATTEMPT_TIMEOUT_MS)) {
@@ -736,7 +742,7 @@ void sendFullPatternToMaster(int pat) {
         doc["index"] = savedPattern;
         sendUDPCommand(doc);
     }
-    Serial.printf("[DEMO] Sent pattern %d to master (%d steps)\n", pat, sent);
+    RED808_LOG_PRINTF("[DEMO] Sent pattern %d to master (%d steps)\n", pat, sent);
 }
 
 // =============================================================================
@@ -844,7 +850,7 @@ void receiveUDPData() {
                         for (int s = 0; s < Config::MAX_STEPS && !localHasData; s++)
                             if (patterns[6].steps[t][s]) localHasData = true;
                     if (localHasData) {
-                        Serial.println("[UDP] Skipping empty pattern_sync for pattern 7 (demo)");
+                        RED808_LOG_PRINTLN("[UDP] Skipping empty pattern_sync for pattern 7 (demo)");
                         return;  // skip this packet, keep local demo
                     }
                 }
@@ -926,6 +932,26 @@ void receiveUDPData() {
             trackVolumes[track] = constrain(value, 0, Config::MAX_VOLUME);
         }
     }
+    else if (strcmp(cmd, "setFilter") == 0) {
+        fxFilterType = constrain(doc["type"] | fxFilterType, 0, 4);
+    }
+    else if (strcmp(cmd, "setFilterCutoff") == 0) {
+        fxFilterCutoffHz = constrain(doc["value"] | fxFilterCutoffHz, 20, 20000);
+    }
+    else if (strcmp(cmd, "setFilterResonance") == 0) {
+        float resonance = doc["value"].is<float>() ? doc["value"].as<float>() : ((float)(doc["value"] | fxFilterResonanceX10) / 10.0f);
+        fxFilterResonanceX10 = constrain((int)lroundf(resonance * 10.0f), 1, 100);
+    }
+    else if (strcmp(cmd, "setBitCrush") == 0) {
+        fxBitCrushBits = constrain(doc["value"] | fxBitCrushBits, 1, 16);
+    }
+    else if (strcmp(cmd, "setDistortion") == 0) {
+        float distortion = doc["value"].is<float>() ? doc["value"].as<float>() : ((float)(doc["value"] | fxDistortionPercent) / 100.0f);
+        fxDistortionPercent = constrain((int)lroundf(distortion * 100.0f), 0, 100);
+    }
+    else if (strcmp(cmd, "setSampleRate") == 0) {
+        fxSampleRateHz = constrain(doc["value"] | fxSampleRateHz, 1000, 44100);
+    }
     else if (strcmp(cmd, "selectPattern") == 0 || strcmp(cmd, "pattern_select") == 0 ||
              strcmp(cmd, "current_pattern") == 0) {
         int pat = doc["index"] | (doc["pattern"] | -1);
@@ -1002,17 +1028,17 @@ void sendFilterUDP(int track, int fxType) {
 // =============================================================================
 
 void scanI2CHub() {
-    Serial.println("[I2C] Scanning bus...");
+    RED808_LOG_PRINTLN("[I2C] Scanning bus...");
 
     // Check for PCA9548A hub (with mutex protection)
     hubDetected = i2c_device_present(I2C_HUB_ADDR);
     diagInfo.i2cHubOk = hubDetected;
 
     if (!hubDetected) {
-        Serial.println("[I2C] No PCA9548A hub found");
+        RED808_LOG_PRINTLN("[I2C] No PCA9548A hub found");
         return;
     }
-    Serial.println("[I2C] PCA9548A hub detected");
+    RED808_LOG_PRINTLN("[I2C] PCA9548A hub detected");
 
     int m5Found = 0, dfFound = 0;
     bool byteButtonFound = false;
@@ -1025,7 +1051,7 @@ void scanI2CHub() {
         if (m5Found < M5_ENCODER_MODULES && i2c_device_present(M5_ENCODER_ADDR)) {
             m5HubChannel[m5Found] = ch;
             m5encoderConnected[m5Found] = true;
-            Serial.printf("[I2C] M5 ROTATE8 #%d found on ch %d\n", m5Found + 1, ch);
+            RED808_LOG_PRINTF("[I2C] M5 ROTATE8 #%d found on ch %d\n", m5Found + 1, ch);
 
             // begin() and resetCounter() do I2C — protect with scoped lock
             if (i2c_lock(50)) {
@@ -1054,7 +1080,7 @@ void scanI2CHub() {
                     // Stabilize startup: set a known center and baseline to avoid first-read jumps
                     dfEncoders[dfFound]->setEncoderValue(512);
                     prevDFValue[dfFound] = 512;
-                    Serial.printf("[I2C] DFRobot #%d found on ch %d\n", dfFound + 1, ch);
+                    RED808_LOG_PRINTF("[I2C] DFRobot #%d found on ch %d\n", dfFound + 1, ch);
                 } else {
                     delete dfEncoders[dfFound];
                     dfEncoders[dfFound] = nullptr;
@@ -1076,7 +1102,7 @@ void scanI2CHub() {
                 byteButtonConnected = true;
                 byteButtonFound = true;
                 prevByteButtonState = 0;
-                Serial.printf("[I2C] M5 ByteButton found on hub ch %d\n", ch);
+                RED808_LOG_PRINTF("[I2C] M5 ByteButton found on hub ch %d\n", ch);
 
                 if (i2c_lock(50)) {
                     i2c_hub_select_raw(ch);
@@ -1099,7 +1125,7 @@ void scanI2CHub() {
             byteButtonConnected = true;
             byteButtonFound = true;
             prevByteButtonState = 0;
-            Serial.println("[I2C] M5 ByteButton found DIRECT on bus (no hub)");
+            RED808_LOG_PRINTLN("[I2C] M5 ByteButton found DIRECT on bus (no hub)");
 
             if (i2c_lock(50)) {
                 byteButtonLedInitialized = byteButtonApplyLedConfigLocked();
@@ -1109,7 +1135,7 @@ void scanI2CHub() {
     }
 
     if (!byteButtonFound) {
-        Serial.println("[I2C] WARNING: ByteButton NOT found on any channel or direct bus!");
+        RED808_LOG_PRINTLN("[I2C] WARNING: ByteButton NOT found on any channel or direct bus!");
     }
 
     diagInfo.m5encoder1Ok = m5encoderConnected[0];
@@ -1118,7 +1144,7 @@ void scanI2CHub() {
     diagInfo.dfrobot2Ok = dfEncoderConnected[1];
     diagInfo.byteButtonOk = byteButtonConnected;
 
-    Serial.printf("[I2C] Found: %d M5 modules, %d DFRobot rotaries, ByteButton: %s\n",
+    RED808_LOG_PRINTF("[I2C] Found: %d M5 modules, %d DFRobot rotaries, ByteButton: %s\n",
                   m5Found, dfFound, byteButtonConnected ? "YES" : "NO");
 }
 
@@ -1299,7 +1325,7 @@ void bootLedAnimation() {
     bootLedPhase++;
     if (bootLedPhase >= 25) {
         bootLedDone = true;
-        Serial.println("[BOOT] LED test sequence complete");
+        RED808_LOG_PRINTLN("[BOOT] LED test sequence complete");
     }
 }
 
@@ -1322,7 +1348,7 @@ void setOceanBlueLeds() {
     for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
         setByteButtonLedDirect(i, oceanBlues[i]);
     }
-    Serial.printf("[LED] Ocean blue theme applied (M5 #1=%s ch=%d, M5 #2=%s ch=%d)\n",
+    RED808_LOG_PRINTF("[LED] Ocean blue theme applied (M5 #1=%s ch=%d, M5 #2=%s ch=%d)\n",
                   m5encoderConnected[0] ? "OK" : "NO",
                   m5HubChannel[0],
                   m5encoderConnected[1] ? "OK" : "NO",
@@ -1397,7 +1423,7 @@ void handleM5Encoders() {
                 doc["cmd"] = "mute";
                 doc["track"] = pending[0].track;
                 doc["value"] = (bool)pending[0].value;
-                Serial.printf("[M5] Track %d %s\n", pending[0].track, pending[0].value ? "MUTED" : "UNMUTED");
+                RED808_LOG_PRINTF("[M5] Track %d %s\n", pending[0].track, pending[0].value ? "MUTED" : "UNMUTED");
             }
             sendUDPCommand(doc);
         } else {
@@ -1414,7 +1440,7 @@ void handleM5Encoders() {
                     obj["cmd"] = "mute";
                     obj["track"] = pending[i].track;
                     obj["value"] = (bool)pending[i].value;
-                    Serial.printf("[M5] Track %d %s\n", pending[i].track, pending[i].value ? "MUTED" : "UNMUTED");
+                    RED808_LOG_PRINTF("[M5] Track %d %s\n", pending[i].track, pending[i].value ? "MUTED" : "UNMUTED");
                 }
             }
             sendUDPCommand(doc);
@@ -1454,7 +1480,7 @@ void handleDFRobotEncoders() {
 
         bool buttonPressed = dfEncoders[i]->detectButtonDown();
         if (buttonPressed) {
-            Serial.printf("[DFRobot] Encoder #%d button PRESSED\n", i);
+            RED808_LOG_PRINTF("[DFRobot] Encoder #%d button PRESSED\n", i);
         }
 
         i2c_hub_deselect_raw();
@@ -1572,7 +1598,7 @@ static void applyFxPreset(int pos) {
     sendFilterUDP(-1, FILTER_DELAY);
     sendFilterUDP(-1, FILTER_FLANGER);
     sendFilterUDP(-1, FILTER_COMPRESSOR);
-    Serial.printf("[ROTARY FX] pos=%d '%s'\n", pos, p.name);
+    RED808_LOG_PRINTF("[ROTARY FX] pos=%d '%s'\n", pos, p.name);
 }
 
 void handleAnalogEncoder() {
@@ -1651,7 +1677,7 @@ void handleAnalogEncoder() {
 
     analogFxPreset = position;
     applyFxPreset(position);
-    Serial.printf("[ROTARY] median=%d cal=[%d..%d] pos=%d\n", median, calMin, calMax, position);
+    RED808_LOG_PRINTF("[ROTARY] median=%d cal=[%d..%d] pos=%d\n", median, calMin, calMax, position);
 }
 
 // =============================================================================
@@ -1710,7 +1736,7 @@ void handleByteButton() {
                 case 3: // Toggle volume mode SEQ <-> PAD
                     volumeMode = (volumeMode == VOL_SEQUENCER) ? VOL_LIVE_PADS : VOL_SEQUENCER;
                     nvs_mark_dirty();
-                    Serial.printf("[BB] Volume mode: %s\n", volumeMode == VOL_SEQUENCER ? "SEQ" : "PAD");
+                    RED808_LOG_PRINTF("[BB] Volume mode: %s\n", volumeMode == VOL_SEQUENCER ? "SEQ" : "PAD");
                     break;
                 case 4: { // FX Delay toggle
                     masterFilter.enabled = !masterFilter.enabled || (filterSelectedFX != FILTER_DELAY);
@@ -1718,7 +1744,7 @@ void handleByteButton() {
                     if (!masterFilter.enabled) masterFilter.delayAmount = 0;
                     else if (masterFilter.delayAmount == 0) masterFilter.delayAmount = 64;
                     sendFilterUDP(-1, FILTER_DELAY);
-                    Serial.printf("[BB] FX DELAY %s\n", masterFilter.enabled ? "ON" : "OFF");
+                    RED808_LOG_PRINTF("[BB] FX DELAY %s\n", masterFilter.enabled ? "ON" : "OFF");
                     break;
                 }
                 case 5: { // FX Flanger toggle
@@ -1727,7 +1753,7 @@ void handleByteButton() {
                     if (!masterFilter.enabled) masterFilter.flangerAmount = 0;
                     else if (masterFilter.flangerAmount == 0) masterFilter.flangerAmount = 64;
                     sendFilterUDP(-1, FILTER_FLANGER);
-                    Serial.printf("[BB] FX FLANGER %s\n", masterFilter.enabled ? "ON" : "OFF");
+                    RED808_LOG_PRINTF("[BB] FX FLANGER %s\n", masterFilter.enabled ? "ON" : "OFF");
                     break;
                 }
                 case 6: { // FX Compressor toggle
@@ -1736,7 +1762,7 @@ void handleByteButton() {
                     if (!masterFilter.enabled) masterFilter.compAmount = 0;
                     else if (masterFilter.compAmount == 0) masterFilter.compAmount = 64;
                     sendFilterUDP(-1, FILTER_COMPRESSOR);
-                    Serial.printf("[BB] FX COMPRESSOR %s\n", masterFilter.enabled ? "ON" : "OFF");
+                    RED808_LOG_PRINTF("[BB] FX COMPRESSOR %s\n", masterFilter.enabled ? "ON" : "OFF");
                     break;
                 }
                 case 7: { // Clear ALL FX
@@ -1747,7 +1773,7 @@ void handleByteButton() {
                     sendFilterUDP(-1, FILTER_DELAY);
                     sendFilterUDP(-1, FILTER_FLANGER);
                     sendFilterUDP(-1, FILTER_COMPRESSOR);
-                    Serial.println("[BB] ALL FX CLEARED");
+                    RED808_LOG_PRINTLN("[BB] ALL FX CLEARED");
                     break;
                 }
             }
@@ -1802,90 +1828,90 @@ void setup() {
     // Wait up to 500ms for USB CDC, skip wait if no monitor connected
     { unsigned long _t = millis(); while (!Serial && (millis()-_t) < 500) delay(10); }
     delay(5);
-    Serial.println("\n====================================");
-    Serial.println("  Blu808Slave V6");
-    Serial.println("  Waveshare ESP32-S3-Touch-LCD-7B");
-    Serial.println("====================================\n");
+    RED808_LOG_PRINTLN("\n====================================");
+    RED808_LOG_PRINTLN("  Blue808Slave V6");
+    RED808_LOG_PRINTLN("  Waveshare ESP32-S3-Touch-LCD-7B");
+    RED808_LOG_PRINTLN("====================================\n");
 
     // Check PSRAM
     if (psramFound()) {
-        Serial.printf("[PSRAM] OK - %d bytes free\n", ESP.getFreePsram());
+        RED808_LOG_PRINTF("[PSRAM] OK - %d bytes free\n", ESP.getFreePsram());
     } else {
-        Serial.println("[PSRAM] WARNING: PSRAM not found!");
+        RED808_LOG_PRINTLN("[PSRAM] WARNING: PSRAM not found!");
     }
-    Serial.printf("[HEAP] Free: %d bytes\n", ESP.getFreeHeap());
+    RED808_LOG_PRINTF("[HEAP] Free: %d bytes\n", ESP.getFreeHeap());
 
     // Init state
     initState();
-    Serial.println("[STATE] Initialized");
+    RED808_LOG_PRINTLN("[STATE] Initialized");
 
     // Init NVS flash (must be before nvs_load and setupWiFi)
     {
         esp_err_t nvs_err = nvs_flash_init();
         if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-            Serial.println("[NVS] Flash corrupted, erasing...");
+            RED808_LOG_PRINTLN("[NVS] Flash corrupted, erasing...");
             nvs_flash_erase();
             nvs_err = nvs_flash_init();
         }
-        Serial.printf("[NVS] Flash init: %s\n", esp_err_to_name(nvs_err));
+        RED808_LOG_PRINTF("[NVS] Flash init: %s\n", esp_err_to_name(nvs_err));
     }
 
     // Load saved settings from NVS (theme, volumes, BPM)
     nvs_load_settings();
-    Serial.println("[NVS] Settings loaded");
+    RED808_LOG_PRINTLN("[NVS] Settings loaded");
 
     // 1. I2C bus
     i2c_init();
     delay(10);
-    Serial.println("[I2C] Bus initialized");
+    RED808_LOG_PRINTLN("[I2C] Bus initialized");
 
     // 2. IO Extension (CH32V003) - backlight, resets
     io_ext_init();
     io_ext_backlight_on();
     delay(10);
-    Serial.println("[IO] CH32V003 initialized, backlight ON");
+    RED808_LOG_PRINTLN("[IO] CH32V003 initialized, backlight ON");
 
     // 3. LCD panel
-    Serial.println("[LCD] Initializing RGB panel...");
+    RED808_LOG_PRINTLN("[LCD] Initializing RGB panel...");
     lcd_panel = rgb_lcd_init();
     if (!lcd_panel) {
-        Serial.println("[LCD] FATAL: Panel init failed!");
+        RED808_LOG_PRINTLN("[LCD] FATAL: Panel init failed!");
     } else {
-        Serial.println("[LCD] Panel initialized OK");
+        RED808_LOG_PRINTLN("[LCD] Panel initialized OK");
         diagInfo.lcdOk = true;
     }
 
     // 4. Touch controller
-    Serial.println("[Touch] Initializing GT911...");
+    RED808_LOG_PRINTLN("[Touch] Initializing GT911...");
     gt911_init();
     diagInfo.touchOk = gt911_is_ready();
-    Serial.printf("[Touch] GT911 %s\n", diagInfo.touchOk ? "OK" : "NOT DETECTED");
+    RED808_LOG_PRINTF("[Touch] GT911 %s\n", diagInfo.touchOk ? "OK" : "NOT DETECTED");
 
     // 5. LVGL init (task created but NOT started yet - no I2C contention)
-    Serial.println("[LVGL] Initializing port...");
+    RED808_LOG_PRINTLN("[LVGL] Initializing port...");
     lvgl_port_init(lcd_panel);
-    Serial.println("[LVGL] Port initialized (task paused)");
+    RED808_LOG_PRINTLN("[LVGL] Port initialized (task paused)");
 
     // 6. Analog rotary encoder GPIO setup
     pinMode(Config::ANALOG_ENC_PIN, INPUT);
     analogReadResolution(12);  // 12-bit ADC (0-4095)
-    Serial.println("[ENC] Analog rotary on GPIO6 initialized");
+    RED808_LOG_PRINTLN("[ENC] Analog rotary on GPIO6 initialized");
 
     // 7. Scan I2C hub for M5 + DFRobot + ByteButton (before LVGL task starts - no I2C race)
     scanI2CHub();
 
     // 8. WiFi + UDP — init BEFORE LVGL screens to reserve internal SRAM for WiFi DMA buffers
-    Serial.printf("[HEAP] Before WiFi: %d bytes\n", ESP.getFreeHeap());
+    RED808_LOG_PRINTF("[HEAP] Before WiFi: %d bytes\n", ESP.getFreeHeap());
     setupWiFi();
-    Serial.printf("[HEAP] After WiFi: %d bytes\n", ESP.getFreeHeap());
+    RED808_LOG_PRINTF("[HEAP] After WiFi: %d bytes\n", ESP.getFreeHeap());
 
     // 9. Now start LVGL task (safe - I2C scanning is done)
     lvgl_port_task_start();
-    Serial.println("[LVGL] Task started");
+    RED808_LOG_PRINTLN("[LVGL] Task started");
 
     // 10. Create all UI screens (must be inside LVGL lock)
     //    Widgets now allocate from PSRAM via lv_conf.h, keeping internal heap free
-    Serial.println("[UI] Creating screens...");
+    RED808_LOG_PRINTLN("[UI] Creating screens...");
     if (lvgl_port_lock(1000)) {
         ui_theme_init();
 
@@ -1908,18 +1934,18 @@ void setup() {
         lv_scr_load(scr_boot);
 
         lvgl_port_unlock();
-        Serial.println("[UI] All screens created");
+        RED808_LOG_PRINTLN("[UI] All screens created");
     }
-    Serial.printf("[HEAP] After UI: %d bytes  PSRAM: %d bytes\n", ESP.getFreeHeap(), ESP.getFreePsram());
+    RED808_LOG_PRINTF("[HEAP] After UI: %d bytes  PSRAM: %d bytes\n", ESP.getFreeHeap(), ESP.getFreePsram());
 
     // 11. Encoder task — dedicated FreeRTOS task for I2C encoder polling
     xTaskCreatePinnedToCore(encoder_task, "enc", 6144, NULL, 2, NULL, 0);
-    Serial.println("[ENC] Encoder task started (Core 0, pri 2)");
+    RED808_LOG_PRINTLN("[ENC] Encoder task started (Core 0, pri 2)");
 
     // 12. Microtiming engine — seed PRNG from hardware RNG
     microtiming_init();
 
-    Serial.println("\n[SETUP] Complete! Entering main loop.\n");
+    RED808_LOG_PRINTLN("\n[SETUP] Complete! Entering main loop.\n");
 }
 
 // =============================================================================
@@ -1999,7 +2025,7 @@ void loop() {
 
     if (wifiConnected && udpConnected && !masterConnected && (now - lastUDPCheck >= WiFiConfig::MASTER_HELLO_RETRY_MS)) {
         lastUDPCheck = now;
-        Serial.println("[UDP] Master not responding, resending hello...");
+        RED808_LOG_PRINTLN("[UDP] Master not responding, resending hello...");
         requestMasterSync(false);
     }
 
@@ -2065,21 +2091,21 @@ void loop() {
     static bool firstDiagDone = false;
     if (!firstDiagDone && now > 5000) {
         firstDiagDone = true;
-        Serial.println("\n=== RUNTIME DIAGNOSTICS ===");
-        Serial.printf("  GT911 touch: %s\n", gt911_is_ready() ? "OK" : "NOT DETECTED");
-        Serial.printf("  I2C Hub:     %s\n", hubDetected ? "OK" : "NOT FOUND");
-        Serial.printf("  M5 #1:       %s (ch=%d)\n", m5encoderConnected[0] ? "OK" : "NO", m5HubChannel[0]);
-        Serial.printf("  M5 #2:       %s (ch=%d)\n", m5encoderConnected[1] ? "OK" : "NO", m5HubChannel[1]);
-        Serial.printf("  DFRobot #1:  %s (ch=%d)\n", dfEncoderConnected[0] ? "OK" : "NO", dfRobotHubChannel[0]);
-        Serial.printf("  DFRobot #2:  %s (ch=%d)\n", dfEncoderConnected[1] ? "OK" : "NO", dfRobotHubChannel[1]);
-        Serial.printf("  ByteButton:  %s (ch=%d)\n", byteButtonConnected ? "OK" : "NO", byteButtonHubChannel);
-        Serial.printf("  LCD panel:   %s\n", lcd_panel ? "OK" : "FAIL");
-        Serial.printf("  Heap: %d  PSRAM: %d\n", ESP.getFreeHeap(), ESP.getFreePsram());
-        Serial.println("===========================\n");
+        RED808_LOG_PRINTLN("\n=== RUNTIME DIAGNOSTICS ===");
+        RED808_LOG_PRINTF("  GT911 touch: %s\n", gt911_is_ready() ? "OK" : "NOT DETECTED");
+        RED808_LOG_PRINTF("  I2C Hub:     %s\n", hubDetected ? "OK" : "NOT FOUND");
+        RED808_LOG_PRINTF("  M5 #1:       %s (ch=%d)\n", m5encoderConnected[0] ? "OK" : "NO", m5HubChannel[0]);
+        RED808_LOG_PRINTF("  M5 #2:       %s (ch=%d)\n", m5encoderConnected[1] ? "OK" : "NO", m5HubChannel[1]);
+        RED808_LOG_PRINTF("  DFRobot #1:  %s (ch=%d)\n", dfEncoderConnected[0] ? "OK" : "NO", dfRobotHubChannel[0]);
+        RED808_LOG_PRINTF("  DFRobot #2:  %s (ch=%d)\n", dfEncoderConnected[1] ? "OK" : "NO", dfRobotHubChannel[1]);
+        RED808_LOG_PRINTF("  ByteButton:  %s (ch=%d)\n", byteButtonConnected ? "OK" : "NO", byteButtonHubChannel);
+        RED808_LOG_PRINTF("  LCD panel:   %s\n", lcd_panel ? "OK" : "FAIL");
+        RED808_LOG_PRINTF("  Heap: %d  PSRAM: %d\n", ESP.getFreeHeap(), ESP.getFreePsram());
+        RED808_LOG_PRINTLN("===========================\n");
     }
     if (now - lastHeartbeat >= 10000) {
         lastHeartbeat = now;
-        Serial.printf("[ALIVE] %lus Heap:%d PSRAM:%d\n", now/1000, ESP.getFreeHeap(), ESP.getFreePsram());
+        RED808_LOG_PRINTF("[ALIVE] %lus Heap:%d PSRAM:%d\n", now/1000, ESP.getFreeHeap(), ESP.getFreePsram());
     }
 
     taskYIELD(); // Yield to encoder_task and other Core 0 tasks

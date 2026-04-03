@@ -13,6 +13,7 @@
 
 extern void sendUDPCommand(JsonDocument& doc);
 extern void sendUDPCommand(const char* cmd);
+extern void sendFilterUDP(int track, int fxType);
 
 // SRAM allocator — same as main.cpp, avoids PSRAM bus contention with LCD DMA
 struct SramAllocatorUI : ArduinoJson::Allocator {
@@ -86,9 +87,24 @@ static lv_obj_t* vol_labels[Config::MAX_TRACKS];
 static lv_obj_t* vol_name_labels[Config::MAX_TRACKS];
 
 // Filter UI
-static lv_obj_t* filter_arcs[3];       // Delay, Flanger, Compressor
+static lv_obj_t* filter_arcs[3];
 static lv_obj_t* filter_labels[3];
 static lv_obj_t* filter_value_labels[3];
+static lv_obj_t* filter_toggle_btns[3] = {};
+static lv_obj_t* filter_toggle_labels[3] = {};
+static lv_obj_t* filter_legacy_sliders[3] = {};
+static lv_obj_t* filter_type_btns[5] = {};
+static lv_obj_t* filter_type_labels[5] = {};
+static lv_obj_t* filter_bit_btns[4] = {};
+static lv_obj_t* filter_bit_labels[4] = {};
+static lv_obj_t* filter_ext_sliders[4] = {};
+static lv_obj_t* filter_ext_value_labels[4] = {};
+static lv_obj_t* filter_scene_btns[4] = {};
+static lv_obj_t* filter_scene_labels[4] = {};
+static lv_obj_t* filter_fun_status = NULL;
+static lv_obj_t* filter_master_tag = NULL;
+static lv_obj_t* filter_target_prev_btn = NULL;
+static lv_obj_t* filter_target_next_btn = NULL;
 static lv_obj_t* filter_target_label = NULL;
 static lv_obj_t* filter_preset_label = NULL;  // rotary FX preset indicator
 
@@ -96,15 +112,25 @@ static lv_obj_t* filter_preset_label = NULL;  // rotary FX preset indicator
 static lv_obj_t* live_pads[Config::MAX_SAMPLES];
 static lv_obj_t* live_pad_names[Config::MAX_SAMPLES];
 static lv_obj_t* live_pad_desc[Config::MAX_SAMPLES];
+static lv_obj_t* live_pad_accents[Config::MAX_SAMPLES];
+static lv_obj_t* live_pad_glows[Config::MAX_SAMPLES];
 static lv_coord_t live_pad_x[Config::MAX_SAMPLES] = {};
 static lv_coord_t live_pad_y[Config::MAX_SAMPLES] = {};
 static lv_coord_t live_pad_w[Config::MAX_SAMPLES] = {};
 static lv_coord_t live_pad_h[Config::MAX_SAMPLES] = {};
 
 static constexpr int LIVE_PAD_COLS = 4;
-static constexpr int LIVE_PAD_SIZE = 200;
 static constexpr int LIVE_PAD_GAP = 12;
 static constexpr int LIVE_PAD_AREA_TOP = 70;
+static constexpr int LIVE_VIEW_MODE_COUNT = 5;
+static const uint8_t live_view_options[LIVE_VIEW_MODE_COUNT] = {16, 8, 4, 2, 1};
+static lv_obj_t* live_view_btns[LIVE_VIEW_MODE_COUNT] = {};
+static lv_obj_t* live_view_labels[LIVE_VIEW_MODE_COUNT] = {};
+static lv_obj_t* live_view_page_label = NULL;
+static lv_obj_t* live_view_prev_btn = NULL;
+static lv_obj_t* live_view_next_btn = NULL;
+static uint8_t livePadVisibleCount = 16;
+static uint8_t livePadViewStart = 0;
 
 // Ratchet controls (repeat count 1-16)
 static lv_obj_t* live_ratchet_label = NULL;
@@ -113,6 +139,159 @@ static lv_obj_t* live_ratchet_label = NULL;
 static bool livePadSyncMode = false;
 static lv_obj_t* live_sync_btn = NULL;
 static lv_obj_t* live_sync_lbl = NULL;
+
+static int live_pad_visible_index_count() {
+    return constrain((int)livePadVisibleCount, 1, Config::MAX_SAMPLES);
+}
+
+static int live_pad_block_count() {
+    int visible = live_pad_visible_index_count();
+    return (Config::MAX_SAMPLES + visible - 1) / visible;
+}
+
+static void live_update_view_controls() {
+    for (int i = 0; i < LIVE_VIEW_MODE_COUNT; i++) {
+        if (!live_view_btns[i] || !live_view_labels[i]) continue;
+        bool selected = live_view_options[i] == livePadVisibleCount;
+        lv_color_t color = selected ? RED808_ACCENT : RED808_SURFACE;
+        lv_obj_set_style_bg_color(live_view_btns[i], color, 0);
+        lv_obj_set_style_border_color(live_view_btns[i], selected ? RED808_ACCENT : RED808_BORDER, 0);
+        lv_obj_set_style_text_color(live_view_labels[i], selected ? RED808_BG : RED808_TEXT, 0);
+    }
+
+    if (live_view_page_label) {
+        int visible = live_pad_visible_index_count();
+        int page = (livePadViewStart / visible) + 1;
+        int pages = live_pad_block_count();
+        if (pages <= 1) {
+            lv_label_set_text(live_view_page_label, "ALL");
+        } else {
+            lv_label_set_text_fmt(live_view_page_label, "%d/%d", page, pages);
+        }
+    }
+
+    if (live_view_prev_btn) {
+        lv_obj_add_flag(live_view_prev_btn, live_pad_block_count() <= 1 ? LV_OBJ_FLAG_HIDDEN : 0);
+        if (live_pad_block_count() > 1) lv_obj_clear_flag(live_view_prev_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (live_view_next_btn) {
+        lv_obj_add_flag(live_view_next_btn, live_pad_block_count() <= 1 ? LV_OBJ_FLAG_HIDDEN : 0);
+        if (live_pad_block_count() > 1) lv_obj_clear_flag(live_view_next_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void live_layout_pads() {
+    int visible = live_pad_visible_index_count();
+    if (visible <= 0) return;
+
+    if (livePadViewStart >= Config::MAX_SAMPLES) livePadViewStart = 0;
+    livePadViewStart = (livePadViewStart / visible) * visible;
+
+    const int left_panel_w = 76;
+    const int left_panel_x = 12;
+    const int right_panel_w = 88;
+    const int right_panel_margin = 12;
+    const int grid_left = left_panel_x + left_panel_w + 12;
+    const int grid_right = 1024 - right_panel_w - right_panel_margin;
+    const int grid_width = grid_right - grid_left;
+    const int grid_height = 600 - LIVE_PAD_AREA_TOP - 18;
+
+    int cols = 4;
+    int rows = 4;
+    switch (visible) {
+        case 16: cols = 4; rows = 4; break;
+        case 8:  cols = 4; rows = 2; break;
+        case 4:  cols = 2; rows = 2; break;
+        case 2:  cols = 2; rows = 1; break;
+        case 1:  cols = 1; rows = 1; break;
+        default: cols = min(4, visible); rows = (visible + cols - 1) / cols; break;
+    }
+
+    lv_coord_t pad_w = (grid_width - (cols - 1) * LIVE_PAD_GAP) / cols;
+    lv_coord_t pad_h = (grid_height - (rows - 1) * LIVE_PAD_GAP) / rows;
+
+    for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
+        bool visibleNow = pad >= livePadViewStart && pad < min<int>(Config::MAX_SAMPLES, livePadViewStart + visible);
+        if (!live_pads[pad]) continue;
+
+        if (!visibleNow) {
+            lv_obj_add_flag(live_pads[pad], LV_OBJ_FLAG_HIDDEN);
+            live_pad_x[pad] = -1;
+            live_pad_y[pad] = -1;
+            live_pad_w[pad] = 0;
+            live_pad_h[pad] = 0;
+            continue;
+        }
+
+        int localIndex = pad - livePadViewStart;
+        int col = localIndex % cols;
+        int row = localIndex / cols;
+        lv_coord_t x = grid_left + col * (pad_w + LIVE_PAD_GAP);
+        lv_coord_t y = LIVE_PAD_AREA_TOP + row * (pad_h + LIVE_PAD_GAP);
+
+        lv_obj_clear_flag(live_pads[pad], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_size(live_pads[pad], pad_w, pad_h);
+        lv_obj_set_pos(live_pads[pad], x, y);
+        live_pad_x[pad] = x;
+        live_pad_y[pad] = y;
+        live_pad_w[pad] = pad_w;
+        live_pad_h[pad] = pad_h;
+
+        if (live_pad_accents[pad]) {
+            lv_obj_set_size(live_pad_accents[pad], 6, pad_h - 16);
+            lv_obj_set_pos(live_pad_accents[pad], 8, 8);
+        }
+        if (live_pad_names[pad]) {
+            lv_obj_set_pos(live_pad_names[pad], 22, 10);
+        }
+        if (live_pad_desc[pad]) {
+            lv_obj_set_pos(live_pad_desc[pad], 22, pad_h - 28);
+        }
+        if (live_pad_glows[pad]) {
+            lv_obj_set_size(live_pad_glows[pad], pad_w - 24, 3);
+            lv_obj_set_pos(live_pad_glows[pad], 12, pad_h - 8);
+        }
+    }
+
+    if (live_sync_btn) {
+        lv_obj_set_pos(live_sync_btn, grid_left + (grid_width - 120) / 2, LIVE_PAD_AREA_TOP - 42);
+    }
+
+    live_update_view_controls();
+}
+
+static void live_view_prev_cb(lv_event_t* e) {
+    (void)e;
+    int visible = live_pad_visible_index_count();
+    if (visible >= Config::MAX_SAMPLES) return;
+    if (livePadViewStart >= visible) livePadViewStart -= visible;
+    else livePadViewStart = (live_pad_block_count() - 1) * visible;
+    live_layout_pads();
+    ui_live_pads_invalidate();
+}
+
+static void live_view_next_cb(lv_event_t* e) {
+    (void)e;
+    int visible = live_pad_visible_index_count();
+    if (visible >= Config::MAX_SAMPLES) return;
+    livePadViewStart += visible;
+    if (livePadViewStart >= Config::MAX_SAMPLES) livePadViewStart = 0;
+    live_layout_pads();
+    ui_live_pads_invalidate();
+}
+
+static void live_view_mode_cb(lv_event_t* e) {
+    int count = (int)(intptr_t)lv_event_get_user_data(e);
+    if (count <= 0) return;
+    if (livePadVisibleCount == count) {
+        live_view_next_cb(e);
+        return;
+    }
+    livePadVisibleCount = (uint8_t)count;
+    livePadViewStart = 0;
+    live_layout_pads();
+    ui_live_pads_invalidate();
+}
 
 static uint32_t last_nav_ms = 0;
 
@@ -159,6 +338,7 @@ static constexpr int kBootLineCount = 16;
 static lv_obj_t* boot_text_lines[kBootLineCount] = {};
 static lv_obj_t* boot_cursor_lbl = NULL;
 static lv_obj_t* boot_status_lbl = NULL;
+static lv_obj_t* boot_progress_fill = NULL;
 static lv_timer_t* boot_timer = NULL;
 static int boot_state = 0;
 
@@ -178,7 +358,7 @@ static const char* const kBootLines[] = {
     "[WLAN]  802.11b/g/n STA  AP RED808  CH AUTO....... OK",
     "[UDP ]  PORT 8888  MASTER 192.168.4.1............. OK",
     "[SEQ ]  16 TRACKS x 16 STEPS  64 PATTERNS........ OK",
-    "\n> BLU808 SLAVE CONTROLLER V6 ............... READY",
+    "\n> BLUE808SLAVE CONTROLLER V6 ............... READY",
 };
 
 // ============================================================================
@@ -361,7 +541,7 @@ void ui_create_header(lv_obj_t* parent) {
 
     // Logo
     lv_obj_t* logo = lv_label_create(header);
-    lv_label_set_text(logo, LV_SYMBOL_AUDIO " Blu808Slave");
+    lv_label_set_text(logo, LV_SYMBOL_AUDIO " Blue808Slave");
     lv_obj_set_style_text_font(logo, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(logo, RED808_ACCENT, 0);
 
@@ -606,18 +786,73 @@ void ui_create_live_screen() {
     lv_obj_set_style_bg_color(scr_live, RED808_BG, 0);
     ui_create_header(scr_live);
 
-    int x_start = (1024 - LIVE_PAD_COLS * LIVE_PAD_SIZE - 3 * LIVE_PAD_GAP) / 2;
-    int row_h = (600 - LIVE_PAD_AREA_TOP - 18) / 4;
+    const int left_panel_w = 76;
+    const int left_panel_x = 12;
+    const int right_panel_w = 88;
+    const int right_panel_margin = 12;
+    const int grid_left = left_panel_x + left_panel_w + 12;
+    const int grid_right = 1024 - right_panel_w - right_panel_margin;
+    const int grid_width = grid_right - grid_left;
+    const int row_h = (600 - LIVE_PAD_AREA_TOP - 18 - 3 * LIVE_PAD_GAP) / 4;
+    const int default_pad_w = (grid_width - 3 * LIVE_PAD_GAP) / LIVE_PAD_COLS;
+
+    lv_obj_t* left_panel = create_section_shell(scr_live, left_panel_x, LIVE_PAD_AREA_TOP, left_panel_w, 510);
+    lv_obj_set_style_pad_all(left_panel, 8, 0);
+    lv_obj_set_flex_flow(left_panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(left_panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_gap(left_panel, 8, 0);
+
+    lv_obj_t* left_title = lv_label_create(left_panel);
+    lv_label_set_text(left_title, "VIEW");
+    lv_obj_set_style_text_font(left_title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(left_title, RED808_TEXT_DIM, 0);
+
+    for (int i = 0; i < LIVE_VIEW_MODE_COUNT; i++) {
+        lv_obj_t* btn = lv_btn_create(left_panel);
+        lv_obj_set_size(btn, 56, 42);
+        apply_stable_button_style(btn, RED808_SURFACE, RED808_BORDER);
+        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_add_event_cb(btn, live_view_mode_cb, LV_EVENT_CLICKED, (void*)(intptr_t)live_view_options[i]);
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text_fmt(lbl, "%d", live_view_options[i]);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+        lv_obj_center(lbl);
+        live_view_btns[i] = btn;
+        live_view_labels[i] = lbl;
+    }
+
+    live_view_prev_btn = lv_btn_create(left_panel);
+    lv_obj_set_size(live_view_prev_btn, 56, 32);
+    apply_stable_button_style(live_view_prev_btn, RED808_SURFACE, RED808_ACCENT2);
+    lv_obj_set_style_radius(live_view_prev_btn, 10, 0);
+    lv_obj_add_event_cb(live_view_prev_btn, live_view_prev_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* left_prev_lbl = lv_label_create(live_view_prev_btn);
+    lv_label_set_text(left_prev_lbl, LV_SYMBOL_UP);
+    lv_obj_center(left_prev_lbl);
+
+    live_view_page_label = lv_label_create(left_panel);
+    lv_label_set_text(live_view_page_label, "ALL");
+    lv_obj_set_style_text_font(live_view_page_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(live_view_page_label, RED808_TEXT, 0);
+
+    live_view_next_btn = lv_btn_create(left_panel);
+    lv_obj_set_size(live_view_next_btn, 56, 32);
+    apply_stable_button_style(live_view_next_btn, RED808_SURFACE, RED808_ACCENT2);
+    lv_obj_set_style_radius(live_view_next_btn, 10, 0);
+    lv_obj_add_event_cb(live_view_next_btn, live_view_next_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* left_next_lbl = lv_label_create(live_view_next_btn);
+    lv_label_set_text(left_next_lbl, LV_SYMBOL_DOWN);
+    lv_obj_center(left_next_lbl);
 
     for (int i = 0; i < 16; i++) {
         int col = i % 4;
         int row = i / 4;
-        lv_coord_t x = x_start + col * (LIVE_PAD_SIZE + LIVE_PAD_GAP);
-        lv_coord_t y = LIVE_PAD_AREA_TOP + row * row_h;
+        lv_coord_t x = grid_left + col * (default_pad_w + LIVE_PAD_GAP);
+        lv_coord_t y = LIVE_PAD_AREA_TOP + row * (row_h + LIVE_PAD_GAP);
         lv_coord_t h = row_h - LIVE_PAD_GAP;
 
         lv_obj_t* pad = lv_obj_create(scr_live);
-        lv_obj_set_size(pad, LIVE_PAD_SIZE, h);
+        lv_obj_set_size(pad, default_pad_w, h);
         lv_obj_set_pos(pad, x, y);
         lv_obj_clear_flag(pad, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -640,6 +875,7 @@ void ui_create_live_screen() {
         lv_obj_set_style_radius(accent, 3, 0);
         lv_obj_set_style_border_width(accent, 0, 0);
         lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
+        live_pad_accents[i] = accent;
 
         // Track name — large, left-aligned after accent
         lv_obj_t* lbl = lv_label_create(pad);
@@ -659,18 +895,19 @@ void ui_create_live_screen() {
 
         // Bottom colored glow line
         lv_obj_t* glow = lv_obj_create(pad);
-        lv_obj_set_size(glow, LIVE_PAD_SIZE - 24, 3);
+        lv_obj_set_size(glow, default_pad_w - 24, 3);
         lv_obj_set_pos(glow, 12, h - 8);
         lv_obj_set_style_bg_color(glow, inst_colors[i], 0);
         lv_obj_set_style_bg_opa(glow, LV_OPA_40, 0);
         lv_obj_set_style_radius(glow, 1, 0);
         lv_obj_set_style_border_width(glow, 0, 0);
         lv_obj_clear_flag(glow, LV_OBJ_FLAG_SCROLLABLE);
+        live_pad_glows[i] = glow;
 
         live_pads[i] = pad;
         live_pad_x[i] = x;
         live_pad_y[i] = y;
-        live_pad_w[i] = LIVE_PAD_SIZE;
+        live_pad_w[i] = default_pad_w;
         live_pad_h[i] = h;
     }
 
@@ -692,8 +929,6 @@ void ui_create_live_screen() {
 
     // Ratchet controls — right side of pad grid: [ - ] Nx [ + ]
     {
-        int grid_right = (1024 - LIVE_PAD_COLS * LIVE_PAD_SIZE - 3 * LIVE_PAD_GAP) / 2
-                         + LIVE_PAD_COLS * LIVE_PAD_SIZE + 3 * LIVE_PAD_GAP;
         int ctrl_x = grid_right + 4;
         int ctrl_w = 1024 - ctrl_x - 8;  // fill remaining width
         int btn_h = 80;
@@ -744,6 +979,10 @@ void ui_create_live_screen() {
         lv_obj_set_style_text_color(lbl_minus, RED808_ACCENT, 0);
         lv_obj_center(lbl_minus);
     }
+
+    livePadVisibleCount = 16;
+    livePadViewStart = 0;
+    live_layout_pads();
 }
 
 static bool livePadsNeedFullRedraw = false;
@@ -1423,87 +1662,404 @@ void ui_update_menu_status() {
 }
 
 // ============================================================================
-// FILTERS FX SCREEN - 3 arc gauges for Delay/Flanger/Compressor
+// FILTERS FX SCREEN - FX LAB touch control
 // ============================================================================
+static uint8_t filter_get_amount(const TrackFilter& filter, int fxIndex) {
+    switch (fxIndex) {
+        case FILTER_DELAY: return filter.delayAmount;
+        case FILTER_FLANGER: return filter.flangerAmount;
+        case FILTER_COMPRESSOR: return filter.compAmount;
+        default: return 0;
+    }
+}
+
+static void filter_set_amount(TrackFilter& filter, int fxIndex, uint8_t value) {
+    switch (fxIndex) {
+        case FILTER_DELAY: filter.delayAmount = value; break;
+        case FILTER_FLANGER: filter.flangerAmount = value; break;
+        case FILTER_COMPRESSOR: filter.compAmount = value; break;
+        default: break;
+    }
+}
+
+static void filter_sync_enabled(TrackFilter& filter) {
+    filter.enabled = (filter.delayAmount > 0) || (filter.flangerAmount > 0) || (filter.compAmount > 0);
+}
+
+static TrackFilter& filter_target_state() {
+    return (filterSelectedTrack == -1) ? masterFilter : trackFilters[filterSelectedTrack];
+}
+
+static void filter_set_status_text(const char* text) {
+    if (filter_fun_status) {
+        lv_label_set_text(filter_fun_status, text);
+    }
+}
+
+static void filter_send_int_command(const char* cmd, int value) {
+    JsonDocument doc(&sramAllocUI);
+    doc["cmd"] = cmd;
+    doc["value"] = value;
+    sendUDPCommand(doc);
+}
+
+static void filter_send_float_command(const char* cmd, float value) {
+    JsonDocument doc(&sramAllocUI);
+    doc["cmd"] = cmd;
+    doc["value"] = value;
+    sendUDPCommand(doc);
+}
+
+static int filter_cutoff_to_slider(int hz) {
+    float clamped = constrain(hz, 20, 20000);
+    float t = logf(clamped / 20.0f) / logf(1000.0f);
+    return constrain((int)lroundf(t * 100.0f), 0, 100);
+}
+
+static int filter_slider_to_cutoff(int slider) {
+    float t = constrain(slider, 0, 100) / 100.0f;
+    return constrain((int)lroundf(20.0f * powf(1000.0f, t)), 20, 20000);
+}
+
+static int filter_sample_rate_to_slider(int hz) {
+    return constrain(map(constrain(hz, 1000, 44100), 1000, 44100, 0, 100), 0, 100);
+}
+
+static int filter_slider_to_sample_rate(int slider) {
+    return constrain(map(constrain(slider, 0, 100), 0, 100, 1000, 44100), 1000, 44100);
+}
+
+static void filter_push_extended_state() {
+    filter_send_int_command("setFilter", fxFilterType);
+    filter_send_int_command("setFilterCutoff", fxFilterCutoffHz);
+    filter_send_float_command("setFilterResonance", (float)fxFilterResonanceX10 / 10.0f);
+    filter_send_int_command("setBitCrush", fxBitCrushBits);
+    filter_send_float_command("setDistortion", (float)fxDistortionPercent / 100.0f);
+    filter_send_int_command("setSampleRate", fxSampleRateHz);
+}
+
+static void filter_cycle_target(int delta) {
+    int slot = filterSelectedTrack + 1;
+    slot = (slot + delta + Config::MAX_TRACKS + 1) % (Config::MAX_TRACKS + 1);
+    filterSelectedTrack = slot - 1;
+}
+
+static void filter_target_shift_cb(lv_event_t* e) {
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    filter_cycle_target(delta);
+    filter_set_status_text(filterSelectedTrack == -1 ? "Target focus: MASTER BUS" : "Target focus: TRACK FX");
+}
+
+static void filter_legacy_toggle_cb(lv_event_t* e) {
+    int fxIndex = (int)(intptr_t)lv_event_get_user_data(e);
+    TrackFilter& filter = filter_target_state();
+    uint8_t amount = filter_get_amount(filter, fxIndex);
+    filterSelectedFX = fxIndex;
+    filter_set_amount(filter, fxIndex, amount > 0 ? 0 : 72);
+    filter_sync_enabled(filter);
+    sendFilterUDP(filterSelectedTrack, fxIndex);
+    filter_set_status_text(amount > 0 ? "FX muted from touch panel" : "FX activated from touch panel");
+}
+
+static void filter_legacy_slider_cb(lv_event_t* e) {
+    int fxIndex = (int)(intptr_t)lv_event_get_user_data(e);
+    lv_obj_t* slider = lv_event_get_target(e);
+    TrackFilter& filter = filter_target_state();
+    filterSelectedFX = fxIndex;
+    filter_set_amount(filter, fxIndex, (uint8_t)lv_slider_get_value(slider));
+    filter_sync_enabled(filter);
+    sendFilterUDP(filterSelectedTrack, fxIndex);
+    filter_set_status_text("Macro FX updated over UDP");
+}
+
+static void filter_type_btn_cb(lv_event_t* e) {
+    fxFilterType = (int)(intptr_t)lv_event_get_user_data(e);
+    filter_send_int_command("setFilter", fxFilterType);
+    filter_set_status_text("Filter type pushed to master bus");
+}
+
+static void filter_bit_btn_cb(lv_event_t* e) {
+    fxBitCrushBits = (int)(intptr_t)lv_event_get_user_data(e);
+    filter_send_int_command("setBitCrush", fxBitCrushBits);
+    filter_set_status_text("Bit crush updated over UDP");
+}
+
+static void filter_ext_slider_cb(lv_event_t* e) {
+    int sliderIndex = (int)(intptr_t)lv_event_get_user_data(e);
+    int value = lv_slider_get_value(lv_event_get_target(e));
+    switch (sliderIndex) {
+        case 0:
+            fxFilterCutoffHz = filter_slider_to_cutoff(value);
+            filter_send_int_command("setFilterCutoff", fxFilterCutoffHz);
+            break;
+        case 1:
+            fxFilterResonanceX10 = constrain(value, 1, 100);
+            filter_send_float_command("setFilterResonance", (float)fxFilterResonanceX10 / 10.0f);
+            break;
+        case 2:
+            fxDistortionPercent = constrain(value, 0, 100);
+            filter_send_float_command("setDistortion", (float)fxDistortionPercent / 100.0f);
+            break;
+        case 3:
+            fxSampleRateHz = filter_slider_to_sample_rate(value);
+            filter_send_int_command("setSampleRate", fxSampleRateHz);
+            break;
+        default:
+            break;
+    }
+    filter_set_status_text("Extended FX updated over UDP");
+}
+
+struct FxScenePreset {
+    const char* name;
+    int filterType;
+    int cutoffHz;
+    int resonanceX10;
+    int bitCrush;
+    int distortionPercent;
+    int sampleRateHz;
+    uint8_t delay;
+    uint8_t flanger;
+    uint8_t comp;
+};
+
+static const FxScenePreset kFxScenes[4] = {
+    {"CLEAN",   0, 14000, 18, 16,  0, 44100,  0,  0,  0},
+    {"SPACE",   1,  5200, 32, 14, 10, 36000, 92, 24, 18},
+    {"ACID",    1,  2400, 74, 12, 28, 28000, 34, 52, 26},
+    {"DESTROY", 4,  1100, 88,  4, 76, 12000, 96, 84, 70},
+};
+
+static void filter_scene_cb(lv_event_t* e) {
+    int sceneIndex = (int)(intptr_t)lv_event_get_user_data(e);
+    const FxScenePreset& scene = kFxScenes[sceneIndex];
+    filterSelectedTrack = -1;
+    masterFilter.delayAmount = scene.delay;
+    masterFilter.flangerAmount = scene.flanger;
+    masterFilter.compAmount = scene.comp;
+    filter_sync_enabled(masterFilter);
+    fxFilterType = scene.filterType;
+    fxFilterCutoffHz = scene.cutoffHz;
+    fxFilterResonanceX10 = scene.resonanceX10;
+    fxBitCrushBits = scene.bitCrush;
+    fxDistortionPercent = scene.distortionPercent;
+    fxSampleRateHz = scene.sampleRateHz;
+    sendFilterUDP(-1, FILTER_DELAY);
+    sendFilterUDP(-1, FILTER_FLANGER);
+    sendFilterUDP(-1, FILTER_COMPRESSOR);
+    filter_push_extended_state();
+    filter_set_status_text(scene.name);
+}
+
 void ui_create_filters_screen() {
+    static const char* fx_names[] = {"DELAY", "FLANGER", "COMP"};
+    static const lv_color_t fx_colors[] = {
+        lv_color_hex(0x58A6FF),
+        lv_color_hex(0x39D2C0),
+        lv_color_hex(0xD29922),
+    };
+    static const char* type_names[] = {"OFF", "LP", "HP", "BP", "NOTCH"};
+    static const char* ext_names[] = {"CUTOFF", "RESONANCE", "DRIVE", "RATE REDUCE"};
+    static const uint8_t bit_values[] = {16, 12, 8, 4};
+
     scr_filters = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_filters, RED808_BG, 0);
+    lv_obj_clear_flag(scr_filters, LV_OBJ_FLAG_SCROLLABLE);
     ui_create_header(scr_filters);
 
     lv_obj_t* shell = create_section_shell(scr_filters, 18, 78, 988, 500);
+    lv_obj_set_style_bg_opa(shell, LV_OPA_70, 0);
 
-    lv_obj_t* title = lv_label_create(scr_filters);
-    lv_label_set_text(title, "FILTERS FX");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
+    lv_obj_t* title = lv_label_create(shell);
+    lv_label_set_text(title, LV_SYMBOL_AUDIO "  FX LAB");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 52);
+    lv_obj_set_pos(title, 8, 4);
 
-    // Target indicator
-    filter_target_label = lv_label_create(scr_filters);
+    lv_obj_t* subtitle = lv_label_create(shell);
+    lv_label_set_text(subtitle, "Touch macros, master-bus design tools and quick scenes over UDP");
+    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(subtitle, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(subtitle, 10, 34);
+
+    filter_target_label = lv_label_create(shell);
     lv_label_set_text(filter_target_label, "TARGET: MASTER");
-    lv_obj_set_style_text_font(filter_target_label, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(filter_target_label, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(filter_target_label, RED808_WARNING, 0);
-    lv_obj_set_pos(filter_target_label, 20, 52);
+    lv_obj_set_pos(filter_target_label, 14, 64);
 
-    static const char* fx_names[] = {"DELAY", "FLANGER", "COMPRESSOR"};
-    static const lv_color_t fx_colors[] = {
-        lv_color_hex(0x58A6FF), // Blue
-        lv_color_hex(0x39D2C0), // Cyan
-        lv_color_hex(0xD29922), // Amber
-    };
+    filter_target_prev_btn = lv_btn_create(shell);
+    lv_obj_set_size(filter_target_prev_btn, 40, 28);
+    lv_obj_set_pos(filter_target_prev_btn, 250, 60);
+    lv_obj_set_style_radius(filter_target_prev_btn, 14, 0);
+    lv_obj_add_event_cb(filter_target_prev_btn, filter_target_shift_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+    lv_obj_t* prev_lbl = lv_label_create(filter_target_prev_btn);
+    lv_label_set_text(prev_lbl, LV_SYMBOL_LEFT);
+    lv_obj_center(prev_lbl);
 
-    int arc_size = 250;
-    int gap = 30;
-    int x_start = (1024 - 3 * arc_size - 2 * gap) / 2;
+    filter_target_next_btn = lv_btn_create(shell);
+    lv_obj_set_size(filter_target_next_btn, 40, 28);
+    lv_obj_set_pos(filter_target_next_btn, 296, 60);
+    lv_obj_set_style_radius(filter_target_next_btn, 14, 0);
+    lv_obj_add_event_cb(filter_target_next_btn, filter_target_shift_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
+    lv_obj_t* next_lbl = lv_label_create(filter_target_next_btn);
+    lv_label_set_text(next_lbl, LV_SYMBOL_RIGHT);
+    lv_obj_center(next_lbl);
+
+    filter_master_tag = lv_label_create(shell);
+    lv_label_set_text(filter_master_tag, "MASTER BUS");
+    lv_obj_set_style_text_font(filter_master_tag, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(filter_master_tag, lv_color_hex(0x6BE0FF), 0);
+    lv_obj_set_pos(filter_master_tag, 356, 66);
+
+    filter_preset_label = lv_label_create(shell);
+    lv_label_set_text(filter_preset_label, "PRESET: --");
+    lv_obj_set_style_text_font(filter_preset_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(filter_preset_label, lv_color_hex(0x80FF80), 0);
+    lv_obj_set_pos(filter_preset_label, 758, 64);
+
+    lv_obj_t* macro_panel = create_section_shell(shell, 8, 96, 398, 300);
+    lv_obj_t* macro_title = lv_label_create(macro_panel);
+    lv_label_set_text(macro_title, LV_SYMBOL_SETTINGS "  PERFORMANCE MACROS");
+    lv_obj_set_style_text_font(macro_title, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(macro_title, RED808_INFO, 0);
+    lv_obj_set_pos(macro_title, 0, 0);
+
+    lv_obj_t* macro_hint = lv_label_create(macro_panel);
+    lv_label_set_text(macro_hint, "Touch each lane to enable, shape and send the selected target FX.");
+    lv_obj_set_style_text_font(macro_hint, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(macro_hint, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(macro_hint, 0, 28);
 
     for (int i = 0; i < 3; i++) {
-        int x = x_start + i * (arc_size + gap) + arc_size / 2;
-        int y = 280;
+        lv_obj_t* row = lv_obj_create(macro_panel);
+        lv_obj_set_size(row, 370, 72);
+        lv_obj_set_pos(row, 0, 60 + i * 78);
+        lv_obj_set_style_bg_color(row, RED808_SURFACE, 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
+        lv_obj_set_style_radius(row, 16, 0);
+        lv_obj_set_style_border_width(row, 1, 0);
+        lv_obj_set_style_border_color(row, fx_colors[i], 0);
+        lv_obj_set_style_pad_all(row, 10, 0);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
-        // Arc gauge
-        lv_obj_t* arc = lv_arc_create(scr_filters);
-        lv_obj_set_size(arc, arc_size, arc_size);
-        lv_obj_align(arc, LV_ALIGN_TOP_MID, x - 512, y - arc_size / 2);
-        lv_arc_set_range(arc, 0, 127);
-        lv_arc_set_value(arc, 0);
-        lv_arc_set_bg_angles(arc, 135, 45);
-        lv_obj_set_style_arc_color(arc, RED808_SURFACE, LV_PART_MAIN);
-        lv_obj_set_style_arc_color(arc, fx_colors[i], LV_PART_INDICATOR);
-        lv_obj_set_style_arc_width(arc, 18, LV_PART_MAIN);
-        lv_obj_set_style_arc_width(arc, 18, LV_PART_INDICATOR);
-        lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE); // Read-only, DFRobot controls
-        filter_arcs[i] = arc;
+        filter_labels[i] = lv_label_create(row);
+        lv_label_set_text(filter_labels[i], fx_names[i]);
+        lv_obj_set_style_text_font(filter_labels[i], &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(filter_labels[i], fx_colors[i], 0);
+        lv_obj_set_pos(filter_labels[i], 0, 0);
 
-        // FX name
-        lv_obj_t* name = lv_label_create(scr_filters);
-        lv_label_set_text(name, fx_names[i]);
-        lv_obj_set_style_text_font(name, &lv_font_montserrat_18, 0);
-        lv_obj_set_style_text_color(name, fx_colors[i], 0);
-        lv_obj_align(name, LV_ALIGN_TOP_MID, x - 512, y + arc_size / 2 + 8);
-        filter_labels[i] = name;
+        filter_toggle_btns[i] = lv_btn_create(row);
+        lv_obj_set_size(filter_toggle_btns[i], 84, 30);
+        lv_obj_set_pos(filter_toggle_btns[i], 272, -2);
+        lv_obj_set_style_radius(filter_toggle_btns[i], 15, 0);
+        lv_obj_add_event_cb(filter_toggle_btns[i], filter_legacy_toggle_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        filter_toggle_labels[i] = lv_label_create(filter_toggle_btns[i]);
+        lv_label_set_text(filter_toggle_labels[i], "OFF");
+        lv_obj_center(filter_toggle_labels[i]);
 
-        // Value label (inside arc)
-        lv_obj_t* val = lv_label_create(arc);
-        lv_label_set_text(val, "0%");
-        lv_obj_set_style_text_font(val, &lv_font_montserrat_32, 0);
-        lv_obj_set_style_text_color(val, RED808_TEXT, 0);
-        lv_obj_center(val);
-        filter_value_labels[i] = val;
+        filter_legacy_sliders[i] = lv_slider_create(row);
+        lv_obj_set_size(filter_legacy_sliders[i], 240, 10);
+        lv_obj_set_pos(filter_legacy_sliders[i], 0, 42);
+        lv_slider_set_range(filter_legacy_sliders[i], 0, 127);
+        lv_slider_set_value(filter_legacy_sliders[i], 0, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(filter_legacy_sliders[i], lv_color_hex(0x1D2B33), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(filter_legacy_sliders[i], fx_colors[i], LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(filter_legacy_sliders[i], lv_color_white(), LV_PART_KNOB);
+        lv_obj_set_style_pad_all(filter_legacy_sliders[i], 8, LV_PART_KNOB);
+        lv_obj_set_style_radius(filter_legacy_sliders[i], LV_RADIUS_CIRCLE, LV_PART_KNOB);
+        lv_obj_add_event_cb(filter_legacy_sliders[i], filter_legacy_slider_cb, LV_EVENT_VALUE_CHANGED, (void*)(intptr_t)i);
+        filter_arcs[i] = filter_legacy_sliders[i];
+
+        filter_value_labels[i] = lv_label_create(row);
+        lv_label_set_text(filter_value_labels[i], "0%");
+        lv_obj_set_style_text_font(filter_value_labels[i], &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(filter_value_labels[i], RED808_TEXT, 0);
+        lv_obj_set_pos(filter_value_labels[i], 288, 40);
     }
 
-    // Footer - control info
-    lv_obj_t* info = lv_label_create(scr_filters);
-    lv_label_set_text(info, "ROTARY: Amount  |  ROTARY BTN: Cycle FX  |  ENCODER: Track select  |  Touch: ON/OFF");
-    lv_obj_set_style_text_font(info, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(info, RED808_TEXT_DIM, 0);
-    lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_t* design_panel = create_section_shell(shell, 420, 96, 546, 300);
+    lv_obj_t* design_title = lv_label_create(design_panel);
+    lv_label_set_text(design_title, LV_SYMBOL_EDIT "  SOUND DESIGN / MASTER BUS");
+    lv_obj_set_style_text_font(design_title, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(design_title, RED808_ACCENT, 0);
+    lv_obj_set_pos(design_title, 0, 0);
 
-    // Analog rotary FX preset badge (top right)
-    filter_preset_label = lv_label_create(scr_filters);
-    lv_label_set_text(filter_preset_label, "PRESET: --");
-    lv_obj_set_style_text_font(filter_preset_label, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(filter_preset_label, lv_color_hex(0x80FF80), 0);
-    lv_obj_set_pos(filter_preset_label, 820, 52);
+    for (int i = 0; i < 5; i++) {
+        filter_type_btns[i] = lv_btn_create(design_panel);
+        lv_obj_set_size(filter_type_btns[i], 92, 32);
+        lv_obj_set_pos(filter_type_btns[i], i * 102, 34);
+        lv_obj_set_style_radius(filter_type_btns[i], 16, 0);
+        lv_obj_add_event_cb(filter_type_btns[i], filter_type_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        filter_type_labels[i] = lv_label_create(filter_type_btns[i]);
+        lv_label_set_text(filter_type_labels[i], type_names[i]);
+        lv_obj_center(filter_type_labels[i]);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        int row_y = 84 + i * 46;
+        lv_obj_t* label = lv_label_create(design_panel);
+        lv_label_set_text(label, ext_names[i]);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(label, RED808_TEXT, 0);
+        lv_obj_set_pos(label, 0, row_y);
+
+        filter_ext_sliders[i] = lv_slider_create(design_panel);
+        lv_obj_set_size(filter_ext_sliders[i], 272, 8);
+        lv_obj_set_pos(filter_ext_sliders[i], 132, row_y + 6);
+        lv_obj_set_style_bg_color(filter_ext_sliders[i], lv_color_hex(0x1D2B33), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(filter_ext_sliders[i], RED808_ACCENT, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(filter_ext_sliders[i], lv_color_white(), LV_PART_KNOB);
+        lv_obj_set_style_pad_all(filter_ext_sliders[i], 8, LV_PART_KNOB);
+        lv_obj_add_event_cb(filter_ext_sliders[i], filter_ext_slider_cb, LV_EVENT_VALUE_CHANGED, (void*)(intptr_t)i);
+
+        filter_ext_value_labels[i] = lv_label_create(design_panel);
+        lv_label_set_text(filter_ext_value_labels[i], "--");
+        lv_obj_set_style_text_font(filter_ext_value_labels[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(filter_ext_value_labels[i], RED808_WARNING, 0);
+        lv_obj_set_pos(filter_ext_value_labels[i], 420, row_y);
+    }
+
+    lv_obj_t* bit_title = lv_label_create(design_panel);
+    lv_label_set_text(bit_title, "BIT CRUSH");
+    lv_obj_set_style_text_font(bit_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(bit_title, RED808_TEXT, 0);
+    lv_obj_set_pos(bit_title, 0, 272);
+
+    for (int i = 0; i < 4; i++) {
+        filter_bit_btns[i] = lv_btn_create(design_panel);
+        lv_obj_set_size(filter_bit_btns[i], 74, 30);
+        lv_obj_set_pos(filter_bit_btns[i], 132 + i * 84, 264);
+        lv_obj_set_style_radius(filter_bit_btns[i], 15, 0);
+        lv_obj_add_event_cb(filter_bit_btns[i], filter_bit_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)bit_values[i]);
+        filter_bit_labels[i] = lv_label_create(filter_bit_btns[i]);
+        lv_label_set_text_fmt(filter_bit_labels[i], "%db", bit_values[i]);
+        lv_obj_center(filter_bit_labels[i]);
+    }
+
+    lv_obj_t* scene_strip = create_section_shell(shell, 8, 410, 958, 76);
+    lv_obj_t* scene_title = lv_label_create(scene_strip);
+    lv_label_set_text(scene_title, LV_SYMBOL_PLAY "  QUICK SCENES");
+    lv_obj_set_style_text_font(scene_title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(scene_title, RED808_SUCCESS, 0);
+    lv_obj_set_pos(scene_title, 0, 4);
+
+    for (int i = 0; i < 4; i++) {
+        filter_scene_btns[i] = lv_btn_create(scene_strip);
+        lv_obj_set_size(filter_scene_btns[i], 150, 34);
+        lv_obj_set_pos(filter_scene_btns[i], 182 + i * 164, 0);
+        lv_obj_set_style_radius(filter_scene_btns[i], 17, 0);
+        lv_obj_add_event_cb(filter_scene_btns[i], filter_scene_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        filter_scene_labels[i] = lv_label_create(filter_scene_btns[i]);
+        lv_label_set_text(filter_scene_labels[i], kFxScenes[i].name);
+        lv_obj_center(filter_scene_labels[i]);
+    }
+
+    filter_fun_status = lv_label_create(scene_strip);
+    lv_label_set_text(filter_fun_status, "Touch a scene or drag a control to push FX over UDP");
+    lv_obj_set_style_text_font(filter_fun_status, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(filter_fun_status, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(filter_fun_status, 0, 42);
 }
 
 void ui_update_filters() {
@@ -1512,38 +2068,62 @@ void ui_update_filters() {
         "FLANGE LO", "FLANGE HI", "COMP SOFT", "COMP HARD",
         "SPACE", "CHORUS", "FULL FX", "DESTROY"
     };
+    static const lv_color_t fx_colors[] = {
+        lv_color_hex(0x58A6FF),
+        lv_color_hex(0x39D2C0),
+        lv_color_hex(0xD29922),
+    };
+    static const uint8_t bit_values[] = {16, 12, 8, 4};
     static uint8_t prev_amounts[3] = {0xFF, 0xFF, 0xFF};
     static int prev_selectedFX = -1;
     static int prev_target = -999;
     static int prev_preset = -1;
-    TrackFilter& f = (filterSelectedTrack == -1) ? masterFilter : trackFilters[filterSelectedTrack];
-    uint8_t amounts[] = { f.delayAmount, f.flangerAmount, f.compAmount };
+    static int prev_filter_type = -1;
+    static int prev_cutoff = -1;
+    static int prev_resonance = -1;
+    static int prev_distortion = -1;
+    static int prev_sample_rate = -1;
+    static int prev_bit_crush = -1;
+
+    TrackFilter& filter = filter_target_state();
+    uint8_t amounts[] = { filter.delayAmount, filter.flangerAmount, filter.compAmount };
 
     for (int i = 0; i < 3; i++) {
         bool amountChanged = (amounts[i] != prev_amounts[i]);
         bool selChanged = (filterSelectedFX != prev_selectedFX);
-        if (filter_arcs[i] && (amountChanged || selChanged)) {
-            lv_arc_set_value(filter_arcs[i], amounts[i]);
-            bool isSelected = (i == filterSelectedFX);
-            lv_obj_set_style_arc_width(filter_arcs[i], isSelected ? 24 : 18, LV_PART_INDICATOR);
+        bool enabled = amounts[i] > 0;
+
+        if (filter_legacy_sliders[i] && amountChanged) {
+            lv_slider_set_value(filter_legacy_sliders[i], amounts[i], LV_ANIM_OFF);
         }
         if (filter_value_labels[i] && amountChanged) {
-            int pct = amounts[i] * 100 / 127;
-            lv_label_set_text_fmt(filter_value_labels[i], "%d%%", pct);
+            lv_label_set_text_fmt(filter_value_labels[i], "%d%%", amounts[i] * 100 / 127);
+        }
+        if (filter_toggle_btns[i] && (amountChanged || selChanged)) {
+            bool selected = (filterSelectedFX == i);
+            lv_obj_set_style_bg_color(filter_toggle_btns[i], enabled ? fx_colors[i] : RED808_SURFACE, 0);
+            lv_obj_set_style_border_width(filter_toggle_btns[i], selected ? 2 : 1, 0);
+            lv_obj_set_style_border_color(filter_toggle_btns[i], fx_colors[i], 0);
+            if (filter_toggle_labels[i]) {
+                lv_label_set_text(filter_toggle_labels[i], enabled ? "ON" : "OFF");
+                lv_obj_set_style_text_color(filter_toggle_labels[i], enabled ? RED808_BG : RED808_TEXT_DIM, 0);
+            }
         }
         prev_amounts[i] = amounts[i];
     }
+
     if (filter_target_label && filterSelectedTrack != prev_target) {
         prev_target = filterSelectedTrack;
         if (filterSelectedTrack == -1) {
             lv_label_set_text(filter_target_label, "TARGET: MASTER");
+            if (filter_master_tag) lv_label_set_text(filter_master_tag, "MASTER BUS");
         } else {
             lv_label_set_text_fmt(filter_target_label, "TARGET: %s", trackNames[filterSelectedTrack]);
+            if (filter_master_tag) lv_label_set_text(filter_master_tag, "TRACK FX");
         }
     }
     prev_selectedFX = filterSelectedFX;
 
-    // Rotary FX preset indicator
     if (filter_preset_label && analogFxPreset != prev_preset) {
         prev_preset = analogFxPreset;
         int p = constrain(analogFxPreset, 0, 11);
@@ -1553,6 +2133,61 @@ void ui_update_filters() {
         } else {
             lv_label_set_text_fmt(filter_preset_label, "P%02d: %s", p, kPresetNames[p]);
             lv_obj_set_style_text_color(filter_preset_label, lv_color_hex(0x80FF80), 0);
+        }
+    }
+
+    if (fxFilterType != prev_filter_type) {
+        prev_filter_type = fxFilterType;
+        for (int i = 0; i < 5; i++) {
+            bool selected = (i == fxFilterType);
+            if (filter_type_btns[i]) {
+                lv_obj_set_style_bg_color(filter_type_btns[i], selected ? RED808_ACCENT : RED808_SURFACE, 0);
+                lv_obj_set_style_border_color(filter_type_btns[i], selected ? RED808_ACCENT : RED808_BORDER, 0);
+            }
+            if (filter_type_labels[i]) {
+                lv_obj_set_style_text_color(filter_type_labels[i], selected ? RED808_BG : RED808_TEXT, 0);
+            }
+        }
+    }
+
+    if (fxFilterCutoffHz != prev_cutoff) {
+        prev_cutoff = fxFilterCutoffHz;
+        if (filter_ext_sliders[0]) lv_slider_set_value(filter_ext_sliders[0], filter_cutoff_to_slider(fxFilterCutoffHz), LV_ANIM_OFF);
+        if (filter_ext_value_labels[0]) {
+            if (fxFilterCutoffHz >= 1000) lv_label_set_text_fmt(filter_ext_value_labels[0], "%d.%dkHz", fxFilterCutoffHz / 1000, (fxFilterCutoffHz % 1000) / 100);
+            else lv_label_set_text_fmt(filter_ext_value_labels[0], "%dHz", fxFilterCutoffHz);
+        }
+    }
+
+    if (fxFilterResonanceX10 != prev_resonance) {
+        prev_resonance = fxFilterResonanceX10;
+        if (filter_ext_sliders[1]) lv_slider_set_value(filter_ext_sliders[1], fxFilterResonanceX10, LV_ANIM_OFF);
+        if (filter_ext_value_labels[1]) lv_label_set_text_fmt(filter_ext_value_labels[1], "%d.%d Q", fxFilterResonanceX10 / 10, fxFilterResonanceX10 % 10);
+    }
+
+    if (fxDistortionPercent != prev_distortion) {
+        prev_distortion = fxDistortionPercent;
+        if (filter_ext_sliders[2]) lv_slider_set_value(filter_ext_sliders[2], fxDistortionPercent, LV_ANIM_OFF);
+        if (filter_ext_value_labels[2]) lv_label_set_text_fmt(filter_ext_value_labels[2], "%d%%", fxDistortionPercent);
+    }
+
+    if (fxSampleRateHz != prev_sample_rate) {
+        prev_sample_rate = fxSampleRateHz;
+        if (filter_ext_sliders[3]) lv_slider_set_value(filter_ext_sliders[3], filter_sample_rate_to_slider(fxSampleRateHz), LV_ANIM_OFF);
+        if (filter_ext_value_labels[3]) lv_label_set_text_fmt(filter_ext_value_labels[3], "%d Hz", fxSampleRateHz);
+    }
+
+    if (fxBitCrushBits != prev_bit_crush) {
+        prev_bit_crush = fxBitCrushBits;
+        for (int i = 0; i < 4; i++) {
+            bool selected = (bit_values[i] == fxBitCrushBits);
+            if (filter_bit_btns[i]) {
+                lv_obj_set_style_bg_color(filter_bit_btns[i], selected ? RED808_WARNING : RED808_SURFACE, 0);
+                lv_obj_set_style_border_color(filter_bit_btns[i], selected ? RED808_WARNING : RED808_BORDER, 0);
+            }
+            if (filter_bit_labels[i]) {
+                lv_obj_set_style_text_color(filter_bit_labels[i], selected ? RED808_BG : RED808_TEXT, 0);
+            }
         }
     }
 }
@@ -2094,7 +2729,7 @@ void ui_sdcard_send_load_sample(int pad, const char* family, const char* filenam
     doc["filename"] = filename;
     doc["pad"]      = pad;
     sendUDPCommand(doc);
-    Serial.printf("[SD] LoadSample pad=%d family=%s file=%s\n", pad, family, filename);
+    RED808_LOG_PRINTF("[SD] LoadSample pad=%d family=%s file=%s\n", pad, family, filename);
 }
 
 // Mount SD card via SD_MMC (1-bit mode)
@@ -2105,17 +2740,17 @@ static bool sd_try_mount() {
     delay(10);
     SD_MMC.setPins(SD_CLK_PIN, SD_CMD_PIN, SD_D0_PIN);
     if (!SD_MMC.begin(SD_MOUNT_POINT, true /* 1-bit mode */)) {
-        Serial.println("[SD] Mount failed");
+        RED808_LOG_PRINTLN("[SD] Mount failed");
         return false;
     }
     uint8_t cardType = SD_MMC.cardType();
     if (cardType == CARD_NONE) {
-        Serial.println("[SD] No SD card");
+        RED808_LOG_PRINTLN("[SD] No SD card");
         SD_MMC.end();
         return false;
     }
     sd_mounted = true;
-    Serial.printf("[SD] Mounted OK. Type=%d Size=%lluMB\n", cardType,
+    RED808_LOG_PRINTF("[SD] Mounted OK. Type=%d Size=%lluMB\n", cardType,
                   SD_MMC.cardSize() / (1024ULL * 1024ULL));
     return true;
 }
@@ -2834,7 +3469,7 @@ void ui_create_boot_screen() {
 
     // ── Brand name (large, centered) ──
     lv_obj_t* brand = lv_label_create(scr_boot);
-    lv_label_set_text(brand, "BLU808");
+    lv_label_set_text(brand, "BLUE808");
     lv_obj_set_style_text_font(brand, &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(brand, lv_color_hex(0x00D4FF), 0);
     lv_obj_set_style_text_letter_space(brand, 8, 0);
@@ -2870,7 +3505,7 @@ void ui_create_boot_screen() {
 
     // ── Blinking cursor ──
     boot_cursor_lbl = lv_label_create(scr_boot);
-    lv_label_set_text(boot_cursor_lbl, "root@blu808:~$ _");
+    lv_label_set_text(boot_cursor_lbl, "root@blue808:~$ _");
     lv_obj_set_style_text_font(boot_cursor_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(boot_cursor_lbl, lv_color_hex(0x39FF14), 0);
     lv_obj_set_pos(boot_cursor_lbl, 42, 110 + kBootLineCount * 27);

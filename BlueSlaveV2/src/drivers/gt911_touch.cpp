@@ -107,7 +107,7 @@ static bool gt911_map_point(uint16_t raw_x, uint16_t raw_y, TouchPoint* out_poin
 }
 
 void gt911_init() {
-    Serial.println("[GT911] Starting init sequence...");
+    RED808_LOG_PRINTLN("[GT911] Starting init sequence...");
     
     // GT911 address selection via INT pin during reset:
     // INT LOW during reset rising edge -> 0x5D
@@ -132,32 +132,32 @@ void gt911_init() {
     // Step 5: Wait for GT911 to boot up
     delay(100);
     
-    Serial.println("[GT911] Reset sequence complete, probing...");
+    RED808_LOG_PRINTLN("[GT911] Reset sequence complete, probing...");
 
     // Probe (init runs on Core 0, no concurrency yet)
     if (gt911_probe(0x5D)) {
         gt911_addr = 0x5D;
         gt911_ok = true;
-        Serial.println("[GT911] Found at 0x5D");
+        RED808_LOG_PRINTLN("[GT911] Found at 0x5D");
     } else if (gt911_probe(0x14)) {
         gt911_addr = 0x14;
         gt911_ok = true;
-        Serial.println("[GT911] Found at 0x14");
+        RED808_LOG_PRINTLN("[GT911] Found at 0x14");
     } else {
         // Retry once with longer delay
-        Serial.println("[GT911] Not found, retrying...");
+        RED808_LOG_PRINTLN("[GT911] Not found, retrying...");
         delay(200);
         if (gt911_probe(0x5D)) {
             gt911_addr = 0x5D;
             gt911_ok = true;
-            Serial.println("[GT911] Found at 0x5D (retry)");
+            RED808_LOG_PRINTLN("[GT911] Found at 0x5D (retry)");
         } else if (gt911_probe(0x14)) {
             gt911_addr = 0x14;
             gt911_ok = true;
-            Serial.println("[GT911] Found at 0x14 (retry)");
+            RED808_LOG_PRINTLN("[GT911] Found at 0x14 (retry)");
         } else {
             gt911_ok = false;
-            Serial.println("[GT911] ERROR: Not found at 0x5D or 0x14!");
+            RED808_LOG_PRINTLN("[GT911] ERROR: Not found at 0x5D or 0x14!");
             return;
         }
     }
@@ -165,15 +165,15 @@ void gt911_init() {
     // Read product ID to confirm communication
     uint8_t id[4] = {0};
     if (gt911_read_reg(0x8140, id, 4)) {
-        Serial.printf("[GT911] Product ID: %c%c%c%c\n", id[0], id[1], id[2], id[3]);
+        RED808_LOG_PRINTF("[GT911] Product ID: %c%c%c%c\n", id[0], id[1], id[2], id[3]);
     } else {
-        Serial.println("[GT911] WARNING: Cannot read product ID");
+        RED808_LOG_PRINTLN("[GT911] WARNING: Cannot read product ID");
     }
     
     // Read firmware version
     uint8_t fw[2] = {0};
     if (gt911_read_reg(0x8144, fw, 2)) {
-        Serial.printf("[GT911] Firmware: 0x%02X%02X\n", fw[1], fw[0]);
+        RED808_LOG_PRINTF("[GT911] Firmware: 0x%02X%02X\n", fw[1], fw[0]);
     }
     
     // Read resolution config
@@ -181,10 +181,10 @@ void gt911_init() {
     if (gt911_read_reg(0x8146, res, 4)) {
         uint16_t xRes = res[0] | (res[1] << 8);
         uint16_t yRes = res[2] | (res[3] << 8);
-        Serial.printf("[GT911] Resolution config: %dx%d\n", xRes, yRes);
+        RED808_LOG_PRINTF("[GT911] Resolution config: %dx%d\n", xRes, yRes);
     }
     
-    Serial.printf("[GT911] Init complete, addr=0x%02X, ok=%d\n", gt911_addr, gt911_ok);
+    RED808_LOG_PRINTF("[GT911] Init complete, addr=0x%02X, ok=%d\n", gt911_addr, gt911_ok);
 }
 
 bool gt911_is_ready() {

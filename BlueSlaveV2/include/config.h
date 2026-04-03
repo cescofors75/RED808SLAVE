@@ -7,6 +7,20 @@
 
 #include <Arduino.h>
 
+#ifndef RED808_ENABLE_DEBUG_LOG
+#define RED808_ENABLE_DEBUG_LOG 0
+#endif
+
+#if RED808_ENABLE_DEBUG_LOG
+#define RED808_LOG_PRINT(...) Serial.print(__VA_ARGS__)
+#define RED808_LOG_PRINTLN(...) Serial.println(__VA_ARGS__)
+#define RED808_LOG_PRINTF(...) Serial.printf(__VA_ARGS__)
+#else
+#define RED808_LOG_PRINT(...) ((void)0)
+#define RED808_LOG_PRINTLN(...) ((void)0)
+#define RED808_LOG_PRINTF(...) ((void)0)
+#endif
+
 // =============================================================================
 // DISPLAY - Waveshare ESP32-S3-Touch-LCD-7B
 // =============================================================================
