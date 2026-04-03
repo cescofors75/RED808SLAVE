@@ -252,6 +252,7 @@ void updateTrackEncoderLED(int track);
 void handleAnalogEncoder();
 void updateUI();
 static void encoder_task(void* arg);
+static void touch_task(void* arg);
 
 // =============================================================================
 // NVS PERSISTENCE — save/load user settings across reboots
@@ -1956,10 +1957,33 @@ void setup() {
     xTaskCreatePinnedToCore(encoder_task, "enc", 6144, NULL, 2, NULL, 0);
     RED808_LOG_PRINTLN("[ENC] Encoder task started (Core 0, pri 2)");
 
-    // 12. Microtiming engine — seed PRNG from hardware RNG
+    // 12. Touch task — highest I2C priority, preempts encoder via priority inheritance
+    xTaskCreatePinnedToCore(touch_task, "touch", 4096, NULL, 3, NULL, 0);
+    RED808_LOG_PRINTLN("[TOUCH] Touch task started (Core 0, pri 3)");
+
+    // 13. Microtiming engine — seed PRNG from hardware RNG
     microtiming_init();
 
     RED808_LOG_PRINTLN("\n[SETUP] Complete! Entering main loop.\n");
+}
+
+// =============================================================================
+// TOUCH TASK (Core 0, priority 3 — highest I2C priority)
+// Polls GT911 INT pin every 2ms. When INT=LOW (data ready), acquires i2c_lock
+// and reads touch data. Priority inheritance ensures encoder_task (pri 2)
+// finishes its current I2C transaction quickly then yields the bus.
+// =============================================================================
+
+static void touch_task(void* arg) {
+    (void)arg;
+    TickType_t last_wake = xTaskGetTickCount();
+    while (true) {
+        // Only read when GT911 signals new data (INT pin = LOW)
+        if (digitalRead(GT911_INT_PIN) == LOW) {
+            gt911_poll();
+        }
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(2));
+    }
 }
 
 // =============================================================================

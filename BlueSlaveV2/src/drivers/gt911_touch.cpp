@@ -199,7 +199,7 @@ TouchPoint gt911_read() {
 
     // Use global I2C mutex (called from LVGL task on Core 1)
     // Timeout must be short to avoid deadlock with Core 0 encoder reads
-    if (!i2c_lock(8)) return tp;
+    if (!i2c_lock(15)) return tp;
 
     uint8_t status = 0;
     if (!gt911_read_reg(GT911_REG_STATUS, &status, 1)) {
@@ -231,10 +231,8 @@ TouchPoint gt911_read() {
                     int32_t x = mapped.x;
                     int32_t y = mapped.y;
                     if (prev_valid) {
-                        if (abs((int)(x - prev_x)) > 220 || abs((int)(y - prev_y)) > 220) {
-                            x = prev_x;
-                            y = prev_y;
-                        }
+                        // Jitter filter only — 220px jump filter removed because
+                        // LIVE pads are ~250px wide, cross-pad taps were rejected.
                         if (abs((int)(x - prev_x)) <= Config::TOUCH_JITTER_PX) x = prev_x;
                         if (abs((int)(y - prev_y)) <= Config::TOUCH_JITTER_PX) y = prev_y;
                     }

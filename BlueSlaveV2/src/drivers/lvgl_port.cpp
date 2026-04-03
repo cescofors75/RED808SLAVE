@@ -95,9 +95,8 @@ static void lvgl_task(void* arg) {
 
     TickType_t last_wake = xTaskGetTickCount();
     while (true) {
-        // Poll touch once per cycle so LVGL indev callback can read from cache
-        // without doing I2C transactions inside lv_timer_handler.
-        gt911_poll();
+        // Touch polling moved to dedicated touch_task (Core 0, pri 3).
+        // LVGL indev callback reads from gt911 cache — no I2C here.
 
         if (lvgl_port_lock(15)) {
             // Check if live pads need visual refresh (set by Core 0 loop)
