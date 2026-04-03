@@ -74,17 +74,33 @@ static lv_obj_t* seq_track_panels[Config::MAX_TRACKS]; // container: label + S +
 static lv_obj_t* seq_solo_btns[Config::MAX_TRACKS];
 static lv_obj_t* seq_mute_btns[Config::MAX_TRACKS];
 static lv_obj_t* lbl_step_indicator = NULL;
+static lv_obj_t* seq_step_labels[Config::MAX_STEPS] = {};
+static lv_obj_t* seq_track_meta_labels[Config::MAX_TRACKS] = {};
+static lv_obj_t* seq_track_volume_labels[Config::MAX_TRACKS] = {};
+static lv_obj_t* seq_info_pattern = NULL;
+static lv_obj_t* seq_info_track = NULL;
+static lv_obj_t* seq_info_transport = NULL;
+static lv_obj_t* seq_info_page = NULL;
 static lv_obj_t* seq_column_highlights[Config::MAX_STEPS];
 static lv_obj_t* seq_step_leds[Config::MAX_STEPS];  // LED strip below grid
 static int seq_page = 0;              // 0 = tracks 0-7, 1 = tracks 8-15
 static constexpr int SEQ_TRACKS_PER_PAGE = 8;
 static lv_obj_t* seq_page_btn = NULL;
 static lv_obj_t* seq_page_lbl = NULL;
+static lv_obj_t* seq_page_prev_btn = NULL;
+static lv_obj_t* seq_page_next_btn = NULL;
 
 // Volume sliders
+static lv_obj_t* vol_strip_panels[Config::MAX_TRACKS] = {};
 static lv_obj_t* vol_sliders[Config::MAX_TRACKS];
 static lv_obj_t* vol_labels[Config::MAX_TRACKS];
 static lv_obj_t* vol_name_labels[Config::MAX_TRACKS];
+static lv_obj_t* vol_meta_labels[Config::MAX_TRACKS] = {};
+static lv_obj_t* vol_mute_badges[Config::MAX_TRACKS] = {};
+static lv_obj_t* vol_summary_master = NULL;
+static lv_obj_t* vol_summary_seq = NULL;
+static lv_obj_t* vol_summary_live = NULL;
+static lv_obj_t* vol_summary_pattern = NULL;
 
 // Filter UI
 static lv_obj_t* filter_arcs[3];
@@ -1079,6 +1095,7 @@ static void seq_step_cb(lv_event_t* e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     int track = idx / Config::MAX_STEPS;
     int step = idx % Config::MAX_STEPS;
+    selectedTrack = track;
     patterns[currentPattern].steps[track][step] = !patterns[currentPattern].steps[track][step];
     bool active = patterns[currentPattern].steps[track][step];
     lv_obj_set_style_bg_color(lv_event_get_target(e),
@@ -1211,20 +1228,75 @@ static void seq_apply_page() {
     if (seq_page_lbl) {
         lv_label_set_text_fmt(seq_page_lbl, "PAGE %d/2", seq_page + 1);
     }
+    if (seq_info_page) {
+        lv_label_set_text_fmt(seq_info_page, "BANK %d / 2", seq_page + 1);
+    }
 }
 
 void ui_create_sequencer_screen() {
     scr_sequencer = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_sequencer, RED808_BG, 0);
+    lv_obj_clear_flag(scr_sequencer, LV_OBJ_FLAG_SCROLLABLE);
     ui_create_header(scr_sequencer);
 
     lv_obj_t* shell = create_section_shell(scr_sequencer, 16, 78, 992, 506);
+    lv_obj_set_style_bg_opa(shell, LV_OPA_70, 0);
+
+    lv_obj_t* title = lv_label_create(shell);
+    lv_label_set_text(title, LV_SYMBOL_EDIT "  SEQUENCER STUDIO");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_color(title, RED808_TEXT, 0);
+    lv_obj_set_pos(title, 6, 4);
+
+    lv_obj_t* subtitle = lv_label_create(shell);
+    lv_label_set_text(subtitle, "Step grid with page banks, live transport state and direct mute/solo workflow");
+    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(subtitle, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(subtitle, 8, 32);
+
+    seq_info_pattern = lv_label_create(shell);
+    lv_obj_set_style_text_font(seq_info_pattern, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(seq_info_pattern, RED808_INFO, 0);
+    lv_obj_set_pos(seq_info_pattern, 612, 6);
+
+    seq_info_track = lv_label_create(shell);
+    lv_obj_set_style_text_font(seq_info_track, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(seq_info_track, RED808_TEXT, 0);
+    lv_obj_set_pos(seq_info_track, 612, 28);
+
+    seq_info_transport = lv_label_create(shell);
+    lv_obj_set_style_text_font(seq_info_transport, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(seq_info_transport, RED808_WARNING, 0);
+    lv_obj_set_pos(seq_info_transport, 810, 6);
+
+    seq_info_page = lv_label_create(shell);
+    lv_obj_set_style_text_font(seq_info_page, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(seq_info_page, RED808_SUCCESS, 0);
+    lv_obj_set_pos(seq_info_page, 810, 28);
 
     // Layout
-    int label_col_w = 78;              // wider column for name + S + M
-    int grid_x = label_col_w + 8;      // grid starts after label column
-    int grid_y = 55;
-    int cell_w = 54, cell_h = 58, gap = 2;  // slightly narrower to fit
+    int label_col_w = 112;
+    int grid_x = 150;
+    int grid_y = 162;
+    int cell_w = 48, cell_h = 42, gap = 3;
+
+    for (int s = 0; s < Config::MAX_STEPS; s++) {
+        lv_obj_t* chip = lv_obj_create(scr_sequencer);
+        lv_obj_set_size(chip, cell_w, 22);
+        lv_obj_set_pos(chip, grid_x + s * (cell_w + gap), 128);
+        lv_obj_set_style_bg_color(chip, (s % 4 == 0) ? lv_color_hex(0x223347) : lv_color_hex(0x16222E), 0);
+        lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(chip, 1, 0);
+        lv_obj_set_style_border_color(chip, RED808_BORDER, 0);
+        lv_obj_set_style_radius(chip, 8, 0);
+        lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
+
+        seq_step_labels[s] = lv_label_create(chip);
+        lv_label_set_text_fmt(seq_step_labels[s], "%02d", s + 1);
+        lv_obj_set_style_text_font(seq_step_labels[s], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(seq_step_labels[s], RED808_TEXT_DIM, 0);
+        lv_obj_center(seq_step_labels[s]);
+    }
 
     // Track panels: container with name + S + M buttons (positioned for 8 visible rows)
     for (int t = 0; t < Config::MAX_TRACKS; t++) {
@@ -1234,27 +1306,41 @@ void ui_create_sequencer_screen() {
         // Panel container
         lv_obj_t* panel = lv_obj_create(scr_sequencer);
         lv_obj_set_size(panel, label_col_w, cell_h);
-        lv_obj_set_pos(panel, 2, panel_y);
+        lv_obj_set_pos(panel, 28, panel_y);
         lv_obj_set_style_bg_color(panel, RED808_PANEL, 0);
         lv_obj_set_style_bg_opa(panel, LV_OPA_40, 0);
-        lv_obj_set_style_border_width(panel, 0, 0);
-        lv_obj_set_style_radius(panel, 4, 0);
-        lv_obj_set_style_pad_all(panel, 2, 0);
+        lv_obj_set_style_border_width(panel, 1, 0);
+        lv_obj_set_style_border_color(panel, RED808_BORDER, 0);
+        lv_obj_set_style_radius(panel, 10, 0);
+        lv_obj_set_style_pad_all(panel, 4, 0);
         lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
         seq_track_panels[t] = panel;
 
-        // Track name label (top of panel)
         lv_obj_t* lbl = lv_label_create(panel);
         lv_label_set_text(lbl, trackNames[t]);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(lbl, inst_colors[t], 0);
-        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_set_pos(lbl, 4, 2);
         seq_track_labels[t] = lbl;
+
+        lv_obj_t* meta = lv_label_create(panel);
+        lv_label_set_text(meta, instrumentNames[t]);
+        lv_obj_set_style_text_font(meta, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(meta, RED808_TEXT_DIM, 0);
+        lv_obj_set_pos(meta, 4, 18);
+        seq_track_meta_labels[t] = meta;
+
+        lv_obj_t* vol = lv_label_create(panel);
+        lv_label_set_text_fmt(vol, "V%03d", trackVolumes[t]);
+        lv_obj_set_style_text_font(vol, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(vol, RED808_TEXT, 0);
+        lv_obj_set_pos(vol, 68, 4);
+        seq_track_volume_labels[t] = vol;
 
         // S button (Solo) — bottom left
         lv_obj_t* btn_s = lv_btn_create(panel);
-        lv_obj_set_size(btn_s, 32, 24);
-        lv_obj_align(btn_s, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+        lv_obj_set_size(btn_s, 28, 16);
+        lv_obj_align(btn_s, LV_ALIGN_BOTTOM_LEFT, 4, -2);
         lv_obj_set_style_bg_color(btn_s, RED808_SURFACE, 0);
         lv_obj_set_style_bg_opa(btn_s, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(btn_s, RED808_SURFACE, LV_STATE_PRESSED);
@@ -1274,8 +1360,8 @@ void ui_create_sequencer_screen() {
 
         // M button (Mute) — bottom right
         lv_obj_t* btn_m = lv_btn_create(panel);
-        lv_obj_set_size(btn_m, 32, 24);
-        lv_obj_align(btn_m, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+        lv_obj_set_size(btn_m, 28, 16);
+        lv_obj_align(btn_m, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
         lv_obj_set_style_bg_color(btn_m, RED808_SURFACE, 0);
         lv_obj_set_style_bg_opa(btn_m, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(btn_m, RED808_SURFACE, LV_STATE_PRESSED);
@@ -1355,6 +1441,17 @@ void ui_create_sequencer_screen() {
     lv_obj_set_pos(lbl_step_indicator, 8, bottom_y);
 
     // PAGE button
+    seq_page_prev_btn = lv_btn_create(scr_sequencer);
+    lv_obj_set_size(seq_page_prev_btn, 32, 26);
+    lv_obj_set_pos(seq_page_prev_btn, 518, bottom_y);
+    lv_obj_add_event_cb(seq_page_prev_btn, [](lv_event_t*) {
+        seq_page = (seq_page == 0) ? 1 : 0;
+        seq_apply_page();
+    }, LV_EVENT_PRESSED, NULL);
+    lv_obj_t* page_prev_lbl = lv_label_create(seq_page_prev_btn);
+    lv_label_set_text(page_prev_lbl, LV_SYMBOL_LEFT);
+    lv_obj_center(page_prev_lbl);
+
     seq_page_btn = lv_btn_create(scr_sequencer);
     lv_obj_set_size(seq_page_btn, 130, 26);
     lv_obj_set_pos(seq_page_btn, 550, bottom_y);
@@ -1372,6 +1469,17 @@ void ui_create_sequencer_screen() {
     lv_obj_set_style_text_font(seq_page_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(seq_page_lbl, lv_color_hex(0x80DF60), 0);
     lv_obj_center(seq_page_lbl);
+
+    seq_page_next_btn = lv_btn_create(scr_sequencer);
+    lv_obj_set_size(seq_page_next_btn, 32, 26);
+    lv_obj_set_pos(seq_page_next_btn, 684, bottom_y);
+    lv_obj_add_event_cb(seq_page_next_btn, [](lv_event_t*) {
+        seq_page = (seq_page + 1) % 2;
+        seq_apply_page();
+    }, LV_EVENT_PRESSED, NULL);
+    lv_obj_t* page_next_lbl = lv_label_create(seq_page_next_btn);
+    lv_label_set_text(page_next_lbl, LV_SYMBOL_RIGHT);
+    lv_obj_center(page_next_lbl);
 
     // CIRCLE VIEW button
     lv_obj_t* circle_btn = lv_btn_create(scr_sequencer);
@@ -1393,6 +1501,9 @@ void ui_create_sequencer_screen() {
     // Show only page 0 tracks initially
     seq_page = 0;
     seq_apply_page();
+    for (int t = 0; t < Config::MAX_TRACKS; t++) {
+        seq_update_solo_mute_visuals(t);
+    }
 }
 
 void ui_update_sequencer() {
@@ -1401,7 +1512,12 @@ void ui_update_sequencer() {
     static int prev_step = -1;
     static int prev_column = -2;
     static int prev_page = -1;
+    static int prev_pattern = -1;
+    static int prev_selected_track = -1;
+    static bool prev_playing = false;
+    static int prev_bpm = -1;
     static uint8_t prev_grid_state[Config::MAX_TRACKS][Config::MAX_STEPS];
+    static int prev_track_volumes[Config::MAX_TRACKS] = {};
 
     int page_start = seq_page * SEQ_TRACKS_PER_PAGE;
     int page_end   = page_start + SEQ_TRACKS_PER_PAGE;
@@ -1416,6 +1532,44 @@ void ui_update_sequencer() {
     // Update step highlight label only when step changes
     if (lbl_step_indicator && currentStep != prev_step) {
         lv_label_set_text_fmt(lbl_step_indicator, "Step: %02d / %02d", currentStep + 1, Config::MAX_STEPS);
+    }
+
+    if (seq_info_pattern && currentPattern != prev_pattern) {
+        prev_pattern = currentPattern;
+        lv_label_set_text_fmt(seq_info_pattern, "PATTERN %02d  %s", currentPattern + 1, patterns[currentPattern].name.c_str());
+    }
+    if (seq_info_track && selectedTrack != prev_selected_track) {
+        prev_selected_track = selectedTrack;
+        lv_label_set_text_fmt(seq_info_track, "TRACK %s  %s", trackNames[selectedTrack], instrumentNames[selectedTrack]);
+    }
+    if (seq_info_transport && (isPlaying != prev_playing || currentBPM != prev_bpm)) {
+        prev_playing = isPlaying;
+        prev_bpm = currentBPM;
+        lv_label_set_text_fmt(seq_info_transport, "%s  %d BPM", isPlaying ? "RUNNING" : "STOPPED", currentBPM);
+        lv_obj_set_style_text_color(seq_info_transport, isPlaying ? RED808_SUCCESS : RED808_WARNING, 0);
+    }
+
+    for (int s = 0; s < Config::MAX_STEPS; s++) {
+        if (!seq_step_labels[s]) continue;
+        bool active = (s == currentStep) && isPlaying;
+        lv_obj_set_style_text_color(seq_step_labels[s], active ? RED808_WARNING : RED808_TEXT_DIM, 0);
+    }
+
+    for (int t = page_start; t < page_end; t++) {
+        if (seq_track_volume_labels[t] && prev_track_volumes[t] != trackVolumes[t]) {
+            prev_track_volumes[t] = trackVolumes[t];
+            lv_label_set_text_fmt(seq_track_volume_labels[t], "V%03d", trackVolumes[t]);
+        }
+        if (seq_track_panels[t]) {
+            bool selected = (t == selectedTrack);
+            if (selected) {
+                lv_obj_set_style_border_width(seq_track_panels[t], 2, 0);
+                lv_obj_set_style_border_color(seq_track_panels[t], inst_colors[t], 0);
+            } else if (!trackSolo[t] && !isTrackEffectivelyMuted(t)) {
+                lv_obj_set_style_border_width(seq_track_panels[t], 1, 0);
+                lv_obj_set_style_border_color(seq_track_panels[t], RED808_BORDER, 0);
+            }
+        }
     }
 
     int active_column = isPlaying ? currentStep : -1;
@@ -1529,39 +1683,97 @@ static void ui_apply_volume_track_style(int track) {
 void ui_create_volumes_screen() {
     scr_volumes = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_volumes, RED808_BG, 0);
+    lv_obj_clear_flag(scr_volumes, LV_OBJ_FLAG_SCROLLABLE);
     ui_create_header(scr_volumes);
+
+    lv_obj_t* shell = create_section_shell(scr_volumes, 16, 78, 992, 506);
+    lv_obj_set_style_bg_opa(shell, LV_OPA_70, 0);
+
+    lv_obj_t* title = lv_label_create(shell);
+    lv_label_set_text(title, LV_SYMBOL_AUDIO "  MIXER DESK");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_color(title, RED808_TEXT, 0);
+    lv_obj_set_pos(title, 6, 4);
+
+    lv_obj_t* subtitle = lv_label_create(shell);
+    lv_label_set_text(subtitle, "Track balance, mute state and live overview in one surface");
+    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(subtitle, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(subtitle, 8, 32);
+
+    vol_summary_master = lv_label_create(shell);
+    lv_obj_set_style_text_font(vol_summary_master, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(vol_summary_master, RED808_INFO, 0);
+    lv_obj_set_pos(vol_summary_master, 620, 6);
+
+    vol_summary_seq = lv_label_create(shell);
+    lv_obj_set_style_text_font(vol_summary_seq, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(vol_summary_seq, RED808_TEXT, 0);
+    lv_obj_set_pos(vol_summary_seq, 620, 26);
+
+    vol_summary_live = lv_label_create(shell);
+    lv_obj_set_style_text_font(vol_summary_live, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(vol_summary_live, RED808_TEXT, 0);
+    lv_obj_set_pos(vol_summary_live, 790, 6);
+
+    vol_summary_pattern = lv_label_create(shell);
+    lv_obj_set_style_text_font(vol_summary_pattern, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(vol_summary_pattern, RED808_SUCCESS, 0);
+    lv_obj_set_pos(vol_summary_pattern, 790, 26);
 
     // Fader channel strips — professional mixer style
     int strip_w = 56;
     int gap = (1024 - 16 * strip_w) / 17;  // equal margins
-    int slider_h = 380;
-    int y_name = 58;
-    int y_slider = 82;
+    int slider_h = 314;
+    int y_name = 148;
+    int y_slider = 194;
     int y_value = y_slider + slider_h + 8;
 
     for (int i = 0; i < Config::MAX_TRACKS; i++) {
         int x = gap + i * (strip_w + gap);
         int cx = x + strip_w / 2;
 
-        // Track strip background (subtle channel strip)
         lv_obj_t* strip = lv_obj_create(scr_volumes);
-        lv_obj_set_size(strip, strip_w, 530);
-        lv_obj_set_pos(strip, x, 52);
+        lv_obj_set_size(strip, strip_w, 432);
+        lv_obj_set_pos(strip, x, 142);
         lv_obj_set_style_bg_color(strip, RED808_SURFACE, 0);
-        lv_obj_set_style_bg_opa(strip, LV_OPA_30, 0);
-        lv_obj_set_style_radius(strip, 6, 0);
-        lv_obj_set_style_border_width(strip, 0, 0);
+        lv_obj_set_style_bg_opa(strip, LV_OPA_40, 0);
+        lv_obj_set_style_radius(strip, 10, 0);
+        lv_obj_set_style_border_width(strip, 1, 0);
+        lv_obj_set_style_border_color(strip, RED808_BORDER, 0);
         lv_obj_clear_flag(strip, LV_OBJ_FLAG_SCROLLABLE);
+        vol_strip_panels[i] = strip;
 
-        // Track name (top, colored)
         lv_obj_t* name = lv_label_create(scr_volumes);
         lv_label_set_text(name, trackNames[i]);
-        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(name, inst_colors[i], 0);
         lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_pos(name, x, y_name);
         lv_obj_set_width(name, strip_w);
         vol_name_labels[i] = name;
+
+        lv_obj_t* meta = lv_label_create(scr_volumes);
+        lv_label_set_text(meta, instrumentNames[i]);
+        lv_obj_set_style_text_font(meta, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(meta, RED808_TEXT_DIM, 0);
+        lv_obj_set_style_text_align(meta, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(meta, x - 12, 166);
+        lv_obj_set_width(meta, strip_w + 24);
+        vol_meta_labels[i] = meta;
+
+        lv_obj_t* badge = lv_obj_create(scr_volumes);
+        lv_obj_set_size(badge, 30, 16);
+        lv_obj_set_pos(badge, cx - 15, 180);
+        lv_obj_set_style_radius(badge, 8, 0);
+        lv_obj_set_style_pad_all(badge, 0, 0);
+        lv_obj_set_style_border_width(badge, 1, 0);
+        lv_obj_clear_flag(badge, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t* badge_lbl = lv_label_create(badge);
+        lv_label_set_text(badge_lbl, "ON");
+        lv_obj_set_style_text_font(badge_lbl, &lv_font_montserrat_12, 0);
+        lv_obj_center(badge_lbl);
+        vol_mute_badges[i] = badge;
 
         // Slider — thin fader (10px wide, tall)
         lv_obj_t* slider = lv_slider_create(scr_volumes);
@@ -1623,6 +1835,10 @@ void ui_update_volumes() {
     static bool prev_mute[Config::MAX_TRACKS];
     static bool initialized = false;
     static uint32_t last_slider_refresh = 0;
+    static int prev_master = -1;
+    static int prev_seq = -1;
+    static int prev_live = -1;
+    static int prev_pattern = -1;
 
     if (!initialized) {
         for (int i = 0; i < Config::MAX_TRACKS; i++) {
@@ -1633,6 +1849,24 @@ void ui_update_volumes() {
     }
 
     bool allow_slider_refresh = (lv_tick_get() - last_slider_refresh) >= 40;
+
+    if (vol_summary_master && masterVolume != prev_master) {
+        prev_master = masterVolume;
+        lv_label_set_text_fmt(vol_summary_master, "MASTER %03d", masterVolume);
+    }
+    if (vol_summary_seq && sequencerVolume != prev_seq) {
+        prev_seq = sequencerVolume;
+        lv_label_set_text_fmt(vol_summary_seq, "SEQUENCER %03d", sequencerVolume);
+    }
+    if (vol_summary_live && livePadsVolume != prev_live) {
+        prev_live = livePadsVolume;
+        lv_label_set_text_fmt(vol_summary_live, "LIVE %03d", livePadsVolume);
+    }
+    if (vol_summary_pattern && currentPattern != prev_pattern) {
+        prev_pattern = currentPattern;
+        lv_label_set_text_fmt(vol_summary_pattern, "PATTERN %02d", currentPattern + 1);
+    }
+
     for (int i = 0; i < Config::MAX_TRACKS; i++) {
         bool vol_changed = trackVolumes[i] != prev_vol[i];
         bool mute_changed = trackMuted[i] != prev_mute[i];
@@ -1640,6 +1874,19 @@ void ui_update_volumes() {
         if (mute_changed) {
             prev_mute[i] = trackMuted[i];
             ui_apply_volume_track_style(i);
+            if (vol_mute_badges[i]) {
+                lv_obj_set_style_bg_color(vol_mute_badges[i], trackMuted[i] ? RED808_ERROR : RED808_SUCCESS, 0);
+                lv_obj_set_style_border_color(vol_mute_badges[i], trackMuted[i] ? RED808_ERROR : RED808_SUCCESS, 0);
+                lv_obj_t* lbl = lv_obj_get_child(vol_mute_badges[i], 0);
+                if (lbl) {
+                    lv_label_set_text(lbl, trackMuted[i] ? "M" : "ON");
+                    lv_obj_set_style_text_color(lbl, trackMuted[i] ? lv_color_white() : RED808_BG, 0);
+                }
+            }
+            if (vol_strip_panels[i]) {
+                lv_obj_set_style_border_color(vol_strip_panels[i], trackMuted[i] ? RED808_ERROR : inst_colors[i], 0);
+                lv_obj_set_style_bg_opa(vol_strip_panels[i], trackMuted[i] ? LV_OPA_20 : LV_OPA_40, 0);
+            }
         }
 
         if (vol_changed && allow_slider_refresh) {
@@ -1649,6 +1896,9 @@ void ui_update_volumes() {
             }
             if (vol_labels[i]) {
                 lv_label_set_text_fmt(vol_labels[i], "%d", trackVolumes[i]);
+            }
+            if (vol_meta_labels[i]) {
+                lv_label_set_text_fmt(vol_meta_labels[i], "%s", instrumentNames[i]);
             }
         }
     }
@@ -2594,44 +2844,138 @@ void ui_update_diagnostics() {
 // ============================================================================
 // PATTERNS SCREEN - 6 patterns, click to select
 // ============================================================================
-static constexpr int VISIBLE_PATTERNS = 6;
+static constexpr int VISIBLE_PATTERNS = 8;
 static lv_obj_t* pattern_btns[VISIBLE_PATTERNS] = {};
 static lv_obj_t* pattern_labels[VISIBLE_PATTERNS] = {};
+static lv_obj_t* pattern_meta_labels[VISIBLE_PATTERNS] = {};
+static lv_obj_t* pattern_page_label = NULL;
+static lv_obj_t* pattern_summary_label = NULL;
+static lv_obj_t* pattern_prev_btn = NULL;
+static lv_obj_t* pattern_next_btn = NULL;
+static int pattern_page = 0;
 
-static void pattern_select_cb(lv_event_t* e) {
-    int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx < 0 || idx >= VISIBLE_PATTERNS) return;
-    currentPattern = idx;
+static int pattern_page_count() {
+    return (Config::MAX_PATTERNS + VISIBLE_PATTERNS - 1) / VISIBLE_PATTERNS;
+}
 
-    // Send selectPattern to master (pre-formatted to avoid PSRAM contention)
-    char buf[48];
-    snprintf(buf, sizeof(buf), "{\"cmd\":\"selectPattern\",\"index\":%d}", idx);
-    sendUDPCommand(buf);
+static int pattern_active_steps(int patternIndex) {
+    int active = 0;
+    if (patternIndex < 0 || patternIndex >= Config::MAX_PATTERNS) return 0;
+    for (int t = 0; t < Config::MAX_TRACKS; t++) {
+        for (int s = 0; s < Config::MAX_STEPS; s++) {
+            active += patterns[patternIndex].steps[t][s] ? 1 : 0;
+        }
+    }
+    return active;
+}
 
-    // Update button visuals immediately
+static void pattern_apply_page() {
+    int start = pattern_page * VISIBLE_PATTERNS;
+    int pages = pattern_page_count();
+
+    if (pattern_page_label) {
+        lv_label_set_text_fmt(pattern_page_label, "PAGE %d/%d", pattern_page + 1, pages);
+    }
+    if (pattern_summary_label) {
+        lv_label_set_text_fmt(pattern_summary_label, "CURRENT %02d  %s", currentPattern + 1, patterns[currentPattern].name.c_str());
+    }
+
     for (int i = 0; i < VISIBLE_PATTERNS; i++) {
+        int patternIndex = start + i;
+        bool visible = patternIndex < Config::MAX_PATTERNS;
         if (!pattern_btns[i]) continue;
-        bool active = (i == currentPattern);
+        if (!visible) {
+            lv_obj_add_flag(pattern_btns[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_clear_flag(pattern_btns[i], LV_OBJ_FLAG_HIDDEN);
+        bool active = (patternIndex == currentPattern);
         lv_obj_set_style_bg_color(pattern_btns[i], active ? RED808_ACCENT : RED808_SURFACE, 0);
         lv_obj_set_style_border_color(pattern_btns[i], active ? lv_color_white() : RED808_BORDER, 0);
         lv_obj_set_style_border_width(pattern_btns[i], active ? 3 : 1, 0);
         if (pattern_labels[i]) {
+            lv_label_set_text_fmt(pattern_labels[i], "PATTERN %02d", patternIndex + 1);
             lv_obj_set_style_text_color(pattern_labels[i], active ? lv_color_white() : RED808_TEXT, 0);
         }
+        if (pattern_meta_labels[i]) {
+            lv_label_set_text_fmt(pattern_meta_labels[i], "%s\n%d active steps", patterns[patternIndex].name.c_str(), pattern_active_steps(patternIndex));
+            lv_obj_set_style_text_color(pattern_meta_labels[i], active ? lv_color_white() : RED808_TEXT_DIM, 0);
+        }
     }
+}
+
+static void pattern_select_cb(lv_event_t* e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= VISIBLE_PATTERNS) return;
+    int patternIndex = pattern_page * VISIBLE_PATTERNS + idx;
+    if (patternIndex < 0 || patternIndex >= Config::MAX_PATTERNS) return;
+    currentPattern = patternIndex;
+
+    // Send selectPattern to master (pre-formatted to avoid PSRAM contention)
+    char buf[48];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"selectPattern\",\"index\":%d}", patternIndex);
+    sendUDPCommand(buf);
+    pattern_apply_page();
 }
 
 void ui_create_patterns_screen() {
     scr_patterns = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_patterns, RED808_BG, 0);
+    lv_obj_clear_flag(scr_patterns, LV_OBJ_FLAG_SCROLLABLE);
     ui_create_header(scr_patterns);
 
-    // 2 rows x 3 cols of large pattern buttons
-    int cols = 3, rows = 2;
-    int btn_w = 280, btn_h = 210;
-    int gap = 24;
+    lv_obj_t* shell = create_section_shell(scr_patterns, 18, 78, 988, 500);
+    lv_obj_set_style_bg_opa(shell, LV_OPA_70, 0);
+
+    lv_obj_t* title = lv_label_create(shell);
+    lv_label_set_text(title, LV_SYMBOL_LIST "  PATTERN BANKS");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_color(title, RED808_TEXT, 0);
+    lv_obj_set_pos(title, 8, 4);
+
+    lv_obj_t* subtitle = lv_label_create(shell);
+    lv_label_set_text(subtitle, "Fast bank access with page browsing and pattern density preview");
+    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(subtitle, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(subtitle, 8, 32);
+
+    pattern_summary_label = lv_label_create(shell);
+    lv_obj_set_style_text_font(pattern_summary_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(pattern_summary_label, RED808_INFO, 0);
+    lv_obj_set_pos(pattern_summary_label, 680, 8);
+
+    pattern_prev_btn = lv_btn_create(shell);
+    lv_obj_set_size(pattern_prev_btn, 34, 26);
+    lv_obj_set_pos(pattern_prev_btn, 820, 34);
+    lv_obj_add_event_cb(pattern_prev_btn, [](lv_event_t*) {
+        pattern_page = (pattern_page == 0) ? (pattern_page_count() - 1) : (pattern_page - 1);
+        pattern_apply_page();
+    }, LV_EVENT_PRESSED, NULL);
+    lv_obj_t* prev_lbl = lv_label_create(pattern_prev_btn);
+    lv_label_set_text(prev_lbl, LV_SYMBOL_LEFT);
+    lv_obj_center(prev_lbl);
+
+    pattern_page_label = lv_label_create(shell);
+    lv_obj_set_style_text_font(pattern_page_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(pattern_page_label, RED808_SUCCESS, 0);
+    lv_obj_set_pos(pattern_page_label, 864, 38);
+
+    pattern_next_btn = lv_btn_create(shell);
+    lv_obj_set_size(pattern_next_btn, 34, 26);
+    lv_obj_set_pos(pattern_next_btn, 950, 34);
+    lv_obj_add_event_cb(pattern_next_btn, [](lv_event_t*) {
+        pattern_page = (pattern_page + 1) % pattern_page_count();
+        pattern_apply_page();
+    }, LV_EVENT_PRESSED, NULL);
+    lv_obj_t* next_lbl = lv_label_create(pattern_next_btn);
+    lv_label_set_text(next_lbl, LV_SYMBOL_RIGHT);
+    lv_obj_center(next_lbl);
+
+    int cols = 4, rows = 2;
+    int btn_w = 224, btn_h = 182;
+    int gap = 16;
     int x_start = (1024 - cols * btn_w - (cols - 1) * gap) / 2;
-    int y_start = 80;
+    int y_start = 156;
 
     for (int i = 0; i < VISIBLE_PATTERNS; i++) {
         int col = i % cols;
@@ -2639,41 +2983,50 @@ void ui_create_patterns_screen() {
         int x = x_start + col * (btn_w + gap);
         int y = y_start + row * (btn_h + gap);
 
-        bool active = (i == currentPattern);
-
         lv_obj_t* btn = lv_btn_create(scr_patterns);
         lv_obj_set_size(btn, btn_w, btn_h);
         lv_obj_set_pos(btn, x, y);
-        apply_stable_button_style(btn, active ? RED808_ACCENT : RED808_SURFACE, active ? lv_color_white() : RED808_BORDER);
+        apply_stable_button_style(btn, RED808_SURFACE, RED808_BORDER);
         lv_obj_set_style_radius(btn, 16, 0);
-        lv_obj_set_style_border_width(btn, active ? 3 : 1, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_add_event_cb(btn, pattern_select_cb, LV_EVENT_PRESSED, (void*)(intptr_t)i);
         pattern_btns[i] = btn;
 
         lv_obj_t* lbl = lv_label_create(btn);
-        lv_label_set_text_fmt(lbl, "PATTERN\n%d", i + 1);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_28, 0);
-        lv_obj_set_style_text_color(lbl, active ? lv_color_white() : RED808_TEXT, 0);
-        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_center(lbl);
+        lv_label_set_text(lbl, "PATTERN 01");
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(lbl, RED808_TEXT, 0);
+        lv_obj_set_pos(lbl, 18, 22);
         pattern_labels[i] = lbl;
+
+        lv_obj_t* meta = lv_label_create(btn);
+        lv_label_set_text(meta, "Bank snapshot\n0 active steps");
+        lv_obj_set_style_text_font(meta, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(meta, RED808_TEXT_DIM, 0);
+        lv_obj_set_style_text_line_space(meta, 6, 0);
+        lv_obj_set_pos(meta, 18, 84);
+        pattern_meta_labels[i] = meta;
     }
+
+    pattern_page = currentPattern / VISIBLE_PATTERNS;
+    pattern_apply_page();
 }
 
 void ui_update_patterns() {
     static int prevPattern = -1;
-    if (currentPattern == prevPattern) return;
-    prevPattern = currentPattern;
+    static int prevPage = -1;
 
-    for (int i = 0; i < VISIBLE_PATTERNS; i++) {
-        if (!pattern_btns[i]) continue;
-        bool active = (i == currentPattern);
-        lv_obj_set_style_bg_color(pattern_btns[i], active ? RED808_ACCENT : RED808_SURFACE, 0);
-        lv_obj_set_style_border_color(pattern_btns[i], active ? lv_color_white() : RED808_BORDER, 0);
-        lv_obj_set_style_border_width(pattern_btns[i], active ? 3 : 1, 0);
-        if (pattern_labels[i]) {
-            lv_obj_set_style_text_color(pattern_labels[i], active ? lv_color_white() : RED808_TEXT, 0);
-        }
+    int desiredPage = currentPattern / VISIBLE_PATTERNS;
+    if (desiredPage != pattern_page) {
+        pattern_page = desiredPage;
+    }
+
+    if (currentPattern != prevPattern || pattern_page != prevPage) {
+        prevPattern = currentPattern;
+        prevPage = pattern_page;
+        pattern_apply_page();
+    } else if (pattern_summary_label) {
+        lv_label_set_text_fmt(pattern_summary_label, "CURRENT %02d  %s", currentPattern + 1, patterns[currentPattern].name.c_str());
     }
 }
 
