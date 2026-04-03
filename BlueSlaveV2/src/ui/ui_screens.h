@@ -41,6 +41,7 @@ void ui_update_seq_circle();
 void ui_update_volumes();
 void ui_update_filters();
 void ui_update_diagnostics();
+void ui_update_performance();
 void ui_update_header();
 void ui_update_menu_status();
 void ui_update_live_pads();

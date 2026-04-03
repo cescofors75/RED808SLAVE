@@ -100,6 +100,11 @@ bool masterConnected = false;
 
 // Diagnostic
 DiagnosticInfo diagInfo = {};
+volatile uint32_t uiUpdateCount = 0;
+volatile uint32_t uiSkippedCount = 0;
+volatile uint32_t uiLastIntervalMs = Config::SCREEN_UPDATE_MS;
+volatile uint32_t udpRxCount = 0;
+volatile uint32_t udpJsonErrorCount = 0;
 
 // Track names
 const char* trackNames[] = {
@@ -166,6 +171,35 @@ static constexpr uint8_t BYTEBUTTON_LED_RGB888_REG = 0x20;
 static constexpr uint8_t BYTEBUTTON_LED_COUNT = BYTEBUTTON_BUTTONS + 1;
 static constexpr uint8_t BYTEBUTTON_LED_USER_DEFINED = 0;
 static constexpr uint8_t BYTEBUTTON_BRIGHTNESS = 180;
+
+static uint32_t ui_refresh_interval_ms(Screen screen, bool playing_now) {
+    switch (screen) {
+        case SCREEN_BOOT:
+            return 33;
+        case SCREEN_MENU:
+            return 120;
+        case SCREEN_LIVE:
+            return 50;
+        case SCREEN_SEQUENCER:
+        case SCREEN_SEQ_CIRCLE:
+            return playing_now ? 16 : 50;
+        case SCREEN_VOLUMES:
+            return 40;
+        case SCREEN_FILTERS:
+            return 50;
+        case SCREEN_PATTERNS:
+            return 100;
+        case SCREEN_DIAGNOSTICS:
+        case SCREEN_PERFORMANCE:
+            return 200;
+        case SCREEN_SETTINGS:
+        case SCREEN_SDCARD:
+        case SCREEN_SAMPLES:
+            return 250;
+        default:
+            return 100;
+    }
+}
 
 // =============================================================================
 // FORWARD DECLARATIONS
@@ -761,6 +795,7 @@ void receiveUDPData() {
     int len = udp.read(buf, sizeof(buf) - 1);
     if (len <= 0) return;
     buf[len] = '\0';
+    udpRxCount = udpRxCount + 1;
 
     lastMasterPacketMs = millis();
     masterConnected = true;
@@ -769,7 +804,10 @@ void receiveUDPData() {
     // Parse JSON using internal SRAM only — no PSRAM access
     JsonDocument doc(&sramAllocator);
     DeserializationError err = deserializeJson(doc, buf);
-    if (err) return;
+    if (err) {
+        udpJsonErrorCount = udpJsonErrorCount + 1;
+        return;
+    }
 
     const char* cmd = doc["cmd"];
     if (!cmd) return;
@@ -1113,7 +1151,7 @@ void updateByteButtonLeds() {
         }
     }
     if (!hasChanges) return;
-    if (!i2c_lock(25)) return;
+    if (!i2c_lock(10)) return;
 
     if (byteButtonHubChannel >= 0) i2c_hub_select_raw(byteButtonHubChannel);
     else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
@@ -1141,7 +1179,7 @@ void updateTrackEncoderLED(int track) {
 
     int ch = m5HubChannel[moduleIndex];
     if (ch < 0) return;
-    if (!i2c_lock(20)) return;
+    if (!i2c_lock(10)) return;
     i2c_hub_select_raw(ch);
 
     if (trackMuted[track]) {
@@ -1184,7 +1222,7 @@ static const uint32_t oceanBlues[] = {
 static void setByteButtonLedDirect(int index, uint32_t color) {
     if (!byteButtonConnected || !byteButtonLedInitialized) return;
     if (index < 0 || index >= BYTEBUTTON_LED_COUNT) return;
-    if (!i2c_lock(15)) return;
+    if (!i2c_lock(10)) return;
     if (byteButtonHubChannel >= 0) i2c_hub_select_raw(byteButtonHubChannel);
     else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
     byteButtonWriteBytes(BYTEBUTTON_LED_RGB888_REG + index * 4, (uint8_t*)&color, 4);
@@ -1198,7 +1236,7 @@ static void setM5EncoderLedDirect(int module, int enc, uint8_t r, uint8_t g, uin
     if (!m5encoderConnected[module]) return;
     int ch = m5HubChannel[module];
     if (ch < 0) return;
-    if (!i2c_lock(15)) return;
+    if (!i2c_lock(10)) return;
     i2c_hub_select_raw(ch);
     m5encoders[module].writeRGB(enc, r, g, b);
     i2c_hub_deselect_raw();
@@ -1272,7 +1310,11 @@ void setOceanBlueLeds() {
     for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
         setByteButtonLedDirect(i, oceanBlues[i]);
     }
-    Serial.println("[LED] Ocean blue theme applied");
+    Serial.printf("[LED] Ocean blue theme applied (M5 #1=%s ch=%d, M5 #2=%s ch=%d)\n",
+                  m5encoderConnected[0] ? "OK" : "NO",
+                  m5HubChannel[0],
+                  m5encoderConnected[1] ? "OK" : "NO",
+                  m5HubChannel[1]);
 }
 
 void handleM5Encoders() {
@@ -1290,7 +1332,7 @@ void handleM5Encoders() {
         int ch = m5HubChannel[mod];
         if (ch < 0) continue;
 
-        if (!i2c_lock(20)) continue;
+        if (!i2c_lock(8)) continue;
         i2c_hub_select_raw(ch);
 
         for (int enc = 0; enc < ENCODERS_PER_MODULE; enc++) {
@@ -1380,7 +1422,7 @@ void handleDFRobotEncoders() {
 
         int ch = dfRobotHubChannel[i];
         if (ch < 0) continue;
-        if (!i2c_lock(20)) continue;
+        if (!i2c_lock(8)) continue;
         i2c_hub_select_raw(ch);
 
         uint16_t val = dfEncoders[i]->getEncoderValue() & 0x03FF; // 10-bit range: 0..1023
@@ -1536,8 +1578,8 @@ void handleAnalogEncoder() {
 
     // 16-sample average per call — sufficient for ESP32-S3 ADC noise
     long sum = 0;
-    for (int i = 0; i < 16; i++) sum += analogRead(Config::ANALOG_ENC_PIN);
-    int raw = (int)(sum / 16);
+    for (int i = 0; i < 8; i++) sum += analogRead(Config::ANALOG_ENC_PIN);
+    int raw = (int)(sum / 8);
 
     // Store in ring buffer
     ring[ringIdx] = raw;
@@ -1614,7 +1656,7 @@ void handleByteButton() {
     uint8_t status = 0;
     bool readOk = false;
 
-    if (i2c_lock(20)) {
+    if (i2c_lock(8)) {
         if (byteButtonHubChannel >= 0) i2c_hub_select_raw(byteButtonHubChannel);
         else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
 
@@ -1731,6 +1773,7 @@ void updateUI() {
         case SCREEN_FILTERS:     ui_update_filters();   break;
         case SCREEN_PATTERNS:    ui_update_patterns();  break;
         case SCREEN_SDCARD:    ui_update_sdcard();    break;
+        case SCREEN_PERFORMANCE: ui_update_performance(); break;
         case SCREEN_DIAGNOSTICS: ui_update_diagnostics(); break;
         default: break;
     }
@@ -1890,6 +1933,7 @@ static void encoder_task(void* arg) {
 
 void loop() {
     unsigned long now = millis();
+    static Screen lastUiScreen = SCREEN_BOOT;
 
     // === TOUCH + TRIGGER: highest priority — process FIRST for lowest latency ===
     handleLivePadTouchMatrix(now);
@@ -1938,10 +1982,12 @@ void loop() {
         bootLedAnimation();
     }
 
-    // Transition from boot → menu: apply ocean blue LED theme
+    // Transition from boot → runtime UI: always apply the stable LED theme once.
+    // Do not wait for bootLedDone; if the user dismisses BOOT early, M5 #2 could
+    // otherwise remain dark because the boot LED sweep never reached module 2.
     {
         static bool bootLedTransitionDone = false;
-        if (!bootLedTransitionDone && currentScreen != SCREEN_BOOT && bootLedDone) {
+        if (!bootLedTransitionDone && currentScreen != SCREEN_BOOT) {
             bootLedTransitionDone = true;
             setOceanBlueLeds();
         }
@@ -1967,9 +2013,21 @@ void loop() {
     // Encoders run in dedicated encoder_task — no polling here
 
     // UI update (~60fps)
-    if (now - lastScreenUpdate >= Config::SCREEN_UPDATE_MS) {
+    bool forceUiRefresh = false;
+    if (currentScreen != lastUiScreen) {
+        previousScreen = lastUiScreen;
+        lastUiScreen = currentScreen;
+        forceUiRefresh = true;
+    }
+
+    uint32_t uiInterval = ui_refresh_interval_ms(currentScreen, isPlaying);
+    uiLastIntervalMs = uiInterval;
+    if (forceUiRefresh || (now - lastScreenUpdate >= uiInterval)) {
         lastScreenUpdate = now;
         updateUI();
+        uiUpdateCount = uiUpdateCount + 1;
+    } else {
+        uiSkippedCount = uiSkippedCount + 1;
     }
 
     // Debug heartbeat every 10s

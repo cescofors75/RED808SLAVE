@@ -18,7 +18,7 @@
 #define LCD_HSYNC      GPIO_NUM_46
 #define LCD_DE         GPIO_NUM_5
 #define LCD_PCLK       GPIO_NUM_7
-#define LCD_PCLK_HZ    (21 * 1000 * 1000)  // 21MHz — ~23Hz refresh with ESPHome timings (was 14MHz=15Hz flicker)
+#define LCD_PCLK_HZ    (16 * 1000 * 1000)  // 16MHz — conservative clock; paired with short porches to avoid visible low-FPS flicker
 
 // RGB565 Data (16-bit)
 #define LCD_B3         GPIO_NUM_14
@@ -38,9 +38,9 @@
 #define LCD_R6         GPIO_NUM_41
 #define LCD_R7         GPIO_NUM_40
 
-// LCD Timing (ST7262) — ESPHome confirmed values for ESP-IDF rgb_panel driver
-// Small timings (4,8,8) don't work with bounce buffers — panel fails to sync
-// h_total=1386, v_total=661 → 21MHz/916146 = 22.9Hz
+// LCD Timing (ST7262) — large porch profile known to produce a visible image with this RGB driver.
+// 30MHz appears in vendor benchmark notes, but in this firmware 16MHz is used as the safer baseline.
+// h_total=1386, v_total=661 → 16MHz/916146 = 17.5Hz
 #define LCD_HSYNC_PULSE_WIDTH  162
 #define LCD_HSYNC_BACK_PORCH   152
 #define LCD_HSYNC_FRONT_PORCH  48

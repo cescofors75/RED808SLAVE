@@ -133,10 +133,22 @@ extern bool hubDetected;
 // Connection
 extern bool udpConnected;
 extern bool wifiConnected;
+extern bool wifiReconnecting;
 extern bool masterConnected;
 
 // Diagnostic
 extern DiagnosticInfo diagInfo;
+
+// Runtime metrics
+extern volatile uint32_t uiUpdateCount;
+extern volatile uint32_t uiSkippedCount;
+extern volatile uint32_t uiLastIntervalMs;
+extern volatile uint32_t udpRxCount;
+extern volatile uint32_t udpJsonErrorCount;
+extern unsigned long lastWiFiConnectedMs;
+extern unsigned long lastMasterPacketMs;
+extern unsigned long lastStepUpdateMs;
+extern unsigned long lastLocalStepMs;
 
 // Track names
 extern const char* trackNames[];

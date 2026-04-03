@@ -99,7 +99,7 @@ static void lvgl_task(void* arg) {
             lvgl_port_unlock();
         }
         // 10ms period — faster LVGL tick for snappier pad/step response.
-        // At 16MHz PCLK, LCD refresh ~47Hz so LVGL can run ahead.
+        // With the conservative 16MHz large-porch profile the display refresh stays near 17.5Hz.
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(10));
     }
 }
