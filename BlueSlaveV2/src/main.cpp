@@ -218,7 +218,7 @@ static uint32_t encoder_poll_interval_ms(Screen screen) {
         case SCREEN_SEQUENCER:
         case SCREEN_SEQ_CIRCLE:
             // Touch-intensive screens: free some I2C bandwidth for GT911 polling.
-            return 14;
+            return Config::TOUCH_ENCODER_READ_MS;
         default:
             return Config::ENCODER_READ_MS;
     }
@@ -778,12 +778,14 @@ static inline uint32_t xorshift32() {
 
 // Returns a humanization offset in ms: range [-maxJitterMs, +maxJitterMs]
 static int microtiming_jitter(int maxJitterMs) {
+    if (!Config::ENABLE_MICROTIMING) return 0;
     if (maxJitterMs <= 0) return 0;
     return (int)(xorshift32() % (2 * maxJitterMs + 1)) - maxJitterMs;
 }
 
 // Velocity humanization: ±5% random variation
 static int microtiming_velocity(int velocity) {
+    if (!Config::ENABLE_MICROTIMING) return constrain(velocity, 1, 127);
     int jitter = (int)(xorshift32() % 13) - 6;  // -6 to +6
     return constrain(velocity + jitter, 1, 127);
 }

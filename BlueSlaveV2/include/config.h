@@ -34,15 +34,18 @@
 #define LCD_PCLK       GPIO_NUM_7
 
 // RGB performance profile:
-// 0 = stable (16MHz), 1 = balanced (21MHz). If you see artifacts, set to 0.
+// 0 = stable (16MHz), 1 = balanced (21MHz), 2 = low-latency demo (24MHz).
+// If you see artifacts, drop one profile level.
 #ifndef LCD_PERF_PROFILE
-#define LCD_PERF_PROFILE 1
+#define LCD_PERF_PROFILE 2
 #endif
 
 #if LCD_PERF_PROFILE == 0
 #define LCD_PCLK_HZ    (16 * 1000 * 1000)
-#else
+#elif LCD_PERF_PROFILE == 1
 #define LCD_PCLK_HZ    (21 * 1000 * 1000)
+#else
+#define LCD_PCLK_HZ    (24 * 1000 * 1000)
 #endif
 
 // RGB565 Data (16-bit)
@@ -64,7 +67,8 @@
 #define LCD_R7         GPIO_NUM_40
 
 // LCD Timing (ST7262) — large porch profile known to produce a stable image with this RGB driver.
-// With 16MHz this is about 17.5Hz; with 21MHz about 22.9Hz.
+// Approx refresh with this porch set:
+// 16MHz=17.5Hz, 21MHz=22.9Hz, 24MHz=26.2Hz.
 #define LCD_HSYNC_PULSE_WIDTH  162
 #define LCD_HSYNC_BACK_PORCH   152
 #define LCD_HSYNC_FRONT_PORCH  48
@@ -175,6 +179,8 @@ namespace Config {
     constexpr uint32_t LED_FLASH_MS       = 100;
     constexpr uint32_t SCREEN_UPDATE_MS   = 12;  // ~83fps UI update — smoother step animation
     constexpr uint32_t UDP_CHECK_MS       = 30000;
+    constexpr uint32_t TOUCH_ENCODER_READ_MS = 20;  // slower encoder poll in touch-heavy screens to free I2C bus
+    constexpr bool ENABLE_MICROTIMING = false;      // disable random jitter for tighter live/demo response
 
     // Touch tuning (Waveshare 7B). Fine tune offsets if hitboxes feel shifted.
     constexpr bool TOUCH_SWAP_XY = false;

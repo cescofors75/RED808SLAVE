@@ -37,7 +37,7 @@
 // =============================================================================
 #define LV_ATTRIBUTE_FAST_MEM   IRAM_ATTR
 #define LV_DISP_DEF_REFR_PERIOD 2    // 2ms tick — fast vsync-gated rendering
-#define LV_INDEV_DEF_READ_PERIOD 10   // lower touch read latency (was 30ms)
+#define LV_INDEV_DEF_READ_PERIOD 6    // aggressive touch sampling for live/demo
 #define LV_USE_PERF_MONITOR   0
 #define LV_USE_MEM_MONITOR    0
 
