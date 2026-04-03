@@ -625,11 +625,10 @@ void ui_create_live_screen() {
         lv_obj_set_style_bg_color(pad, RED808_SURFACE, 0);
         lv_obj_set_style_bg_opa(pad, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(pad, 12, 0);
-        lv_obj_set_style_border_width(pad, 0, 0);
-        lv_obj_set_style_shadow_color(pad, lv_color_black(), 0);
-        lv_obj_set_style_shadow_width(pad, 20, 0);
-        lv_obj_set_style_shadow_opa(pad, LV_OPA_40, 0);
-        lv_obj_set_style_shadow_ofs_y(pad, 4, 0);
+        lv_obj_set_style_border_width(pad, 1, 0);
+        lv_obj_set_style_border_color(pad, RED808_BORDER, 0);
+        lv_obj_set_style_shadow_width(pad, 0, 0);
+        lv_obj_set_style_shadow_opa(pad, LV_OPA_TRANSP, 0);
         lv_obj_set_style_pad_all(pad, 0, 0);
 
         // Colored accent bar on left edge
@@ -680,10 +679,8 @@ void ui_create_live_screen() {
     lv_obj_set_size(live_sync_btn, 120, 34);
     lv_obj_set_pos(live_sync_btn, (1024 - 120) / 2, LIVE_PAD_AREA_TOP - 42);
     lv_obj_clear_flag(live_sync_btn, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(live_sync_btn, RED808_SURFACE, 0);
-    lv_obj_set_style_bg_opa(live_sync_btn, LV_OPA_COVER, 0);
+    apply_stable_button_style(live_sync_btn, RED808_SURFACE, lv_color_hex(0xFFD700));
     lv_obj_set_style_radius(live_sync_btn, 8, 0);
-    lv_obj_set_style_border_color(live_sync_btn, lv_color_hex(0xFFD700), 0);
     lv_obj_set_style_border_width(live_sync_btn, 1, 0);
     lv_obj_add_event_cb(live_sync_btn, live_sync_cb, LV_EVENT_PRESSED, NULL);
 
@@ -715,8 +712,8 @@ void ui_create_live_screen() {
         lv_obj_t* btn_plus = lv_btn_create(scr_live);
         lv_obj_set_size(btn_plus, ctrl_w, btn_h);
         lv_obj_set_pos(btn_plus, ctrl_x, y_start);
-        lv_obj_set_style_bg_color(btn_plus, RED808_SURFACE, 0);
-        lv_obj_set_style_bg_color(btn_plus, RED808_ACCENT, LV_STATE_PRESSED);
+        apply_stable_button_style(btn_plus, RED808_SURFACE, RED808_ACCENT);
+        lv_obj_set_style_border_width(btn_plus, 2, 0);
         lv_obj_set_style_radius(btn_plus, 10, 0);
         lv_obj_add_event_cb(btn_plus, ratchet_plus_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_t* lbl_plus = lv_label_create(btn_plus);
@@ -737,8 +734,8 @@ void ui_create_live_screen() {
         lv_obj_t* btn_minus = lv_btn_create(scr_live);
         lv_obj_set_size(btn_minus, ctrl_w, btn_h);
         lv_obj_set_pos(btn_minus, ctrl_x, y_start + btn_h + 12 + label_h + 12);
-        lv_obj_set_style_bg_color(btn_minus, RED808_SURFACE, 0);
-        lv_obj_set_style_bg_color(btn_minus, RED808_ACCENT, LV_STATE_PRESSED);
+        apply_stable_button_style(btn_minus, RED808_SURFACE, RED808_ACCENT);
+        lv_obj_set_style_border_width(btn_minus, 2, 0);
         lv_obj_set_style_radius(btn_minus, 10, 0);
         lv_obj_add_event_cb(btn_minus, ratchet_minus_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_t* lbl_minus = lv_label_create(btn_minus);
@@ -777,6 +774,9 @@ void ui_update_live_pads() {
 
     for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
         bool active = livePadPressed[pad];
+        if (!active && millis() < livePadFlashUntilMs[pad]) {
+            active = true;
+        }
         if (livePadSyncMode && isPlaying) {
             if (patterns[currentPattern].steps[pad][currentStep]) {
                 active = true;
@@ -804,12 +804,11 @@ void ui_update_live_pads() {
             lv_obj_set_style_bg_color(live_pads[pad], inst_colors[pad], 0);
             lv_obj_set_style_bg_opa(live_pads[pad], LV_OPA_80, 0);
             lv_obj_set_style_border_color(live_pads[pad], inst_colors[pad], 0);
-            lv_obj_set_style_border_width(live_pads[pad], 4, 0);
+            lv_obj_set_style_border_width(live_pads[pad], 3, 0);
             lv_obj_set_style_border_opa(live_pads[pad], LV_OPA_COVER, 0);
-            lv_obj_set_style_shadow_color(live_pads[pad], inst_colors[pad], 0);
-            lv_obj_set_style_shadow_width(live_pads[pad], 20, 0);
-            lv_obj_set_style_shadow_spread(live_pads[pad], 4, 0);
-            lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_80, 0);
+            lv_obj_set_style_shadow_width(live_pads[pad], 0, 0);
+            lv_obj_set_style_shadow_spread(live_pads[pad], 0, 0);
+            lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_TRANSP, 0);
             if (live_pad_names[pad])
                 lv_obj_set_style_text_color(live_pad_names[pad], lv_color_white(), 0);
             if (live_pad_desc[pad])
@@ -818,12 +817,12 @@ void ui_update_live_pads() {
             // === NEON CORONA OFF ===
             lv_obj_set_style_bg_color(live_pads[pad], RED808_SURFACE, 0);
             lv_obj_set_style_bg_opa(live_pads[pad], LV_OPA_COVER, 0);
-            lv_obj_set_style_border_width(live_pads[pad], 0, 0);
-            lv_obj_set_style_border_opa(live_pads[pad], LV_OPA_TRANSP, 0);
-            lv_obj_set_style_shadow_color(live_pads[pad], lv_color_black(), 0);
-            lv_obj_set_style_shadow_width(live_pads[pad], 8, 0);
+            lv_obj_set_style_border_width(live_pads[pad], 1, 0);
+            lv_obj_set_style_border_color(live_pads[pad], RED808_BORDER, 0);
+            lv_obj_set_style_border_opa(live_pads[pad], LV_OPA_70, 0);
+            lv_obj_set_style_shadow_width(live_pads[pad], 0, 0);
             lv_obj_set_style_shadow_spread(live_pads[pad], 0, 0);
-            lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_30, 0);
+            lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_TRANSP, 0);
             if (live_pad_names[pad])
                 lv_obj_set_style_text_color(live_pad_names[pad], inst_colors[pad], 0);
             if (live_pad_desc[pad])

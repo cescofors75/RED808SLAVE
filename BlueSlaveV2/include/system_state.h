@@ -111,6 +111,7 @@ extern int trackVolumes[];
 extern bool trackMuted[];
 extern bool trackSolo[];
 extern bool livePadPressed[];
+extern unsigned long livePadFlashUntilMs[];
 extern bool byteButtonLivePressed[];
 extern uint8_t prevByteButtonState;  // ByteButton bitmask state for edge detection
 extern volatile uint32_t pendingLivePadTriggerMask;

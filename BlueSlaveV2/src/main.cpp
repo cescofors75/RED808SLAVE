@@ -143,6 +143,8 @@ uint8_t encoderLEDColors[Config::MAX_TRACKS][3] = {
 unsigned long liveScreenEnteredMs = 0;
 static constexpr unsigned long LIVE_TOUCH_GUARD_MS = 500;
 static constexpr unsigned long TOUCH_RELEASE_DEBOUNCE_MS = 40;  // ignore brief touch gaps (GT911 bounce)
+static constexpr unsigned long LIVE_PAD_REPEAT_INTERVAL_MS = 75;
+static constexpr unsigned long LIVE_PAD_FLASH_MS = 90;
 static unsigned long livePadReleaseMs[Config::MAX_SAMPLES] = {}; // when each pad last went untouched
 
 // Timing
@@ -157,7 +159,10 @@ unsigned long lastLocalStepMs  = 0;   // last local-clock step advance (independ
 int32_t prevM5Counter[Config::MAX_TRACKS];
 uint16_t prevDFValue[DFROBOT_ENCODER_COUNT];
 unsigned long lastLivePadTriggerMs[Config::MAX_SAMPLES];
+unsigned long livePadFlashUntilMs[Config::MAX_SAMPLES];
 unsigned long livePadHoldStartMs[Config::MAX_SAMPLES];
+static uint8_t livePadRemainingRepeats[Config::MAX_SAMPLES] = {};
+static unsigned long livePadNextRepeatMs[Config::MAX_SAMPLES] = {};
 uint8_t prevByteButtonState = 0;
 bool byteButtonLivePressed[BYTEBUTTON_BUTTONS] = {false, false, false, false, false, false, false, false};
 uint32_t byteButtonLedCache[BYTEBUTTON_BUTTONS + 1] = {};
@@ -369,7 +374,11 @@ static void handleLivePadTouchMatrix(unsigned long now) {
                 // Rising edge — new press
                 pendingLivePadTriggerMask |= (1UL << pad);
                 lastLivePadTriggerMs[pad] = now;
+                livePadFlashUntilMs[pad] = now + LIVE_PAD_FLASH_MS;
                 livePadHoldStartMs[pad] = now;
+                int repeatCount = constrain((int)livePadRepeatCount, 1, 16);
+                livePadRemainingRepeats[pad] = (uint8_t)(repeatCount - 1);
+                livePadNextRepeatMs[pad] = now + LIVE_PAD_REPEAT_INTERVAL_MS;
                 livePadPressed[pad] = true;
                 anyChanged = true;
             }
@@ -491,7 +500,10 @@ void initState() {
     for (int i = 0; i < Config::MAX_SAMPLES; i++) {
         livePadPressed[i] = false;
         lastLivePadTriggerMs[i] = 0;
+        livePadFlashUntilMs[i] = 0;
         livePadHoldStartMs[i] = 0;
+        livePadRemainingRepeats[i] = 0;
+        livePadNextRepeatMs[i] = 0;
     }
     for (int p = 0; p < Config::MAX_PATTERNS; p++) {
         memset(patterns[p].steps, 0, sizeof(patterns[p].steps));
@@ -1944,18 +1956,32 @@ void loop() {
     if (pendingMask != 0) {
         pendingLivePadTriggerMask = 0;
         // Send UDP triggers FIRST (lowest latency to audio)
-        int rpt = livePadRepeatCount;  // read volatile once
         for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
             if ((pendingMask & (1UL << pad)) == 0) continue;
-            for (int r = 0; r < rpt; r++) {
-                sendLivePadTrigger(pad, padVelocity);
-            }
+            sendLivePadTrigger(pad, padVelocity);
             lastLivePadTriggerMs[pad] = now;
+            livePadFlashUntilMs[pad] = now + LIVE_PAD_FLASH_MS;
         }
         // Mark visual dirty — LVGL task picks it up within ~10ms (no lock contention)
         if (currentScreen == SCREEN_LIVE) {
             livePadsVisualDirty = true;
         }
+    }
+
+    bool repeatedPadTrigger = false;
+    for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
+        if (livePadRemainingRepeats[pad] == 0) continue;
+        if (now < livePadNextRepeatMs[pad]) continue;
+
+        sendLivePadTrigger(pad, padVelocity);
+        lastLivePadTriggerMs[pad] = now;
+        livePadFlashUntilMs[pad] = now + LIVE_PAD_FLASH_MS;
+        livePadRemainingRepeats[pad]--;
+        livePadNextRepeatMs[pad] = now + LIVE_PAD_REPEAT_INTERVAL_MS;
+        repeatedPadTrigger = true;
+    }
+    if (repeatedPadTrigger && currentScreen == SCREEN_LIVE) {
+        livePadsVisualDirty = true;
     }
 
     // === NETWORK + STATUS ===
