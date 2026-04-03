@@ -3626,7 +3626,7 @@ void ui_create_performance_screen() {
         "Pattern",
         "Transport",
         "Links",
-        "Touch mode"
+        "Touch/LCD"
     };
 
     int row_y = 42;
@@ -3670,7 +3670,14 @@ void ui_update_performance() {
                           masterConnected ? "MASTER" : "WAIT");
     lv_obj_set_style_text_color(perf_runtime_values[6],
         (wifiConnected && udpConnected) ? (masterConnected ? RED808_SUCCESS : RED808_WARNING) : RED808_ERROR, 0);
-    lv_label_set_text(perf_runtime_values[7], livePadSyncMode ? "Live Pads synced" : "Direct touch pads");
+
+    const uint32_t h_total = SCREEN_WIDTH + LCD_HSYNC_PULSE_WIDTH + LCD_HSYNC_BACK_PORCH + LCD_HSYNC_FRONT_PORCH;
+    const uint32_t v_total = SCREEN_HEIGHT + LCD_VSYNC_PULSE_WIDTH + LCD_VSYNC_BACK_PORCH + LCD_VSYNC_FRONT_PORCH;
+    const float panel_hz = (float)LCD_PCLK_HZ / (float)(h_total * v_total);
+    lv_label_set_text_fmt(perf_runtime_values[7], "touch:%dms ui:%lums lcd:%.1fHz",
+                          (int)LV_INDEV_DEF_READ_PERIOD,
+                          (unsigned long)uiLastIntervalMs,
+                          (double)panel_hz);
     last_ms = lv_tick_get();
 }
 

@@ -76,10 +76,16 @@ static void touch_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
         data->state = LV_INDEV_STATE_RELEASED;
         return;
     }
-    TouchPoint tp = gt911_read();
-    data->state = tp.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
-    data->point.x = tp.x;
-    data->point.y = tp.y;
+
+    TouchPoint points[1] = {};
+    uint8_t count = gt911_get_points(points, 1);
+    if (count > 0 && points[0].pressed) {
+        data->state = LV_INDEV_STATE_PRESSED;
+        data->point.x = points[0].x;
+        data->point.y = points[0].y;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
 }
 
 // LVGL FreeRTOS task on core 1
@@ -89,6 +95,10 @@ static void lvgl_task(void* arg) {
 
     TickType_t last_wake = xTaskGetTickCount();
     while (true) {
+        // Poll touch once per cycle so LVGL indev callback can read from cache
+        // without doing I2C transactions inside lv_timer_handler.
+        gt911_poll();
+
         if (lvgl_port_lock(15)) {
             // Check if live pads need visual refresh (set by Core 0 loop)
             if (livePadsVisualDirty && currentScreen == SCREEN_LIVE) {

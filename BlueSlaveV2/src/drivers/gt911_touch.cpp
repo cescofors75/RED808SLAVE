@@ -269,6 +269,11 @@ TouchPoint gt911_read() {
     return tp;
 }
 
+void gt911_poll() {
+    if (!gt911_ok) return;
+    (void)gt911_read();
+}
+
 uint8_t gt911_get_points(TouchPoint* points, uint8_t maxPoints) {
     if (!points || maxPoints == 0) return 0;
 

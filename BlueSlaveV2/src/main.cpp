@@ -212,6 +212,18 @@ static uint32_t ui_refresh_interval_ms(Screen screen, bool playing_now) {
     }
 }
 
+static uint32_t encoder_poll_interval_ms(Screen screen) {
+    switch (screen) {
+        case SCREEN_LIVE:
+        case SCREEN_SEQUENCER:
+        case SCREEN_SEQ_CIRCLE:
+            // Touch-intensive screens: free some I2C bandwidth for GT911 polling.
+            return 14;
+        default:
+            return Config::ENCODER_READ_MS;
+    }
+}
+
 // =============================================================================
 // FORWARD DECLARATIONS
 // =============================================================================
@@ -1961,7 +1973,8 @@ static void encoder_task(void* arg) {
         handleDFRobotEncoders();
         handleAnalogEncoder();
         handleByteButton();
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(Config::ENCODER_READ_MS));
+        uint32_t period = encoder_poll_interval_ms(currentScreen);
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(period));
     }
 }
 

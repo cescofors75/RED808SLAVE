@@ -15,4 +15,5 @@ struct TouchPoint {
 void gt911_init();
 bool gt911_is_ready();
 TouchPoint gt911_read();
+void gt911_poll();
 uint8_t gt911_get_points(TouchPoint* points, uint8_t maxPoints);
