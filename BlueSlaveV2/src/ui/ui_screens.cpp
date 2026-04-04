@@ -1055,33 +1055,19 @@ void ui_update_live_pads() {
         bool active = (state_mask & (1UL << pad)) != 0;
 
         if (active) {
-            // === NEON CORONA ON ===
-            lv_obj_set_style_bg_color(live_pads[pad], inst_colors[pad], 0);
-            lv_obj_set_style_bg_opa(live_pads[pad], LV_OPA_80, 0);
+            // === CORONA ONLY — border lights up, bg stays dark (faster LVGL render) ===
             lv_obj_set_style_border_color(live_pads[pad], inst_colors[pad], 0);
-            lv_obj_set_style_border_width(live_pads[pad], 3, 0);
+            lv_obj_set_style_border_width(live_pads[pad], 4, 0);
             lv_obj_set_style_border_opa(live_pads[pad], LV_OPA_COVER, 0);
-            lv_obj_set_style_shadow_width(live_pads[pad], 0, 0);
-            lv_obj_set_style_shadow_spread(live_pads[pad], 0, 0);
-            lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_TRANSP, 0);
             if (live_pad_names[pad])
                 lv_obj_set_style_text_color(live_pad_names[pad], lv_color_white(), 0);
-            if (live_pad_desc[pad])
-                lv_obj_set_style_text_color(live_pad_desc[pad], lv_color_white(), 0);
         } else {
-            // === NEON CORONA OFF ===
-            lv_obj_set_style_bg_color(live_pads[pad], RED808_SURFACE, 0);
-            lv_obj_set_style_bg_opa(live_pads[pad], LV_OPA_COVER, 0);
+            // === CORONA OFF ===
             lv_obj_set_style_border_width(live_pads[pad], 1, 0);
             lv_obj_set_style_border_color(live_pads[pad], RED808_BORDER, 0);
             lv_obj_set_style_border_opa(live_pads[pad], LV_OPA_70, 0);
-            lv_obj_set_style_shadow_width(live_pads[pad], 0, 0);
-            lv_obj_set_style_shadow_spread(live_pads[pad], 0, 0);
-            lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_TRANSP, 0);
             if (live_pad_names[pad])
                 lv_obj_set_style_text_color(live_pad_names[pad], inst_colors[pad], 0);
-            if (live_pad_desc[pad])
-                lv_obj_set_style_text_color(live_pad_desc[pad], RED808_TEXT_DIM, 0);
         }
     }
 
@@ -3782,29 +3768,10 @@ static void boot_timer_cb(lv_timer_t* timer) {
         boot_state++;
 
         if (boot_state == kBootLineCount) {
-            // All lines shown — stop timer, show cursor + tap-to-continue
+            // All lines shown — auto-navigate to menu (no tap needed)
             lv_timer_del(timer);
             boot_timer = NULL;
-            if (boot_cursor_lbl) {
-                lv_obj_clear_flag(boot_cursor_lbl, LV_OBJ_FLAG_HIDDEN);
-                lv_anim_t a;
-                lv_anim_init(&a);
-                lv_anim_set_var(&a, boot_cursor_lbl);
-                lv_anim_set_exec_cb(&a, anim_opa_cb);
-                lv_anim_set_values(&a, LV_OPA_COVER, LV_OPA_TRANSP);
-                lv_anim_set_time(&a, 500);
-                lv_anim_set_playback_time(&a, 500);
-                lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-                lv_anim_start(&a);
-            }
-            if (boot_status_lbl) {
-                lv_label_set_text(boot_status_lbl,
-                    "[ BOOT COMPLETE ]    TOUCH ANYWHERE TO CONTINUE");
-                lv_obj_set_style_text_opa(boot_status_lbl, LV_OPA_COVER, 0);
-                lv_obj_set_style_text_color(boot_status_lbl, lv_color_hex(0x00D4FF), 0);
-            }
-            // Enable tap-to-dismiss on the screen
-            lv_obj_add_event_cb(scr_boot, boot_dismiss_cb, LV_EVENT_PRESSED, NULL);
+            nav_to(SCREEN_MENU, scr_menu);
         }
     }
 }
@@ -3902,7 +3869,7 @@ void ui_create_boot_screen() {
     lv_obj_clear_flag(bot_line, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
     boot_state = 0;
-    boot_timer = lv_timer_create(boot_timer_cb, 80, NULL);
+    boot_timer = lv_timer_create(boot_timer_cb, 40, NULL);
 }
 
 // ============================================================================

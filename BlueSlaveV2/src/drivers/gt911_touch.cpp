@@ -210,11 +210,19 @@ TouchPoint gt911_read() {
     uint8_t touchCount = status & 0x0F;
     bool bufferReady = (status & 0x80) != 0;
 
+    // No new scan from GT911 yet — keep cache with previous valid data.
+    // Clearing cache here would cause phantom "release" events between GT911
+    // internal samples (~100Hz), making debounce fire on every gap.
+    if (!bufferReady) {
+        i2c_unlock();
+        return tp;
+    }
+
     static bool prev_valid = false;
     static int32_t prev_x = 0;
     static int32_t prev_y = 0;
 
-    if (bufferReady && touchCount > 0 && touchCount <= Config::TOUCH_MAX_POINTS) {
+    if (touchCount > 0 && touchCount <= Config::TOUCH_MAX_POINTS) {
         uint8_t data[Config::TOUCH_MAX_POINTS * 8] = {};
         uint8_t read_len = touchCount * 8;
         if (gt911_read_reg(GT911_REG_POINT1, data, read_len)) {

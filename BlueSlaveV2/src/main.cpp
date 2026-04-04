@@ -147,10 +147,10 @@ uint8_t encoderLEDColors[Config::MAX_TRACKS][3] = {
 
 // Live pad touch guard (prevent phantom triggers on screen enter)
 unsigned long liveScreenEnteredMs = 0;
-static constexpr unsigned long LIVE_TOUCH_GUARD_MS = 500;
-static constexpr unsigned long TOUCH_RELEASE_DEBOUNCE_MS = 40;  // ignore brief touch gaps (GT911 bounce)
+static constexpr unsigned long LIVE_TOUCH_GUARD_MS = 150;
+static constexpr unsigned long TOUCH_RELEASE_DEBOUNCE_MS = 8;  // minimal debounce for tremolo drumming
 static constexpr unsigned long LIVE_PAD_REPEAT_INTERVAL_MS = 75;
-static constexpr unsigned long LIVE_PAD_FLASH_MS = 90;
+static constexpr unsigned long LIVE_PAD_FLASH_MS = 25;
 static unsigned long livePadReleaseMs[Config::MAX_SAMPLES] = {}; // when each pad last went untouched
 
 // Timing
@@ -1953,9 +1953,10 @@ void setup() {
     }
     RED808_LOG_PRINTF("[HEAP] After UI: %d bytes  PSRAM: %d bytes\n", ESP.getFreeHeap(), ESP.getFreePsram());
 
-    // 11. Encoder task — dedicated FreeRTOS task for I2C encoder polling
-    xTaskCreatePinnedToCore(encoder_task, "enc", 6144, NULL, 2, NULL, 0);
-    RED808_LOG_PRINTLN("[ENC] Encoder task started (Core 0, pri 2)");
+    // 11. Encoder task — pri 1 = same as loop → round-robin time-slicing
+    //     loop() no longer starved; gets CPU every 1ms tick for touch triggers
+    xTaskCreatePinnedToCore(encoder_task, "enc", 6144, NULL, 1, NULL, 0);
+    RED808_LOG_PRINTLN("[ENC] Encoder task started (Core 0, pri 1)");
 
     // 12. Touch task — highest I2C priority, preempts encoder via priority inheritance
     xTaskCreatePinnedToCore(touch_task, "touch", 4096, NULL, 3, NULL, 0);
@@ -1976,19 +1977,18 @@ void setup() {
 
 static void touch_task(void* arg) {
     (void)arg;
-    TickType_t last_wake = xTaskGetTickCount();
     while (true) {
-        // Only read when GT911 signals new data (INT pin = LOW)
-        if (digitalRead(GT911_INT_PIN) == LOW) {
-            gt911_poll();
-        }
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(2));
+        // Poll unconditionally — GT911 status register handles "no new data"
+        // internally (returns immediately when !bufferReady).
+        // INT pin polling was unreliable (pulse mode, missed >99% of events).
+        gt911_poll();
+        vTaskDelay(pdMS_TO_TICKS(2));  // ~500Hz poll, GT911 updates at ~100Hz
     }
 }
 
 // =============================================================================
-// ENCODER TASK (Core 0, priority 2 — dedicated I2C polling)
-// Runs independently of loop(), so I2C reads never block network/UI/touch.
+// ENCODER TASK (Core 0, priority 1 — same as loop, round-robin)
+// taskYIELD() between modules gives loop() immediate CPU for touch triggers.
 // =============================================================================
 
 static void encoder_task(void* arg) {
@@ -1996,7 +1996,9 @@ static void encoder_task(void* arg) {
     TickType_t last_wake = xTaskGetTickCount();
     while (true) {
         handleM5Encoders();
+        taskYIELD();  // let loop() process touch triggers between I2C batches
         handleDFRobotEncoders();
+        taskYIELD();
         handleAnalogEncoder();
         handleByteButton();
         uint32_t period = encoder_poll_interval_ms(currentScreen);
