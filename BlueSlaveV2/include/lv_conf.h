@@ -36,7 +36,7 @@
 // PERFORMANCE
 // =============================================================================
 #define LV_ATTRIBUTE_FAST_MEM   IRAM_ATTR
-#define LV_DISP_DEF_REFR_PERIOD 16   // 16ms — matches panel refresh; avoids PSRAM bus flooding
+#define LV_DISP_DEF_REFR_PERIOD 10   // 10ms — Waveshare recommended; bounce buffers protect PSRAM bus
 #define LV_INDEV_DEF_READ_PERIOD 10   // 100Hz touch — responsive without I2C contention
 #define LV_USE_PERF_MONITOR   0
 #define LV_USE_MEM_MONITOR    0

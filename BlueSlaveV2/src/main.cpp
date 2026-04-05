@@ -1880,11 +1880,10 @@ void setup() {
     delay(10);
     RED808_LOG_PRINTLN("[I2C] Bus initialized");
 
-    // 2. IO Extension (CH32V003) - backlight, resets
+    // 2. IO Extension (CH32V003) - resets, backlight stays OFF until first frame
     io_ext_init();
-    io_ext_backlight_on();
     delay(10);
-    RED808_LOG_PRINTLN("[IO] CH32V003 initialized, backlight ON");
+    RED808_LOG_PRINTLN("[IO] CH32V003 initialized, backlight OFF (deferred)");
 
     // 3. LCD panel
     RED808_LOG_PRINTLN("[LCD] Initializing RGB panel...");
@@ -1948,9 +1947,17 @@ void setup() {
         currentScreen = SCREEN_BOOT;
         lv_scr_load(scr_boot);
 
+        // Force first frame render so framebuffers contain the boot screen
+        lv_timer_handler();
+        lv_timer_handler();  // two passes: layout + flush
+
         lvgl_port_unlock();
         RED808_LOG_PRINTLN("[UI] All screens created");
     }
+
+    // Backlight ON only after boot screen is rendered — eliminates PSRAM garbage flicker
+    io_ext_backlight_on();
+    RED808_LOG_PRINTLN("[BL] Backlight ON (boot screen visible)");
     RED808_LOG_PRINTF("[HEAP] After UI: %d bytes  PSRAM: %d bytes\n", ESP.getFreeHeap(), ESP.getFreePsram());
 
     // 11. Encoder task — pri 1 = same as loop → round-robin time-slicing

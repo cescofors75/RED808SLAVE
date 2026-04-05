@@ -5,6 +5,8 @@
 #include "rgb_lcd.h"
 #include "io_extension.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include <string.h>
 
 static const char* TAG = "RGB_LCD";
 static esp_lcd_panel_handle_t panel_handle = NULL;
@@ -60,6 +62,19 @@ esp_lcd_panel_handle_t rgb_lcd_init() {
     panel_config.bounce_buffer_size_px = LCD_BOUNCE_BUF;
 
     ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_config, &panel_handle));
+
+    // Clear framebuffers to black BEFORE starting the panel.
+    // Prevents random PSRAM content from being displayed during boot.
+    {
+        void* fb0 = NULL;
+        void* fb1 = NULL;
+        esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 2, &fb0, &fb1);
+        const size_t fb_size = SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(uint16_t);
+        if (fb0) memset(fb0, 0, fb_size);
+        if (fb1) memset(fb1, 0, fb_size);
+        ESP_LOGI(TAG, "Framebuffers cleared to black (%d bytes each)", fb_size);
+    }
+
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
 

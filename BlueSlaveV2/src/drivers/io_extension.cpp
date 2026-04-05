@@ -15,8 +15,9 @@ static uint8_t output_state = 0xFF;
 void io_ext_init() {
     // Configure all pins as outputs (bit=1 means output on CH32V003)
     i2c_write_byte(IO_EXT_ADDR, CH32V003_DIRECTION_REG, 0xFF);
-    // All outputs high initially
-    output_state = 0xFF;
+    // All outputs high EXCEPT backlight (bit 2) — keep backlight OFF during init
+    // to avoid showing random PSRAM framebuffer content before LVGL renders.
+    output_state = 0xFF & ~(1 << EXIO_BL);
     i2c_write_byte(IO_EXT_ADDR, CH32V003_OUTPUT_REG, output_state);
 }
 
