@@ -37,7 +37,7 @@
 // 0 = stable (16MHz), 1 = balanced (21MHz), 2 = low-latency demo (24MHz).
 // If you see artifacts, drop one profile level.
 #ifndef LCD_PERF_PROFILE
-#define LCD_PERF_PROFILE 2
+#define LCD_PERF_PROFILE 0
 #endif
 
 #if LCD_PERF_PROFILE == 0

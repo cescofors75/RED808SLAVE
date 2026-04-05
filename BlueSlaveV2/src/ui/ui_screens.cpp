@@ -3786,12 +3786,9 @@ void ui_create_boot_screen() {
     lv_obj_t* top_line = lv_obj_create(scr_boot);
     lv_obj_set_size(top_line, 1024, 2);
     lv_obj_set_pos(top_line, 0, 0);
-    lv_obj_set_style_bg_color(top_line, lv_color_hex(0x00D4FF), 0);
+    lv_obj_set_style_bg_color(top_line, lv_color_hex(0x0066AA), 0);
     lv_obj_set_style_bg_opa(top_line, LV_OPA_60, 0);
     lv_obj_set_style_border_width(top_line, 0, 0);
-    lv_obj_set_style_shadow_width(top_line, 12, 0);
-    lv_obj_set_style_shadow_color(top_line, lv_color_hex(0x00D4FF), 0);
-    lv_obj_set_style_shadow_opa(top_line, LV_OPA_30, 0);
     lv_obj_clear_flag(top_line, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
     // ── Brand name (large, centered) ──
@@ -3806,7 +3803,7 @@ void ui_create_boot_screen() {
     lv_obj_t* subtitle = lv_label_create(scr_boot);
     lv_label_set_text(subtitle, "SLAVE CONTROLLER  V6");
     lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(subtitle, lv_color_hex(0x39FF14), 0);
+    lv_obj_set_style_text_color(subtitle, lv_color_hex(0x66AADD), 0);
     lv_obj_set_style_text_letter_space(subtitle, 4, 0);
     lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 72);
 
@@ -3824,7 +3821,7 @@ void ui_create_boot_screen() {
         lv_obj_t* lbl = lv_label_create(scr_boot);
         lv_label_set_text(lbl, kBootLines[i]);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0x39FF14), 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0x4488CC), 0);
         lv_obj_set_pos(lbl, 42, 110 + i * 27);
         lv_obj_add_flag(lbl, LV_OBJ_FLAG_HIDDEN);
         boot_text_lines[i] = lbl;
@@ -3834,7 +3831,7 @@ void ui_create_boot_screen() {
     boot_cursor_lbl = lv_label_create(scr_boot);
     lv_label_set_text(boot_cursor_lbl, "root@blue808:~$ _");
     lv_obj_set_style_text_font(boot_cursor_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(boot_cursor_lbl, lv_color_hex(0x39FF14), 0);
+    lv_obj_set_style_text_color(boot_cursor_lbl, lv_color_hex(0x66AADD), 0);
     lv_obj_set_pos(boot_cursor_lbl, 42, 110 + kBootLineCount * 27);
     lv_obj_add_flag(boot_cursor_lbl, LV_OBJ_FLAG_HIDDEN);
 
@@ -3863,7 +3860,7 @@ void ui_create_boot_screen() {
     lv_obj_t* bot_line = lv_obj_create(scr_boot);
     lv_obj_set_size(bot_line, 1024, 2);
     lv_obj_set_pos(bot_line, 0, 598);
-    lv_obj_set_style_bg_color(bot_line, lv_color_hex(0x00D4FF), 0);
+    lv_obj_set_style_bg_color(bot_line, lv_color_hex(0x0066AA), 0);
     lv_obj_set_style_bg_opa(bot_line, LV_OPA_40, 0);
     lv_obj_set_style_border_width(bot_line, 0, 0);
     lv_obj_clear_flag(bot_line, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
