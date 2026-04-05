@@ -132,6 +132,7 @@ const char* kitNames[] = {"808 CLASSIC", "808 BRIGHT", "808 DRY"};
 WiFiUDP udp;
 M5ROTATE8 m5encoders[M5_ENCODER_MODULES];
 bool m5encoderConnected[M5_ENCODER_MODULES] = {false, false};
+uint8_t m5FirmwareVersion[M5_ENCODER_MODULES] = {0, 0};  // stored at init for I2C health check
 DFRobot_VisualRotaryEncoder_I2C* dfEncoders[DFROBOT_ENCODER_COUNT] = {nullptr, nullptr};
 bool dfEncoderConnected[DFROBOT_ENCODER_COUNT] = {false, false};
 bool byteButtonConnected = false;
@@ -195,7 +196,7 @@ static uint32_t ui_refresh_interval_ms(Screen screen, bool playing_now) {
         case SCREEN_SEQ_CIRCLE:
             return playing_now ? 16 : 50;
         case SCREEN_VOLUMES:
-            return 40;
+            return 16;
         case SCREEN_FILTERS:
             return 50;
         case SCREEN_PATTERNS:
@@ -253,6 +254,7 @@ void handleAnalogEncoder();
 void updateUI();
 static void encoder_task(void* arg);
 static void touch_task(void* arg);
+static void pad_trigger_task(void* arg);
 
 // =============================================================================
 // NVS PERSISTENCE — save/load user settings across reboots
@@ -1076,6 +1078,8 @@ void scanI2CHub() {
                         m5encoders[m5Found].resetCounter(e);
                     }
                 }
+                m5FirmwareVersion[m5Found] = m5encoders[m5Found].getVersion();
+                RED808_LOG_PRINTF("[I2C] M5 #%d firmware v%d\n", m5Found + 1, m5FirmwareVersion[m5Found]);
                 i2c_hub_deselect_raw();
                 i2c_unlock();
             }
@@ -1227,7 +1231,7 @@ void updateByteButtonLeds() {
 
 void updateTrackEncoderLED(int track) {
     int moduleIndex = track / ENCODERS_PER_MODULE;
-    int encoderIndex = track % ENCODERS_PER_MODULE;
+    int encoderIndex = (ENCODERS_PER_MODULE - 1) - (track % ENCODERS_PER_MODULE);  // mirror
     if (!m5encoderConnected[moduleIndex]) return;
 
     int ch = m5HubChannel[moduleIndex];
@@ -1371,53 +1375,104 @@ void setOceanBlueLeds() {
 }
 
 void handleM5Encoders() {
-    static bool prevBtnState[Config::MAX_TRACKS] = {};
     static unsigned long lastBtnToggle[Config::MAX_TRACKS] = {};
-    static constexpr unsigned long BTN_DEBOUNCE_MS = 250;
+    static constexpr unsigned long BTN_DEBOUNCE_MS = 300;
+    static uint8_t btnConfirmCount[Config::MAX_TRACKS] = {};
+    static bool btnArmed[Config::MAX_TRACKS] = {};
+    static constexpr int DELTA_CLAMP = 16;
+    static constexpr uint8_t BTN_CONFIRM_READS = 4;
+    static int healthCycle[M5_ENCODER_MODULES] = {};
 
-    // Collect changes inside I2C lock, send UDP outside to avoid blocking the bus
-    struct PendingMsg { uint8_t type; int track; int value; }; // 0=vol, 1=mute
+    struct PendingMsg { uint8_t type; int track; int value; };
     PendingMsg pending[Config::MAX_TRACKS * 2];
     int pendingCount = 0;
+
+    // Deferred LED writes (outside I2C lock to reduce hold time)
+    struct LedCmd { int mod; int enc; uint8_t r, g, b; };
+    LedCmd ledQueue[Config::MAX_TRACKS];
+    int ledCount = 0;
 
     for (int mod = 0; mod < M5_ENCODER_MODULES; mod++) {
         if (!m5encoderConnected[mod]) continue;
         int ch = m5HubChannel[mod];
         if (ch < 0) continue;
 
-        if (!i2c_lock(8)) continue;
+        if (!i2c_lock(12)) continue;
         i2c_hub_select_raw(ch);
 
+        // Use V2 change mask: 1 I2C read tells us which encoders moved
+        // (returns 0 on I2C error → safe, means "no changes")
+        uint8_t encMask = m5encoders[mod].getEncoderChangeMask();
+
         for (int enc = 0; enc < ENCODERS_PER_MODULE; enc++) {
-            int track = mod * ENCODERS_PER_MODULE + enc;
+            int track = mod * ENCODERS_PER_MODULE + (ENCODERS_PER_MODULE - 1 - enc);
 
-            int32_t counter = m5encoders[mod].getAbsCounter(enc);
-            int32_t delta = counter - prevM5Counter[track];
-            prevM5Counter[track] = counter;
+            // Only read counter if this encoder actually changed (skip 0-7 I2C reads)
+            if (encMask & (1 << enc)) {
+                int32_t counter = m5encoders[mod].getAbsCounter(enc);
+                int32_t delta = counter - prevM5Counter[track];
 
-            if (delta != 0) {
-                int newVol = constrain(trackVolumes[track] + delta * 3, 0, Config::MAX_VOLUME);
-                if (newVol != trackVolumes[track]) {
-                    trackVolumes[track] = newVol;
-                    if (!trackMuted[track]) m5_write_track_led(m5encoders[mod], enc, track);
-                    pending[pendingCount++] = {0, track, newVol};
+                if (delta != 0 && abs((int)delta) <= DELTA_CLAMP) {
+                    prevM5Counter[track] = counter;
+                    delta = -delta;
+                    int newVol = constrain(trackVolumes[track] + delta * 5, 0, Config::MAX_VOLUME);
+                    if (newVol != trackVolumes[track]) {
+                        trackVolumes[track] = newVol;
+                        if (!trackMuted[track] && ledCount < Config::MAX_TRACKS) {
+                            uint8_t rgb[3]; theme_encoder_color(track, rgb);
+                            uint8_t br = (uint8_t)map(newVol, 0, Config::MAX_VOLUME, 10, 255);
+                            ledQueue[ledCount++] = {mod, enc, (uint8_t)((rgb[0]*br)/255), (uint8_t)((rgb[1]*br)/255), (uint8_t)((rgb[2]*br)/255)};
+                        }
+                        pending[pendingCount++] = {0, track, newVol};
+                    }
+                } else if (abs((int)delta) <= DELTA_CLAMP) {
+                    prevM5Counter[track] = counter;
                 }
             }
 
-            // Button: edge detection + debounce
+            // Buttons: individual reads (safer than mask on I2C error)
             bool btnNow = m5encoders[mod].getKeyPressed(enc);
-            bool btnPrev = prevBtnState[track];
-            prevBtnState[track] = btnNow;
+            if (btnNow) {
+                if (btnConfirmCount[track] < 255) btnConfirmCount[track]++;
+            } else {
+                btnConfirmCount[track] = 0;
+                btnArmed[track] = true;
+            }
 
-            if (btnNow && !btnPrev) {
+            if (btnConfirmCount[track] == BTN_CONFIRM_READS && btnArmed[track]) {
                 unsigned long now = millis();
                 if ((now - lastBtnToggle[track]) >= BTN_DEBOUNCE_MS) {
                     lastBtnToggle[track] = now;
+                    btnArmed[track] = false;
                     trackMuted[track] = !trackMuted[track];
-                    if (trackMuted[track]) m5encoders[mod].writeRGB(enc, 0x1E, 0, 0);
-                    else                   m5_write_track_led(m5encoders[mod], enc, track);
+                    if (trackMuted[track]) {
+                        ledQueue[ledCount++] = {mod, enc, 0x1E, 0, 0};
+                    } else {
+                        uint8_t rgb[3]; theme_encoder_color(track, rgb);
+                        uint8_t br = (uint8_t)map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
+                        ledQueue[ledCount++] = {mod, enc, (uint8_t)((rgb[0]*br)/255), (uint8_t)((rgb[1]*br)/255), (uint8_t)((rgb[2]*br)/255)};
+                    }
                     pending[pendingCount++] = {1, track, (int)trackMuted[track]};
                 }
+            }
+        }
+
+        // Health check every 50 cycles instead of every cycle (saves ~200µs/cycle)
+        if (++healthCycle[mod] >= 50) {
+            healthCycle[mod] = 0;
+            uint8_t ver = m5encoders[mod].getVersion();
+            if (ver == 0 || ver != m5FirmwareVersion[mod]) {
+                int base = mod * ENCODERS_PER_MODULE;
+                for (int e = 0; e < ENCODERS_PER_MODULE; e++) {
+                    btnConfirmCount[base + e] = 0;
+                }
+            }
+        }
+
+        // Write queued LEDs for this module while hub is still selected
+        for (int l = 0; l < ledCount; l++) {
+            if (ledQueue[l].mod == mod) {
+                m5encoders[mod].writeRGB(ledQueue[l].enc, ledQueue[l].r, ledQueue[l].g, ledQueue[l].b);
             }
         }
 
@@ -1969,7 +2024,11 @@ void setup() {
     xTaskCreatePinnedToCore(touch_task, "touch", 4096, NULL, 3, NULL, 0);
     RED808_LOG_PRINTLN("[TOUCH] Touch task started (Core 0, pri 3)");
 
-    // 13. Microtiming engine — seed PRNG from hardware RNG
+    // 13. Pad trigger task — prio 2, preempts loop/enc but yields to touch
+    xTaskCreatePinnedToCore(pad_trigger_task, "pads", 4096, NULL, 2, NULL, 0);
+    RED808_LOG_PRINTLN("[PADS] Pad trigger task started (Core 0, pri 2)");
+
+    // 14. Microtiming engine — seed PRNG from hardware RNG
     microtiming_init();
 
     RED808_LOG_PRINTLN("\n[SETUP] Complete! Entering main loop.\n");
@@ -1990,6 +2049,55 @@ static void touch_task(void* arg) {
         // INT pin polling was unreliable (pulse mode, missed >99% of events).
         gt911_poll();
         vTaskDelay(pdMS_TO_TICKS(2));  // ~500Hz poll, GT911 updates at ~100Hz
+    }
+}
+
+// =============================================================================
+// PAD TRIGGER TASK (Core 0, priority 2 — preempts loop/enc, yields to touch)
+// Reads GT911 cache (lock-free), does hit-test, sends UDP pad triggers.
+// Decoupled from loop() so updateUI/WiFi never delays pad response.
+// =============================================================================
+
+static void pad_trigger_task(void* arg) {
+    (void)arg;
+    while (true) {
+        unsigned long now = millis();
+
+        handleLivePadTouchMatrix(now);
+
+        const int padVelocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
+
+        uint32_t mask = pendingLivePadTriggerMask;
+        if (mask != 0) {
+            pendingLivePadTriggerMask = 0;
+            for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
+                if ((mask & (1UL << pad)) == 0) continue;
+                sendLivePadTrigger(pad, padVelocity);
+                lastLivePadTriggerMs[pad] = now;
+                livePadFlashUntilMs[pad] = now + LIVE_PAD_FLASH_MS;
+            }
+            if (currentScreen == SCREEN_LIVE) {
+                livePadsVisualDirty = true;
+            }
+        }
+
+        // Repeat triggers (hold-to-repeat)
+        bool repeated = false;
+        for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
+            if (livePadRemainingRepeats[pad] == 0) continue;
+            if (now < livePadNextRepeatMs[pad]) continue;
+            sendLivePadTrigger(pad, padVelocity);
+            lastLivePadTriggerMs[pad] = now;
+            livePadFlashUntilMs[pad] = now + LIVE_PAD_FLASH_MS;
+            livePadRemainingRepeats[pad]--;
+            livePadNextRepeatMs[pad] = now + LIVE_PAD_REPEAT_INTERVAL_MS;
+            repeated = true;
+        }
+        if (repeated && currentScreen == SCREEN_LIVE) {
+            livePadsVisualDirty = true;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1));  // ~1kHz — matches GT911 500Hz update rate
     }
 }
 
@@ -2021,42 +2129,7 @@ void loop() {
     unsigned long now = millis();
     static Screen lastUiScreen = SCREEN_BOOT;
 
-    // === TOUCH + TRIGGER: highest priority — process FIRST for lowest latency ===
-    handleLivePadTouchMatrix(now);
-
-    const int padVelocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
-
-    uint32_t pendingMask = pendingLivePadTriggerMask;
-    if (pendingMask != 0) {
-        pendingLivePadTriggerMask = 0;
-        // Send UDP triggers FIRST (lowest latency to audio)
-        for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
-            if ((pendingMask & (1UL << pad)) == 0) continue;
-            sendLivePadTrigger(pad, padVelocity);
-            lastLivePadTriggerMs[pad] = now;
-            livePadFlashUntilMs[pad] = now + LIVE_PAD_FLASH_MS;
-        }
-        // Mark visual dirty — LVGL task picks it up within ~10ms (no lock contention)
-        if (currentScreen == SCREEN_LIVE) {
-            livePadsVisualDirty = true;
-        }
-    }
-
-    bool repeatedPadTrigger = false;
-    for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
-        if (livePadRemainingRepeats[pad] == 0) continue;
-        if (now < livePadNextRepeatMs[pad]) continue;
-
-        sendLivePadTrigger(pad, padVelocity);
-        lastLivePadTriggerMs[pad] = now;
-        livePadFlashUntilMs[pad] = now + LIVE_PAD_FLASH_MS;
-        livePadRemainingRepeats[pad]--;
-        livePadNextRepeatMs[pad] = now + LIVE_PAD_REPEAT_INTERVAL_MS;
-        repeatedPadTrigger = true;
-    }
-    if (repeatedPadTrigger && currentScreen == SCREEN_LIVE) {
-        livePadsVisualDirty = true;
-    }
+    // === Pad triggers now handled by pad_trigger_task (prio 2) ===
 
     // === NETWORK + STATUS ===
     if (masterConnected && (now - lastMasterPacketMs > 3000)) {

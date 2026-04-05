@@ -174,7 +174,7 @@ namespace Config {
     constexpr int DEFAULT_TRACK_VOLUME = 75;
 
     // Timing
-    constexpr uint32_t ENCODER_READ_MS    = 10;  // 100Hz polling — snappier encoder response
+    constexpr uint32_t ENCODER_READ_MS    = 5;   // 200Hz polling — fast encoder response
     constexpr uint32_t BUTTON_DEBOUNCE_MS = 25;
     constexpr uint32_t LED_FLASH_MS       = 100;
     constexpr uint32_t SCREEN_UPDATE_MS   = 12;  // ~83fps UI update — smoother step animation

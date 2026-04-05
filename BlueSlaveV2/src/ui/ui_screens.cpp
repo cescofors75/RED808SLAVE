@@ -97,13 +97,6 @@ static lv_obj_t* seq_unmute_btn = NULL;
 static lv_obj_t* vol_strip_panels[Config::MAX_TRACKS] = {};
 static lv_obj_t* vol_sliders[Config::MAX_TRACKS];
 static lv_obj_t* vol_labels[Config::MAX_TRACKS];
-static lv_obj_t* vol_name_labels[Config::MAX_TRACKS];
-static lv_obj_t* vol_meta_labels[Config::MAX_TRACKS] = {};
-static lv_obj_t* vol_mute_badges[Config::MAX_TRACKS] = {};
-static lv_obj_t* vol_summary_master = NULL;
-static lv_obj_t* vol_summary_seq = NULL;
-static lv_obj_t* vol_summary_live = NULL;
-static lv_obj_t* vol_summary_pattern = NULL;
 
 // Filter UI
 static lv_obj_t* filter_arcs[3];
@@ -558,11 +551,25 @@ void ui_create_header(lv_obj_t* parent) {
         lv_obj_center(bl);
     }
 
-    // Logo
-    lv_obj_t* logo = lv_label_create(header);
-    lv_label_set_text(logo, LV_SYMBOL_AUDIO " Blue808Slave");
-    lv_obj_set_style_text_font(logo, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(logo, RED808_ACCENT, 0);
+    // Logo image + title
+    extern const lv_img_dsc_t img_dev_logo;
+    lv_obj_t* logo_wrap = lv_obj_create(header);
+    lv_obj_set_size(logo_wrap, LV_SIZE_CONTENT, 40);
+    lv_obj_set_style_bg_opa(logo_wrap, LV_OPA_0, 0);
+    lv_obj_set_style_border_width(logo_wrap, 0, 0);
+    lv_obj_set_style_pad_all(logo_wrap, 0, 0);
+    lv_obj_set_style_pad_gap(logo_wrap, 8, 0);
+    lv_obj_clear_flag(logo_wrap, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(logo_wrap, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(logo_wrap, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t* logo_img = lv_img_create(logo_wrap);
+    lv_img_set_src(logo_img, &img_dev_logo);
+
+    lv_obj_t* logo_txt = lv_label_create(logo_wrap);
+    lv_label_set_text(logo_txt, "Blue808Slave");
+    lv_obj_set_style_text_font(logo_txt, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(logo_txt, RED808_ACCENT, 0);
 
     lv_obj_t* status_row = lv_obj_create(header);
     lv_obj_set_height(status_row, 40);
@@ -1731,7 +1738,6 @@ static void ui_apply_volume_track_style(int track) {
     if (track < 0 || track >= Config::MAX_TRACKS) return;
 
     lv_color_t indicator = trackMuted[track] ? RED808_ERROR : inst_colors[track];
-    lv_color_t text_color = trackMuted[track] ? RED808_ERROR : inst_colors[track];
     lv_opa_t slider_opa = trackMuted[track] ? LV_OPA_40 : LV_OPA_COVER;
     lv_opa_t knob_opa = trackMuted[track] ? LV_OPA_50 : LV_OPA_COVER;
 
@@ -1739,9 +1745,6 @@ static void ui_apply_volume_track_style(int track) {
         lv_obj_set_style_bg_opa(vol_sliders[track], slider_opa, LV_PART_INDICATOR);
         lv_obj_set_style_bg_opa(vol_sliders[track], knob_opa, LV_PART_KNOB);
         lv_obj_set_style_bg_color(vol_sliders[track], indicator, LV_PART_INDICATOR);
-    }
-    if (vol_name_labels[track]) {
-        lv_obj_set_style_text_color(vol_name_labels[track], text_color, 0);
     }
     if (vol_labels[track]) {
         lv_obj_set_style_text_color(vol_labels[track], trackMuted[track] ? RED808_ERROR : RED808_TEXT_DIM, 0);
@@ -1754,56 +1757,23 @@ void ui_create_volumes_screen() {
     lv_obj_clear_flag(scr_volumes, LV_OBJ_FLAG_SCROLLABLE);
     ui_create_header(scr_volumes);
 
-    lv_obj_t* shell = create_section_shell(scr_volumes, 16, 78, 992, 506);
-    lv_obj_set_style_bg_opa(shell, LV_OPA_70, 0);
-
-    lv_obj_t* title = lv_label_create(shell);
-    lv_label_set_text(title, LV_SYMBOL_AUDIO "  MIXER DESK");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
-    lv_obj_set_style_text_color(title, RED808_TEXT, 0);
-    lv_obj_set_pos(title, 6, 4);
-
-    lv_obj_t* subtitle = lv_label_create(shell);
-    lv_label_set_text(subtitle, "Track balance, mute state and live overview in one surface");
-    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(subtitle, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(subtitle, 8, 32);
-
-    vol_summary_master = lv_label_create(shell);
-    lv_obj_set_style_text_font(vol_summary_master, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(vol_summary_master, RED808_INFO, 0);
-    lv_obj_set_pos(vol_summary_master, 620, 6);
-
-    vol_summary_seq = lv_label_create(shell);
-    lv_obj_set_style_text_font(vol_summary_seq, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(vol_summary_seq, RED808_TEXT, 0);
-    lv_obj_set_pos(vol_summary_seq, 620, 26);
-
-    vol_summary_live = lv_label_create(shell);
-    lv_obj_set_style_text_font(vol_summary_live, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(vol_summary_live, RED808_TEXT, 0);
-    lv_obj_set_pos(vol_summary_live, 790, 6);
-
-    vol_summary_pattern = lv_label_create(shell);
-    lv_obj_set_style_text_font(vol_summary_pattern, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(vol_summary_pattern, RED808_SUCCESS, 0);
-    lv_obj_set_pos(vol_summary_pattern, 790, 26);
-
-    // Fader channel strips — professional mixer style
+    // Fader channel strips — full height, no title/name/description rows
     int strip_w = 56;
     int gap = (1024 - 16 * strip_w) / 17;  // equal margins
-    int slider_h = 314;
-    int y_name = 148;
-    int y_slider = 194;
-    int y_value = y_slider + slider_h + 8;
+    int y_top = 78;         // just below the header
+    int y_bottom = 590;     // near screen bottom
+    int strip_h = y_bottom - y_top;
+    int slider_h = strip_h - 40;  // room for value label at bottom
+    int y_slider = y_top + 4;
+    int y_value = y_slider + slider_h + 4;
 
     for (int i = 0; i < Config::MAX_TRACKS; i++) {
         int x = gap + i * (strip_w + gap);
         int cx = x + strip_w / 2;
 
         lv_obj_t* strip = lv_obj_create(scr_volumes);
-        lv_obj_set_size(strip, strip_w, 432);
-        lv_obj_set_pos(strip, x, 142);
+        lv_obj_set_size(strip, strip_w, strip_h);
+        lv_obj_set_pos(strip, x, y_top);
         lv_obj_set_style_bg_color(strip, RED808_SURFACE, 0);
         lv_obj_set_style_bg_opa(strip, LV_OPA_40, 0);
         lv_obj_set_style_radius(strip, 10, 0);
@@ -1811,37 +1781,6 @@ void ui_create_volumes_screen() {
         lv_obj_set_style_border_color(strip, RED808_BORDER, 0);
         lv_obj_clear_flag(strip, LV_OBJ_FLAG_SCROLLABLE);
         vol_strip_panels[i] = strip;
-
-        lv_obj_t* name = lv_label_create(scr_volumes);
-        lv_label_set_text(name, trackNames[i]);
-        lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(name, inst_colors[i], 0);
-        lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_pos(name, x, y_name);
-        lv_obj_set_width(name, strip_w);
-        vol_name_labels[i] = name;
-
-        lv_obj_t* meta = lv_label_create(scr_volumes);
-        lv_label_set_text(meta, instrumentNames[i]);
-        lv_obj_set_style_text_font(meta, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(meta, RED808_TEXT_DIM, 0);
-        lv_obj_set_style_text_align(meta, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_pos(meta, x - 12, 166);
-        lv_obj_set_width(meta, strip_w + 24);
-        vol_meta_labels[i] = meta;
-
-        lv_obj_t* badge = lv_obj_create(scr_volumes);
-        lv_obj_set_size(badge, 30, 16);
-        lv_obj_set_pos(badge, cx - 15, 180);
-        lv_obj_set_style_radius(badge, 8, 0);
-        lv_obj_set_style_pad_all(badge, 0, 0);
-        lv_obj_set_style_border_width(badge, 1, 0);
-        lv_obj_clear_flag(badge, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_t* badge_lbl = lv_label_create(badge);
-        lv_label_set_text(badge_lbl, "ON");
-        lv_obj_set_style_text_font(badge_lbl, &lv_font_montserrat_12, 0);
-        lv_obj_center(badge_lbl);
-        vol_mute_badges[i] = badge;
 
         // Slider — thin fader (10px wide, tall)
         lv_obj_t* slider = lv_slider_create(scr_volumes);
@@ -1890,7 +1829,7 @@ void ui_create_volumes_screen() {
         lv_obj_set_style_text_font(val, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(val, RED808_TEXT, 0);
         lv_obj_set_style_text_align(val, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_pos(val, x, y_value + 4);
+        lv_obj_set_pos(val, x, y_value);
         lv_obj_set_width(val, strip_w);
         vol_labels[i] = val;
 
@@ -1903,10 +1842,6 @@ void ui_update_volumes() {
     static bool prev_mute[Config::MAX_TRACKS];
     static bool initialized = false;
     static uint32_t last_slider_refresh = 0;
-    static int prev_master = -1;
-    static int prev_seq = -1;
-    static int prev_live = -1;
-    static int prev_pattern = -1;
 
     if (!initialized) {
         for (int i = 0; i < Config::MAX_TRACKS; i++) {
@@ -1916,24 +1851,7 @@ void ui_update_volumes() {
         initialized = true;
     }
 
-    bool allow_slider_refresh = (lv_tick_get() - last_slider_refresh) >= 40;
-
-    if (vol_summary_master && masterVolume != prev_master) {
-        prev_master = masterVolume;
-        lv_label_set_text_fmt(vol_summary_master, "MASTER %03d", masterVolume);
-    }
-    if (vol_summary_seq && sequencerVolume != prev_seq) {
-        prev_seq = sequencerVolume;
-        lv_label_set_text_fmt(vol_summary_seq, "SEQUENCER %03d", sequencerVolume);
-    }
-    if (vol_summary_live && livePadsVolume != prev_live) {
-        prev_live = livePadsVolume;
-        lv_label_set_text_fmt(vol_summary_live, "LIVE %03d", livePadsVolume);
-    }
-    if (vol_summary_pattern && currentPattern != prev_pattern) {
-        prev_pattern = currentPattern;
-        lv_label_set_text_fmt(vol_summary_pattern, "PATTERN %02d", currentPattern + 1);
-    }
+    bool allow_slider_refresh = (lv_tick_get() - last_slider_refresh) >= 16;
 
     for (int i = 0; i < Config::MAX_TRACKS; i++) {
         bool vol_changed = trackVolumes[i] != prev_vol[i];
@@ -1942,15 +1860,6 @@ void ui_update_volumes() {
         if (mute_changed) {
             prev_mute[i] = trackMuted[i];
             ui_apply_volume_track_style(i);
-            if (vol_mute_badges[i]) {
-                lv_obj_set_style_bg_color(vol_mute_badges[i], trackMuted[i] ? RED808_ERROR : RED808_SUCCESS, 0);
-                lv_obj_set_style_border_color(vol_mute_badges[i], trackMuted[i] ? RED808_ERROR : RED808_SUCCESS, 0);
-                lv_obj_t* lbl = lv_obj_get_child(vol_mute_badges[i], 0);
-                if (lbl) {
-                    lv_label_set_text(lbl, trackMuted[i] ? "M" : "ON");
-                    lv_obj_set_style_text_color(lbl, trackMuted[i] ? lv_color_white() : RED808_BG, 0);
-                }
-            }
             if (vol_strip_panels[i]) {
                 lv_obj_set_style_border_color(vol_strip_panels[i], trackMuted[i] ? RED808_ERROR : inst_colors[i], 0);
                 lv_obj_set_style_bg_opa(vol_strip_panels[i], trackMuted[i] ? LV_OPA_20 : LV_OPA_40, 0);
@@ -1964,9 +1873,6 @@ void ui_update_volumes() {
             }
             if (vol_labels[i]) {
                 lv_label_set_text_fmt(vol_labels[i], "%d", trackVolumes[i]);
-            }
-            if (vol_meta_labels[i]) {
-                lv_label_set_text_fmt(vol_meta_labels[i], "%s", instrumentNames[i]);
             }
         }
     }
@@ -3946,6 +3852,13 @@ void ui_create_boot_screen() {
     lv_obj_set_style_bg_opa(bot_line, LV_OPA_40, 0);
     lv_obj_set_style_border_width(bot_line, 0, 0);
     lv_obj_clear_flag(bot_line, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    // ── Developer branding (bottom-center): name only ──
+    extern const lv_img_dsc_t img_dev_name;
+
+    lv_obj_t* dev_name = lv_img_create(scr_boot);
+    lv_img_set_src(dev_name, &img_dev_name);
+    lv_obj_set_pos(dev_name, (1024 - 200) / 2, 430);
 
     boot_state = 0;
     boot_timer = lv_timer_create(boot_timer_cb, 40, NULL);
