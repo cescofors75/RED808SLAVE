@@ -3858,7 +3858,15 @@ void ui_create_boot_screen() {
 
     lv_obj_t* dev_name = lv_img_create(scr_boot);
     lv_img_set_src(dev_name, &img_dev_name);
-    lv_obj_set_pos(dev_name, (1024 - 200) / 2, 430);
+    lv_obj_set_pos(dev_name, 1024 - 200 - 20, 430);
+
+    // ── Footer: dedication ──
+    lv_obj_t* footer_lbl = lv_label_create(scr_boot);
+    lv_label_set_text(footer_lbl, "Un legado de a\xC3\xB1os de amistad");
+    lv_obj_set_style_text_font(footer_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(footer_lbl, lv_color_hex(0x66AADD), 0);
+    lv_obj_set_style_text_opa(footer_lbl, LV_OPA_50, 0);
+    lv_obj_align(footer_lbl, LV_ALIGN_BOTTOM_MID, 0, -36);
 
     boot_state = 0;
     boot_timer = lv_timer_create(boot_timer_cb, 40, NULL);
