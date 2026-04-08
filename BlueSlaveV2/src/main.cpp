@@ -90,7 +90,6 @@ int fxBitCrushBits = 16;
 int fxDistortionPercent = 0;
 int fxSampleRateHz = 44100;
 EncoderMode encoderMode = ENC_MODE_VOLUME;
-int analogFxPreset = 0;  // 0=OFF, 1..11=FX presets (set by analog rotary)
 
 // I2C Hub
 int m5HubChannel[M5_ENCODER_MODULES] = {-1, -1};
@@ -1614,62 +1613,9 @@ void handleDFRobotEncoders() {
 }
 
 // =============================================================================
-// ANALOG ROTARY ENCODER (GPIO6 - Pattern Select)
+// ANALOG ROTARY ENCODER (GPIO6) — 12-position visual theme selector
+// 12 positions → 6 themes (2 positions per theme)
 // =============================================================================
-
-// =============================================================================
-// ANALOG ROTARY ENCODER (GPIO6) — 12-position FX preset selector
-// pos  0 = NO FX (todo off)
-// pos  1..11 = 11 presets FX predefinidos
-// =============================================================================
-struct FxPreset {
-    const char* name;
-    bool  delayEn;  uint8_t delayAmt;    // delay amount 0-127
-    bool  flanEn;   uint8_t flanAmt;     // flanger amount 0-127
-    bool  compEn;   uint8_t compAmt;     // compressor amount 0-127
-};
-
-static const FxPreset kFxPresets[12] = {
-    // pos  0 — OFF
-    { "FX OFF",      false,  0, false,  0, false,  0 },
-    // pos  1 — Slight delay, dry
-    { "ROOM",        true,  32, false,  0, false,  0 },
-    // pos  2 — Medium delay
-    { "DELAY",       true,  72, false,  0, false,  0 },
-    // pos  3 — Heavy slapback
-    { "SLAPBACK",    true, 110, false,  0, false,  0 },
-    // pos  4 — Soft flanger
-    { "FLANGE LO",   false,  0, true,  28, false,  0 },
-    // pos  5 — Strong flanger
-    { "FLANGE HI",   false,  0, true,  80, false,  0 },
-    // pos  6 — Light compression
-    { "COMP SOFT",   false,  0, false,  0, true,  30 },
-    // pos  7 — Hard compression
-    { "COMP HARD",   false,  0, false,  0, true,  90 },
-    // pos  8 — Delay + light comp
-    { "SPACE",       true,  55, false,  0, true,  40 },
-    // pos  9 — Delay + flanger
-    { "CHORUS",      true,  40, true,  50, false,  0 },
-    // pos 10 — All FX medium
-    { "FULL FX",     true,  60, true,  45, true,  50 },
-    // pos 11 — All FX heavy
-    { "DESTROY",     true, 120, true, 100, true, 100 },
-};
-
-static void applyFxPreset(int pos) {
-    pos = constrain(pos, 0, 11);
-    const FxPreset& p = kFxPresets[pos];
-
-    masterFilter.enabled      = p.delayEn || p.flanEn || p.compEn;
-    masterFilter.delayAmount   = p.delayAmt;
-    masterFilter.flangerAmount = p.flanAmt;
-    masterFilter.compAmount    = p.compAmt;
-
-    sendFilterUDP(-1, FILTER_DELAY);
-    sendFilterUDP(-1, FILTER_FLANGER);
-    sendFilterUDP(-1, FILTER_COMPRESSOR);
-    RED808_LOG_PRINTF("[ROTARY FX] pos=%d '%s'\n", pos, p.name);
-}
 
 void handleAnalogEncoder() {
     static int  lastPosition = -1;
@@ -1745,9 +1691,12 @@ void handleAnalogEncoder() {
     candidatePos = -1;
     candidateCount = 0;
 
-    analogFxPreset = position;
-    applyFxPreset(position);
-    RED808_LOG_PRINTF("[ROTARY] median=%d cal=[%d..%d] pos=%d\n", median, calMin, calMax, position);
+    // Map 12 positions → 6 themes (2 positions per theme)
+    int themeIdx = constrain(position / 2, 0, (int)THEME_COUNT - 1);
+    if (themeIdx != (int)currentTheme) {
+        ui_theme_apply((VisualTheme)themeIdx);
+        RED808_LOG_PRINTF("[ROTARY] pos=%d → theme %d '%s'\n", position, themeIdx, theme_presets[themeIdx].name);
+    }
 }
 
 // =============================================================================

@@ -118,7 +118,7 @@ static lv_obj_t* filter_master_tag = NULL;
 static lv_obj_t* filter_target_prev_btn = NULL;
 static lv_obj_t* filter_target_next_btn = NULL;
 static lv_obj_t* filter_target_label = NULL;
-static lv_obj_t* filter_preset_label = NULL;  // rotary FX preset indicator
+static lv_obj_t* filter_preset_label = NULL;  // rotary theme indicator
 
 // Live pads
 static lv_obj_t* live_pads[Config::MAX_SAMPLES];
@@ -2287,11 +2287,6 @@ void ui_create_filters_screen() {
 }
 
 void ui_update_filters() {
-    static const char* kPresetNames[12] = {
-        "FX OFF", "ROOM", "DELAY", "SLAPBACK",
-        "FLANGE LO", "FLANGE HI", "COMP SOFT", "COMP HARD",
-        "SPACE", "CHORUS", "FULL FX", "DESTROY"
-    };
     static const lv_color_t fx_colors[] = {
         lv_color_hex(0x58A6FF),
         lv_color_hex(0x39D2C0),
@@ -2348,16 +2343,10 @@ void ui_update_filters() {
     }
     prev_selectedFX = filterSelectedFX;
 
-    if (filter_preset_label && analogFxPreset != prev_preset) {
-        prev_preset = analogFxPreset;
-        int p = constrain(analogFxPreset, 0, 11);
-        if (p == 0) {
-            lv_label_set_text(filter_preset_label, "PRESET: OFF");
-            lv_obj_set_style_text_color(filter_preset_label, lv_color_hex(0x666666), 0);
-        } else {
-            lv_label_set_text_fmt(filter_preset_label, "P%02d: %s", p, kPresetNames[p]);
-            lv_obj_set_style_text_color(filter_preset_label, lv_color_hex(0x80FF80), 0);
-        }
+    if (filter_preset_label && (int)currentTheme != prev_preset) {
+        prev_preset = (int)currentTheme;
+        lv_label_set_text_fmt(filter_preset_label, "THEME: %s", theme_presets[currentTheme].name);
+        lv_obj_set_style_text_color(filter_preset_label, theme_accent(), 0);
     }
 
     if (fxFilterType != prev_filter_type) {
@@ -3594,7 +3583,7 @@ void ui_create_performance_screen() {
 
     static const char* perf_rows[] = {
         "Volume mode",
-        "FX preset",
+        "Theme",
         "FX target",
         "Selected FX",
         "Pattern",
@@ -3629,11 +3618,7 @@ void ui_update_performance() {
 
     static const char* fx_names[] = {"Delay", "Flanger", "Compressor"};
     lv_label_set_text(perf_runtime_values[0], volumeMode == VOL_SEQUENCER ? "Sequencer" : "Live Pads");
-    if (analogFxPreset <= 0) {
-        lv_label_set_text(perf_runtime_values[1], "OFF");
-    } else {
-        lv_label_set_text_fmt(perf_runtime_values[1], "P%02d", analogFxPreset);
-    }
+    lv_label_set_text(perf_runtime_values[1], theme_presets[currentTheme].name);
     lv_label_set_text(perf_runtime_values[2], filterSelectedTrack == -1 ? "Master" : trackNames[filterSelectedTrack]);
     lv_label_set_text(perf_runtime_values[3], fx_names[constrain(filterSelectedFX, 0, 2)]);
     lv_label_set_text_fmt(perf_runtime_values[4], "%d / %s", currentPattern + 1, kitNames[constrain(currentKit, 0, 2)]);

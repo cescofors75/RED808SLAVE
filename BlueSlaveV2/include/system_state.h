@@ -130,7 +130,6 @@ extern int fxBitCrushBits;
 extern int fxDistortionPercent;
 extern int fxSampleRateHz;
 extern EncoderMode encoderMode;
-extern int analogFxPreset;        // 0=OFF, 1..11=FX preset (analog rotary)
 
 // I2C Hub
 extern int m5HubChannel[];
