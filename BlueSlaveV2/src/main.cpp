@@ -55,6 +55,7 @@ volatile Screen currentScreen = SCREEN_BOOT;
 Screen previousScreen = SCREEN_BOOT;
 bool needsFullRedraw = true;
 volatile bool themeJustChanged = false;
+volatile int  pendingThemeIdx  = -1;   // Set by encoder_task, consumed by updateUI under LVGL lock
 
 // Sequencer
 Pattern patterns[Config::MAX_PATTERNS];
@@ -1073,7 +1074,7 @@ void scanI2CHub() {
             // begin() and resetCounter() do I2C — protect with scoped lock
             if (i2c_lock(50)) {
                 i2c_hub_select_raw(ch);
-                if (!m5encoders[m5Found].begin()) {
+                if (m5encoders[m5Found].begin()) {
                     for (int e = 0; e < ENCODERS_PER_MODULE; e++) {
                         m5encoders[m5Found].resetCounter(e);
                     }
@@ -1396,15 +1397,12 @@ void handleM5Encoders() {
         if (!i2c_lock(12)) continue;
         i2c_hub_select_raw(ch);
 
-        // Use V2 change mask: 1 I2C read tells us which encoders moved
-        // (returns 0 on I2C error → safe, means "no changes")
-        uint8_t encMask = m5encoders[mod].getEncoderChangeMask();
-
         for (int enc = 0; enc < ENCODERS_PER_MODULE; enc++) {
             int track = mod * ENCODERS_PER_MODULE + (ENCODERS_PER_MODULE - 1 - enc);
 
-            // Only read counter if this encoder actually changed (skip 0-7 I2C reads)
-            if (encMask & (1 << enc)) {
+            // Always read the absolute counter — the V2 change mask is unreliable
+            // across firmware versions and I2C hubs.
+            {
                 int32_t counter = m5encoders[mod].getAbsCounter(enc);
                 int32_t delta = counter - prevM5Counter[track];
 
@@ -1421,7 +1419,8 @@ void handleM5Encoders() {
                         }
                         pending[pendingCount++] = {0, track, newVol};
                     }
-                } else if (abs((int)delta) <= DELTA_CLAMP) {
+                } else if (delta != 0) {
+                    // Resync counter on large delta (reboot / I2C glitch)
                     prevM5Counter[track] = counter;
                 }
             }
@@ -1707,8 +1706,10 @@ void handleAnalogEncoder() {
     candidateCount = 0;
 
     if (themeIdx != (int)currentTheme) {
-        ui_theme_apply((VisualTheme)themeIdx);
-        RED808_LOG_PRINTF("[ROTARY] median=%d cal=[%d..%d] pos=%d → theme %d '%s'\n",
+        // Signal the UI loop to apply the theme change with proper LVGL lock.
+        // Direct call from encoder_task causes race conditions with lv_timer_handler.
+        pendingThemeIdx = themeIdx;
+        RED808_LOG_PRINTF("[ROTARY] median=%d cal=[%d..%d] pos=%d → pending theme %d '%s'\n",
                           median, calMin, calMax, position, themeIdx, theme_presets[themeIdx].name);
     }
 }
@@ -1839,6 +1840,13 @@ void updateUI() {
     }
 
     if (!lvgl_port_lock(15)) return;  // 15ms: give LVGL task time to finish
+
+    // Apply pending theme change from analog encoder — INSIDE LVGL lock
+    int pt = pendingThemeIdx;
+    if (pt >= 0 && pt < (int)THEME_COUNT) {
+        pendingThemeIdx = -1;
+        ui_theme_apply((VisualTheme)pt);
+    }
 
     ui_update_header();
 

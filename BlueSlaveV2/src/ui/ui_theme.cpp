@@ -182,10 +182,14 @@ static void restyle_recursive(lv_obj_t* obj,
     }
 
     // Check bg color against UI palette and track palette
-    // Update state 0, PRESSED and FOCUSED so apply_stable_button_style overrides
-    // baked at creation time stay in sync with the new theme.
-    static const lv_state_t bg_states[] = { 0, LV_STATE_PRESSED, LV_STATE_FOCUSED };
-    for (int si = 0; si < 3; si++) {
+    // Must cover ALL states set by apply_stable_button_style so no stale
+    // colours survive a theme switch.
+    static const lv_state_t bg_states[] = {
+        0, LV_STATE_PRESSED, LV_STATE_FOCUSED, LV_STATE_FOCUS_KEY,
+        LV_STATE_CHECKED, (lv_state_t)(LV_STATE_PRESSED | LV_STATE_FOCUSED),
+        (lv_state_t)(LV_STATE_PRESSED | LV_STATE_CHECKED)
+    };
+    for (int si = 0; si < 7; si++) {
         lv_state_t st = bg_states[si];
         lv_color_t bg = lv_obj_get_style_bg_color(obj, st);
         bool matched = false;
@@ -197,13 +201,16 @@ static void restyle_recursive(lv_obj_t* obj,
         }
     }
 
-    // Check border color — state 0 and PRESSED
-    static const lv_state_t bd_states[] = { 0, LV_STATE_PRESSED, LV_STATE_FOCUSED };
-    for (int si = 0; si < 3; si++) {
-        lv_state_t st = bd_states[si];
+    // Check border color — same states
+    for (int si = 0; si < 7; si++) {
+        lv_state_t st = bg_states[si];
         lv_color_t bd = lv_obj_get_style_border_color(obj, st);
-        for (int i = 0; i < 13; i++) {
-            if (color_eq(bd, p_ui[i])) { lv_obj_set_style_border_color(obj, c_ui[i], st); break; }
+        bool matched = false;
+        for (int i = 0; i < 13 && !matched; i++) {
+            if (color_eq(bd, p_ui[i])) { lv_obj_set_style_border_color(obj, c_ui[i], st); matched = true; }
+        }
+        for (int i = 0; i < 16 && !matched; i++) {
+            if (color_eq(bd, p_track[i])) { lv_obj_set_style_border_color(obj, c_track[i], st); matched = true; }
         }
     }
 
@@ -223,6 +230,16 @@ static void restyle_recursive(lv_obj_t* obj,
     lv_color_t ind = lv_obj_get_style_bg_color(obj, LV_PART_INDICATOR);
     for (int i = 0; i < 16; i++) {
         if (color_eq(ind, p_track[i])) { lv_obj_set_style_bg_color(obj, c_track[i], LV_PART_INDICATOR); break; }
+    }
+
+    // Slider knob: border, shadow, and bg_color (track-colored glow)
+    lv_color_t knob_bd = lv_obj_get_style_border_color(obj, LV_PART_KNOB);
+    for (int i = 0; i < 16; i++) {
+        if (color_eq(knob_bd, p_track[i])) {
+            lv_obj_set_style_border_color(obj, c_track[i], LV_PART_KNOB);
+            lv_obj_set_style_shadow_color(obj, c_track[i], LV_PART_KNOB);
+            break;
+        }
     }
 
     // Arc track color
@@ -317,13 +334,16 @@ void ui_theme_apply(VisualTheme theme) {
         if (!scr) continue;
         lv_obj_set_style_bg_color(scr, lv_color_hex(cur.bg), 0);
         restyle_recursive(scr, p_track, c_track, p_ui, c_ui);
+        lv_obj_invalidate(scr);   // invalidate ALL screens, not just the active one
     }
-
-    lv_obj_invalidate(lv_scr_act());
 
     // Force LivePads to redraw with new theme colors
     extern void ui_live_pads_invalidate();
     ui_live_pads_invalidate();
+
+    // Force volume faders to pick up new track colors
+    extern void ui_volumes_retheme();
+    ui_volumes_retheme();
 
     // Invalidate ByteButton LED cache
     extern uint32_t byteButtonLedCache[];

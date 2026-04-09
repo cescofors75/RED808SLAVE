@@ -60,12 +60,12 @@ static lv_obj_t* lbl_menu_transport = NULL;
 
 // Status center runtime panel
 static lv_obj_t* diag_runtime_values[10] = {};
-static lv_obj_t* diag_event_labels[5] = {};
+// diag_event_labels removed (EVENT LOG disabled)
 
 // Performance runtime panel
 static lv_obj_t* perf_runtime_values[8] = {};
 
-static char diag_event_log[5][64] = {};
+// diag_event_log removed (EVENT LOG disabled)
 
 // Sequencer grid buttons
 static lv_obj_t* seq_grid[Config::MAX_TRACKS][Config::MAX_STEPS];
@@ -83,7 +83,14 @@ static lv_obj_t* seq_info_transport = NULL;
 static lv_obj_t* seq_info_page = NULL;
 static lv_obj_t* seq_column_highlights[Config::MAX_STEPS];
 static lv_obj_t* seq_step_leds[Config::MAX_STEPS];
+static lv_obj_t* seq_playhead_line = NULL;   // Lightweight moving line indicator
 static int seq_page = 0;
+// Cached grid geometry for playhead positioning
+static int seq_cached_grid_x = 0;
+static int seq_cached_grid_y = 0;
+static int seq_cached_cell_w = 0;
+static int seq_cached_gap    = 0;
+static int seq_cached_grid_h = 0;
 static constexpr int SEQ_TRACKS_PER_PAGE = 8;
 static lv_obj_t* seq_page_btn = NULL;
 static lv_obj_t* seq_page_lbl = NULL;
@@ -207,7 +214,8 @@ static void live_layout_pads() {
     const int grid_left = 12;
     const int grid_right = UI_W - 12;
     const int grid_width = grid_right - grid_left;
-    const int grid_height = UI_H - LIVE_PAD_AREA_TOP - 160;  // leave room for bottom controls
+    const int ctrl_zone = 210;
+    const int grid_height = UI_H - LIVE_PAD_AREA_TOP - ctrl_zone;
 #else
     const int grid_left = left_panel_x + left_panel_w + 12;
     const int grid_right = 1024 - right_panel_w - right_panel_margin;
@@ -334,21 +342,7 @@ static const char* screen_name(Screen screen) {
     }
 }
 
-static void ui_runtime_note(const char* text) {
-    if (!text || !text[0]) return;
-    for (int i = 4; i > 0; i--) {
-        strncpy(diag_event_log[i], diag_event_log[i - 1], sizeof(diag_event_log[i]) - 1);
-        diag_event_log[i][sizeof(diag_event_log[i]) - 1] = '\0';
-    }
-    strncpy(diag_event_log[0], text, sizeof(diag_event_log[0]) - 1);
-    diag_event_log[0][sizeof(diag_event_log[0]) - 1] = '\0';
-
-    for (int i = 0; i < 5; i++) {
-        if (diag_event_labels[i]) {
-            lv_label_set_text(diag_event_labels[i], diag_event_log[i][0] ? diag_event_log[i] : "-");
-        }
-    }
-}
+static void ui_runtime_note(const char*) { /* removed for performance */ }
 
 // ============================================================================
 // BOOT SCREEN (TRON / 80s terminal intro)
@@ -469,31 +463,45 @@ static lv_obj_t* create_section_shell(lv_obj_t* parent, lv_coord_t x, lv_coord_t
     return shell;
 }
 
+// Zero-duration transition to kill theme animations that leave buttons in
+// intermediate colours after a fast press-navigate-back cycle.
+static lv_style_transition_dsc_t _no_tr;
+static bool _no_tr_init = false;
+
 static void apply_stable_button_style(lv_obj_t* obj, lv_color_t base_color, lv_color_t border_color) {
     if (!obj) return;
 
-    lv_obj_set_style_bg_color(obj, base_color, 0);
-    lv_obj_set_style_bg_color(obj, base_color, LV_STATE_PRESSED);
-    lv_obj_set_style_bg_color(obj, base_color, LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_STATE_FOCUSED);
-    lv_obj_set_style_border_color(obj, border_color, 0);
-    lv_obj_set_style_border_color(obj, border_color, LV_STATE_PRESSED);
-    lv_obj_set_style_border_color(obj, border_color, LV_STATE_FOCUSED);
-    lv_obj_set_style_shadow_width(obj, 0, 0);
-    lv_obj_set_style_shadow_width(obj, 0, LV_STATE_PRESSED);
-    lv_obj_set_style_outline_width(obj, 0, 0);
-    lv_obj_set_style_outline_width(obj, 0, LV_STATE_PRESSED);
-    lv_obj_set_style_outline_width(obj, 0, LV_STATE_FOCUSED);
-    lv_obj_set_style_transform_width(obj, 0, 0);
-    lv_obj_set_style_transform_width(obj, 0, LV_STATE_PRESSED);
-    lv_obj_set_style_transform_height(obj, 0, 0);
-    lv_obj_set_style_transform_height(obj, 0, LV_STATE_PRESSED);
-    lv_obj_set_style_translate_x(obj, 0, 0);
-    lv_obj_set_style_translate_x(obj, 0, LV_STATE_PRESSED);
-    lv_obj_set_style_translate_y(obj, 0, 0);
-    lv_obj_set_style_translate_y(obj, 0, LV_STATE_PRESSED);
+    // Lazy-init: create a transition descriptor with 0 duration (no animation)
+    if (!_no_tr_init) {
+        static const lv_style_prop_t _no_props[] = { (lv_style_prop_t)0 };
+        lv_style_transition_dsc_init(&_no_tr, _no_props, lv_anim_path_linear, 0, 0, NULL);
+        _no_tr_init = true;
+    }
+
+    // Cover ALL possible states so the LVGL default theme never shows through.
+    static const lv_state_t states[] = {
+        0,
+        LV_STATE_PRESSED,
+        LV_STATE_FOCUSED,
+        LV_STATE_FOCUS_KEY,
+        LV_STATE_CHECKED,
+        LV_STATE_PRESSED | LV_STATE_FOCUSED,
+        LV_STATE_PRESSED | LV_STATE_CHECKED,
+    };
+    for (auto st : states) {
+        lv_obj_set_style_bg_color(obj, base_color, st);
+        lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, st);
+        lv_obj_set_style_border_color(obj, border_color, st);
+        lv_obj_set_style_shadow_width(obj, 0, st);
+        lv_obj_set_style_outline_width(obj, 0, st);
+        lv_obj_set_style_transform_width(obj, 0, st);
+        lv_obj_set_style_transform_height(obj, 0, st);
+        lv_obj_set_style_translate_x(obj, 0, st);
+        lv_obj_set_style_translate_y(obj, 0, st);
+        lv_obj_set_style_transition(obj, &_no_tr, st);
+    }
+    // Kill any gradient the theme may sneak in
+    lv_obj_set_style_bg_grad_dir(obj, LV_GRAD_DIR_NONE, 0);
     lv_obj_add_flag(obj, LV_OBJ_FLAG_PRESS_LOCK);
 }
 
@@ -903,20 +911,35 @@ void ui_create_live_screen() {
 
     for (int i = 0; i < LIVE_VIEW_MODE_COUNT; i++) {
         lv_obj_t* btn = lv_btn_create(left_panel);
+#if PORTRAIT_MODE
+        lv_obj_set_size(btn, 48, 32);
+#else
         lv_obj_set_size(btn, 56, 42);
+#endif
         apply_stable_button_style(btn, RED808_SURFACE, RED808_BORDER);
         lv_obj_set_style_radius(btn, 10, 0);
         lv_obj_add_event_cb(btn, live_view_mode_cb, LV_EVENT_CLICKED, (void*)(intptr_t)live_view_options[i]);
         lv_obj_t* lbl = lv_label_create(btn);
+#if PORTRAIT_MODE
+        lv_label_set_text(lbl, live_view_options[i] == 16 ? "ALL" : "");
+        if (live_view_options[i] != 16)
+            lv_label_set_text_fmt(lbl, "%d", live_view_options[i]);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+#else
         lv_label_set_text_fmt(lbl, "%d", live_view_options[i]);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+#endif
         lv_obj_center(lbl);
         live_view_btns[i] = btn;
         live_view_labels[i] = lbl;
     }
 
     live_view_prev_btn = lv_btn_create(left_panel);
+#if PORTRAIT_MODE
+    lv_obj_set_size(live_view_prev_btn, 40, 26);
+#else
     lv_obj_set_size(live_view_prev_btn, 56, 32);
+#endif
     apply_stable_button_style(live_view_prev_btn, RED808_SURFACE, RED808_ACCENT2);
     lv_obj_set_style_radius(live_view_prev_btn, 10, 0);
     lv_obj_add_event_cb(live_view_prev_btn, live_view_prev_cb, LV_EVENT_CLICKED, NULL);
@@ -930,7 +953,11 @@ void ui_create_live_screen() {
     lv_obj_set_style_text_color(live_view_page_label, RED808_TEXT, 0);
 
     live_view_next_btn = lv_btn_create(left_panel);
+#if PORTRAIT_MODE
+    lv_obj_set_size(live_view_next_btn, 40, 26);
+#else
     lv_obj_set_size(live_view_next_btn, 56, 32);
+#endif
     apply_stable_button_style(live_view_next_btn, RED808_SURFACE, RED808_ACCENT2);
     lv_obj_set_style_radius(live_view_next_btn, 10, 0);
     lv_obj_add_event_cb(live_view_next_btn, live_view_next_cb, LV_EVENT_CLICKED, NULL);
@@ -1516,26 +1543,34 @@ void ui_create_sequencer_screen() {
 #endif
     }
 
-    // ── Step column highlights (behind grid) ──
-    for (int s = 0; s < Config::MAX_STEPS; s++) {
-        lv_obj_t* column = lv_obj_create(scr_sequencer);
+    // ── Cache grid geometry for playhead positioning ──
+    seq_cached_grid_x = grid_x;
+    seq_cached_grid_y = grid_y;
+    seq_cached_cell_w = cell_w;
+    seq_cached_gap    = gap;
 #if PORTRAIT_MODE
-        lv_obj_set_size(column, cell_w, Config::MAX_TRACKS * row_pitch - gap);
+    seq_cached_grid_h = Config::MAX_TRACKS * row_pitch + 8; // covers grid + LED strip
 #else
-        lv_obj_set_size(column, cell_w, SEQ_TRACKS_PER_PAGE * row_pitch - gap);
+    seq_cached_grid_h = SEQ_TRACKS_PER_PAGE * row_pitch + 8;
 #endif
-        lv_obj_set_pos(column, grid_x + s * (cell_w + gap), grid_y);
-        lv_obj_set_style_bg_color(column, RED808_WARNING, 0);
-        lv_obj_set_style_bg_opa(column, LV_OPA_0, 0);
-        lv_obj_set_style_border_width(column, 1, 0);
-        lv_obj_set_style_border_color(column, RED808_WARNING, 0);
-        lv_obj_set_style_border_opa(column, LV_OPA_0, 0);
-        lv_obj_set_style_radius(column, 3, 0);
-        lv_obj_clear_flag(column, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(column, LV_OBJ_FLAG_IGNORE_LAYOUT);
-        lv_obj_move_background(column);
-        seq_column_highlights[s] = column;
+
+    // ── Single playhead line (replaces 16 heavy column-highlight objects) ──
+    {
+        seq_playhead_line = lv_obj_create(scr_sequencer);
+        lv_obj_set_size(seq_playhead_line, 3, seq_cached_grid_h);
+        lv_obj_set_pos(seq_playhead_line, grid_x, grid_y);
+        lv_obj_set_style_bg_color(seq_playhead_line, RED808_WARNING, 0);
+        lv_obj_set_style_bg_opa(seq_playhead_line, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(seq_playhead_line, 1, 0);
+        lv_obj_set_style_border_width(seq_playhead_line, 0, 0);
+        lv_obj_clear_flag(seq_playhead_line, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(seq_playhead_line, LV_OBJ_FLAG_IGNORE_LAYOUT);
+        lv_obj_add_flag(seq_playhead_line, LV_OBJ_FLAG_FLOATING);
+        lv_obj_move_foreground(seq_playhead_line);
+        if (!isPlaying) lv_obj_add_flag(seq_playhead_line, LV_OBJ_FLAG_HIDDEN);
     }
+    // Initialize column highlights array to NULL (no longer used)
+    memset(seq_column_highlights, 0, sizeof(seq_column_highlights));
 
     // ── Grid cells (16 tracks × 16 steps) ──
     for (int t = 0; t < Config::MAX_TRACKS; t++) {
@@ -1731,8 +1766,13 @@ void ui_update_sequencer() {
     static uint8_t prev_grid_state[Config::MAX_TRACKS][Config::MAX_STEPS];
     static int prev_track_volumes[Config::MAX_TRACKS] = {};
 
+#if PORTRAIT_MODE
+    int page_start = 0;
+    int page_end   = Config::MAX_TRACKS;
+#else
     int page_start = seq_page * SEQ_TRACKS_PER_PAGE;
     int page_end   = page_start + SEQ_TRACKS_PER_PAGE;
+#endif
 
     // On page change, force full grid refresh for visible tracks
     if (seq_page != prev_page) {
@@ -1774,10 +1814,14 @@ void ui_update_sequencer() {
         }
     }
 
-    for (int s = 0; s < Config::MAX_STEPS; s++) {
-        if (!seq_step_labels[s]) continue;
-        bool active = (s == currentStep) && isPlaying;
-        lv_obj_set_style_text_color(seq_step_labels[s], active ? RED808_WARNING : RED808_TEXT_DIM, 0);
+    // Update step label colour — only the two that changed (prev & current)
+    if (currentStep != prev_step) {
+        if (prev_step >= 0 && prev_step < Config::MAX_STEPS && seq_step_labels[prev_step]) {
+            lv_obj_set_style_text_color(seq_step_labels[prev_step], RED808_TEXT_DIM, 0);
+        }
+        if (isPlaying && currentStep < Config::MAX_STEPS && seq_step_labels[currentStep]) {
+            lv_obj_set_style_text_color(seq_step_labels[currentStep], RED808_WARNING, 0);
+        }
     }
 
     for (int t = page_start; t < page_end; t++) {
@@ -1799,68 +1843,38 @@ void ui_update_sequencer() {
 
     int active_column = isPlaying ? currentStep : -1;
     if (active_column != prev_column) {
-        // --- Previous column: remove highlight ---
-        if (prev_column >= 0 && prev_column < Config::MAX_STEPS) {
-            if (seq_column_highlights[prev_column]) {
-                lv_obj_set_style_bg_opa(seq_column_highlights[prev_column], LV_OPA_0, 0);
-                lv_obj_set_style_border_opa(seq_column_highlights[prev_column], LV_OPA_0, 0);
-            }
-            if (seq_step_leds[prev_column]) {
-                lv_obj_set_style_bg_color(seq_step_leds[prev_column],
-                    (prev_column % 4 == 0) ? lv_color_hex(0x2A2A2A) : lv_color_hex(0x1A1A1A), 0);
-                lv_obj_set_style_shadow_width(seq_step_leds[prev_column], 0, 0);
-            }
-            // Restyle prev column cells — mark dirty so diff loop handles them
-            for (int t = page_start; t < page_end; t++) {
-                prev_grid_state[t][prev_column] = 0xFF;
+        // --- Move playhead line (single object, no cell restyling) ---
+        if (seq_playhead_line) {
+            if (active_column >= 0 && active_column < Config::MAX_STEPS) {
+                int px = seq_cached_grid_x + active_column * (seq_cached_cell_w + seq_cached_gap) + seq_cached_cell_w / 2 - 1;
+                lv_obj_set_pos(seq_playhead_line, px, seq_cached_grid_y);
+                lv_obj_clear_flag(seq_playhead_line, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_move_foreground(seq_playhead_line);
+            } else {
+                lv_obj_add_flag(seq_playhead_line, LV_OBJ_FLAG_HIDDEN);
             }
         }
-        // --- Active column: show highlight with neon glow ---
-        if (active_column >= 0 && active_column < Config::MAX_STEPS) {
-            if (seq_column_highlights[active_column]) {
-                lv_obj_set_style_bg_opa(seq_column_highlights[active_column], LV_OPA_20, 0);
-                lv_obj_set_style_border_opa(seq_column_highlights[active_column], LV_OPA_70, 0);
-            }
-            if (seq_step_leds[active_column]) {
-                lv_obj_set_style_bg_color(seq_step_leds[active_column], RED808_WARNING, 0);
-                lv_obj_set_style_shadow_width(seq_step_leds[active_column], 6, 0);
-                lv_obj_set_style_shadow_color(seq_step_leds[active_column], RED808_WARNING, 0);
-                lv_obj_set_style_shadow_opa(seq_step_leds[active_column], LV_OPA_60, 0);
-                lv_obj_set_style_shadow_spread(seq_step_leds[active_column], 2, 0);
-            }
-            // Mark active column cells dirty
-            for (int t = page_start; t < page_end; t++) {
-                prev_grid_state[t][active_column] = 0xFF;
-            }
+        // Update LED strip: reset prev, highlight current
+        if (prev_column >= 0 && prev_column < Config::MAX_STEPS && seq_step_leds[prev_column]) {
+            lv_obj_set_style_bg_color(seq_step_leds[prev_column],
+                (prev_column % 4 == 0) ? lv_color_hex(0x2A2A2A) : lv_color_hex(0x1A1A1A), 0);
+        }
+        if (active_column >= 0 && active_column < Config::MAX_STEPS && seq_step_leds[active_column]) {
+            lv_obj_set_style_bg_color(seq_step_leds[active_column], RED808_WARNING, 0);
         }
         prev_column = active_column;
     }
 
-    // Diff loop — only restyle cells whose state actually changed
+    // Diff loop — only restyle cells whose pattern data actually changed
     for (int t = page_start; t < page_end; t++) {
         for (int s = 0; s < Config::MAX_STEPS; s++) {
             if (!seq_grid[t][s]) continue;
             bool active = patterns[currentPattern].steps[t][s];
-            bool isHit = (s == active_column);
-            uint8_t state = (isHit ? 2 : 0) | (active ? 1 : 0);
+            uint8_t state = active ? 1 : 0;
             if (state == prev_grid_state[t][s]) continue;
             prev_grid_state[t][s] = state;
-
-            if (isHit) {
-                // Active step — bright with neon border
-                lv_obj_set_style_bg_color(seq_grid[t][s],
-                    active ? lv_color_white() : lv_color_hex(0x504000), 0);
-                lv_obj_set_style_border_width(seq_grid[t][s], 2, 0);
-                lv_obj_set_style_border_color(seq_grid[t][s], RED808_WARNING, 0);
-                lv_obj_set_style_shadow_width(seq_grid[t][s], 0, 0);
-                lv_obj_set_style_shadow_opa(seq_grid[t][s], LV_OPA_0, 0);
-            } else {
-                // Inactive step — normal
-                lv_obj_set_style_bg_color(seq_grid[t][s],
-                    active ? inst_colors[t] : RED808_SURFACE, 0);
-                lv_obj_set_style_border_width(seq_grid[t][s], 0, 0);
-                lv_obj_set_style_shadow_width(seq_grid[t][s], 0, 0);
-            }
+            lv_obj_set_style_bg_color(seq_grid[t][s],
+                active ? inst_colors[t] : RED808_SURFACE, 0);
         }
     }
     prev_step = currentStep;
@@ -2072,6 +2086,23 @@ void ui_update_volumes() {
     }
     if (allow_slider_refresh) {
         last_slider_refresh = lv_tick_get();
+    }
+}
+
+// Called after theme change to refresh dynamic volume styles that
+// depend on inst_colors[] (slider indicator, knob glow, strip border).
+void ui_volumes_retheme() {
+    for (int i = 0; i < Config::MAX_TRACKS; i++) {
+        ui_apply_volume_track_style(i);
+        if (vol_sliders[i]) {
+            // Knob glow & border are track-colored — update them
+            lv_obj_set_style_shadow_color(vol_sliders[i], inst_colors[i], LV_PART_KNOB);
+            lv_obj_set_style_border_color(vol_sliders[i], inst_colors[i], LV_PART_KNOB);
+        }
+        if (vol_strip_panels[i]) {
+            lv_obj_set_style_border_color(vol_strip_panels[i],
+                trackMuted[i] ? RED808_ERROR : inst_colors[i], 0);
+        }
     }
 }
 
@@ -2910,41 +2941,7 @@ void ui_create_diagnostics_screen() {
         y += 34;
     }
 
-#if PORTRAIT_MODE
-    lv_obj_t* log_card = create_section_shell(scr_diagnostics, 16, 690, card_w, 320);
-#else
-    lv_obj_t* log_card = create_section_shell(scr_diagnostics, 678, 104, 328, 452);
-#endif
-    lv_obj_t* log_title = lv_label_create(log_card);
-    lv_label_set_text(log_title, LV_SYMBOL_LIST "  EVENT LOG");
-    lv_obj_set_style_text_font(log_title, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(log_title, RED808_ACCENT, 0);
-    lv_obj_set_pos(log_title, 0, 0);
-
-    y = 42;
-    for (int i = 0; i < 5; i++) {
-        lv_obj_t* row = lv_obj_create(log_card);
-        lv_obj_set_size(row, 296, 62);
-        lv_obj_set_pos(row, 0, y);
-        lv_obj_set_style_bg_color(row, RED808_SURFACE, 0);
-        lv_obj_set_style_bg_opa(row, LV_OPA_50, 0);
-        lv_obj_set_style_radius(row, 12, 0);
-        lv_obj_set_style_border_width(row, 1, 0);
-        lv_obj_set_style_border_color(row, RED808_BORDER, 0);
-        lv_obj_set_style_pad_all(row, 10, 0);
-        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-
-        diag_event_labels[i] = lv_label_create(row);
-        lv_label_set_text(diag_event_labels[i], "-");
-        lv_obj_set_width(diag_event_labels[i], 276);
-        lv_label_set_long_mode(diag_event_labels[i], LV_LABEL_LONG_WRAP);
-        lv_obj_set_style_text_font(diag_event_labels[i], &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(diag_event_labels[i], RED808_TEXT, 0);
-        lv_obj_align(diag_event_labels[i], LV_ALIGN_LEFT_MID, 0, 0);
-        y += 74;
-    }
-
-    ui_runtime_note("STATUS center online");
+// EVENT LOG panel removed for performance
 }
 
 void ui_update_diagnostics() {
