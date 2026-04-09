@@ -727,8 +727,8 @@ void ui_create_menu_screen() {
     };
     const lv_color_t menu_colors[] = {
         RED808_ACCENT, RED808_INFO, RED808_SUCCESS,
-        RED808_WARNING, RED808_CYAN, lv_color_hex(0xFF6B35),
-        lv_color_hex(0xFF00AA), lv_color_hex(0x888888), RED808_TEXT_DIM
+        RED808_WARNING, RED808_CYAN, RED808_ACCENT2,
+        RED808_ERROR, RED808_BORDER, RED808_TEXT_DIM
     };
 
     int x_start = 28, y_start = 80;

@@ -182,21 +182,29 @@ static void restyle_recursive(lv_obj_t* obj,
     }
 
     // Check bg color against UI palette and track palette
-    lv_color_t bg = lv_obj_get_style_bg_color(obj, 0);
-    {
+    // Update state 0, PRESSED and FOCUSED so apply_stable_button_style overrides
+    // baked at creation time stay in sync with the new theme.
+    static const lv_state_t bg_states[] = { 0, LV_STATE_PRESSED, LV_STATE_FOCUSED };
+    for (int si = 0; si < 3; si++) {
+        lv_state_t st = bg_states[si];
+        lv_color_t bg = lv_obj_get_style_bg_color(obj, st);
         bool matched = false;
         for (int i = 0; i < 13 && !matched; i++) {
-            if (color_eq(bg, p_ui[i])) { lv_obj_set_style_bg_color(obj, c_ui[i], 0); matched = true; }
+            if (color_eq(bg, p_ui[i])) { lv_obj_set_style_bg_color(obj, c_ui[i], st); matched = true; }
         }
         for (int i = 0; i < 16 && !matched; i++) {
-            if (color_eq(bg, p_track[i])) { lv_obj_set_style_bg_color(obj, c_track[i], 0); matched = true; }
+            if (color_eq(bg, p_track[i])) { lv_obj_set_style_bg_color(obj, c_track[i], st); matched = true; }
         }
     }
 
-    // Check border color
-    lv_color_t bd = lv_obj_get_style_border_color(obj, 0);
-    for (int i = 0; i < 13; i++) {
-        if (color_eq(bd, p_ui[i])) { lv_obj_set_style_border_color(obj, c_ui[i], 0); break; }
+    // Check border color — state 0 and PRESSED
+    static const lv_state_t bd_states[] = { 0, LV_STATE_PRESSED, LV_STATE_FOCUSED };
+    for (int si = 0; si < 3; si++) {
+        lv_state_t st = bd_states[si];
+        lv_color_t bd = lv_obj_get_style_border_color(obj, st);
+        for (int i = 0; i < 13; i++) {
+            if (color_eq(bd, p_ui[i])) { lv_obj_set_style_border_color(obj, c_ui[i], st); break; }
+        }
     }
 
     // Check text color

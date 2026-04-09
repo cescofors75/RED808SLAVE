@@ -173,6 +173,7 @@ uint8_t prevByteButtonState = 0;
 bool byteButtonLivePressed[BYTEBUTTON_BUTTONS] = {false, false, false, false, false, false, false, false};
 uint32_t byteButtonLedCache[BYTEBUTTON_BUTTONS + 1] = {};
 bool byteButtonLedInitialized = false;
+int byteButtonFxScene = 0;  // 0=clean, 1=space, 2=acid, 3=destroy
 
 static constexpr uint8_t BYTEBUTTON_STATUS_REG      = 0x00;  // bitmask — unreliable polarity on some FW
 static constexpr uint8_t BYTEBUTTON_STATUS_8BYTE_REG = 0x60;  // per-button byte: 0x01=pressed, 0x00=released
@@ -1174,37 +1175,33 @@ void updateByteButtonLeds() {
     }
 
     uint32_t desired[BYTEBUTTON_LED_COUNT] = {};
-    static const Screen navTargets[7] = {
-        SCREEN_LIVE,
-        SCREEN_SEQUENCER,
-        SCREEN_VOLUMES,
-        SCREEN_FILTERS,
-        SCREEN_PATTERNS,
-        SCREEN_SETTINGS,
-        SCREEN_DIAGNOSTICS,
-    };
-    uint32_t navColors[7];
-    for (int nc = 0; nc < 7; nc++) navColors[nc] = theme_nav_color(nc);
 
-    if (currentScreen == SCREEN_LIVE) {
-        for (int i = 0; i < BYTEBUTTON_BUTTONS; i++) {
-            desired[i] = byteButtonLivePressed[i] ? 0xFFFFFF : byteButtonColorForPad(i);
-        }
-        desired[8] = isPlaying ? theme_nav_color(2) : theme_nav_color(0);
-    } else {
-        for (int i = 0; i < 7; i++) {
-            desired[i] = (currentScreen == navTargets[i]) ? 0xFFFFFF : navColors[i];
-        }
-        desired[7] = isPlaying ? theme_nav_color(2) : theme_nav_color(0);
-        desired[8] = masterConnected ? theme_nav_color(1) : 0x222222;
+    // ── Button LED colors (mirrored: hw bit N = physical btn 7-N) ───────────────
+    // Physical btn 0 (bit 7) = Back
+    desired[7] = theme_nav_color(6);
+
+    // Physical btn 1 (bit 6) = Vol mode toggle → blue=SEQ, orange=PAD
+    desired[6] = (volumeMode == VOL_SEQUENCER) ? 0x0055CC : 0xCC5500;
+
+    // Physical btns 2-5 (bits 5-2) = FX scenes — bright when active, dark otherwise
+    // 0=Clean, 1=Space, 2=Acid, 3=Destroy
+    static const uint32_t fxSceneOn[4]  = { 0x00CC44, 0x0099CC, 0x33FF33, 0xFF2222 };
+    static const uint32_t fxSceneOff[4] = { 0x112211, 0x001122, 0x002200, 0x220000 };
+    for (int s = 0; s < 4; s++) {
+        desired[5 - s] = (byteButtonFxScene == s) ? fxSceneOn[s] : fxSceneOff[s];
     }
+
+    // Physical btn 6 (bit 1) = Pattern -- → amber dim, brighter if pattern > 0
+    desired[1] = (currentPattern > 0) ? 0xAA6600 : 0x221100;
+    // Physical btn 7 (bit 0) = Pattern ++ → amber dim, brighter if pattern < max-1
+    desired[0] = (currentPattern < Config::MAX_PATTERNS - 1) ? 0xAA6600 : 0x221100;
+
+    // LED 8 (status ring): master connection
+    desired[8] = masterConnected ? theme_nav_color(1) : 0x222222;
 
     bool hasChanges = false;
     for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
-        if (byteButtonLedCache[i] != desired[i]) {
-            hasChanges = true;
-            break;
-        }
+        if (byteButtonLedCache[i] != desired[i]) { hasChanges = true; break; }
     }
     if (!hasChanges) return;
     if (!i2c_lock(10)) return;
@@ -1606,7 +1603,17 @@ void handleDFRobotEncoders() {
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();
-                navigateToScreen(SCREEN_MENU);
+                // Reset BPM to default
+                int newBPM = Config::DEFAULT_BPM;
+                if (newBPM != currentBPM) {
+                    currentBPM = newBPM;
+                    nvs_mark_dirty();
+                    JsonDocument doc(&sramAllocator);
+                    doc["cmd"] = "tempo";
+                    doc["value"] = currentBPM;
+                    sendUDPCommand(doc);
+                }
+                RED808_LOG_PRINTF("[DFRobot] BPM reset to %d\n", currentBPM);
             }
         }
     }
@@ -1618,10 +1625,10 @@ void handleDFRobotEncoders() {
 // =============================================================================
 
 void handleAnalogEncoder() {
-    static int  lastPosition = -1;
+    static int  lastThemeIdx = -1;
     static unsigned long lastChangeMs = 0;
     // Ring buffer for robust median filtering
-    static constexpr int RING_SIZE = 8;
+    static constexpr int RING_SIZE = 7;
     static int ring[RING_SIZE] = {};
     static int ringIdx = 0;
     static bool ringFull = false;
@@ -1629,8 +1636,11 @@ void handleAnalogEncoder() {
     static int  calMin = 4095;
     static int  calMax = 0;
     static int  calSamples = 0;
+    // Stable theme confirmation
+    static int  candidateTheme = -1;
+    static int  candidateCount = 0;
 
-    // 16-sample average per call — sufficient for ESP32-S3 ADC noise
+    // 8-sample average per call — tames ESP32-S3 ADC noise
     long sum = 0;
     for (int i = 0; i < 8; i++) sum += analogRead(Config::ANALOG_ENC_PIN);
     int raw = (int)(sum / 8);
@@ -1640,9 +1650,9 @@ void handleAnalogEncoder() {
     ringIdx = (ringIdx + 1) % RING_SIZE;
     if (!ringFull && ringIdx == 0) ringFull = true;
 
-    // Need at least 4 samples before processing
+    // Need at least 5 samples before processing
     int count = ringFull ? RING_SIZE : ringIdx;
-    if (count < 4) return;
+    if (count < 5) return;
 
     // Compute median of ring buffer (sort copy)
     int sorted[RING_SIZE];
@@ -1653,55 +1663,91 @@ void handleAnalogEncoder() {
     int median = sorted[count / 2];
 
     // Update calibration with median (rejects noise spikes)
+    // Only expand range if reading is significantly different from current bounds
     calSamples++;
-    if (calSamples > 10) {
-        if (median < calMin) calMin = median;
-        if (median > calMax) calMax = median;
+    if (calSamples > 20) {
+        if (median < calMin - 10) calMin = median;
+        if (median > calMax + 10) calMax = median;
     }
 
-    // Map using calibrated range
+    // Map to 12 positions using calibrated range
     int position;
-    if ((calMax - calMin) >= 250) {
-        int margin = (calMax - calMin) / 20;  // 5% margin on edges
+    if ((calMax - calMin) >= 300) {
+        int margin = (calMax - calMin) / 15;  // ~7% dead zone on edges
         position = constrain((int)map(median, calMin + margin, calMax - margin, 0, 11), 0, 11);
     } else {
         position = constrain((median * 12 + 2048) / 4096, 0, 11);
     }
 
-    // Hysteresis: require 3 consecutive agreeing reads at new position
-    static int candidatePos = -1;
-    static int candidateCount = 0;
-    if (position != lastPosition) {
-        if (position == candidatePos) {
-            candidateCount++;
-        } else {
-            candidatePos = position;
-            candidateCount = 1;
-        }
-        if (candidateCount < 3) return;
-        if ((millis() - lastChangeMs) < 200) return;
-    } else {
-        candidatePos = -1;
+    // Map 12 positions → 6 themes (2 positions per theme)
+    int themeIdx = constrain(position / 2, 0, (int)THEME_COUNT - 1);
+
+    // If same theme as currently active — reset candidate and return
+    if (themeIdx == lastThemeIdx) {
+        candidateTheme = -1;
         candidateCount = 0;
         return;
     }
 
-    lastPosition = position;
+    // Require 4 consecutive polls agreeing on the NEW theme before switching
+    if (themeIdx == candidateTheme) {
+        candidateCount++;
+    } else {
+        candidateTheme = themeIdx;
+        candidateCount = 1;
+    }
+    if (candidateCount < 4) return;
+
+    // Time guard — prevent rapid toggling
+    if ((millis() - lastChangeMs) < 300) return;
+
+    lastThemeIdx = themeIdx;
     lastChangeMs = millis();
-    candidatePos = -1;
+    candidateTheme = -1;
     candidateCount = 0;
 
-    // Map 12 positions → 6 themes (2 positions per theme)
-    int themeIdx = constrain(position / 2, 0, (int)THEME_COUNT - 1);
     if (themeIdx != (int)currentTheme) {
         ui_theme_apply((VisualTheme)themeIdx);
-        RED808_LOG_PRINTF("[ROTARY] pos=%d → theme %d '%s'\n", position, themeIdx, theme_presets[themeIdx].name);
+        RED808_LOG_PRINTF("[ROTARY] median=%d cal=[%d..%d] pos=%d → theme %d '%s'\n",
+                          median, calMin, calMax, position, themeIdx, theme_presets[themeIdx].name);
     }
 }
 
 // =============================================================================
 // BYTEBUTTON HANDLING
 // =============================================================================
+
+// FX scenes applied by ByteButton:
+//   0 = Clean  — all FX off
+//   1 = Space  — light delay + comp (ambient/spacious)
+//   2 = Acid   — delay + heavy flanger (classic acid)
+//   3 = Destroy — all FX heavy
+static void applyFxScene(int scene) {
+    byteButtonFxScene = constrain(scene, 0, 3);
+    switch (byteButtonFxScene) {
+        case 0: // Clean
+            masterFilter.enabled = false;
+            masterFilter.delayAmount = 0; masterFilter.flangerAmount = 0; masterFilter.compAmount = 0;
+            break;
+        case 1: // Space
+            masterFilter.enabled = true;
+            masterFilter.delayAmount = 55; masterFilter.flangerAmount = 0; masterFilter.compAmount = 40;
+            break;
+        case 2: // Acid
+            masterFilter.enabled = true;
+            masterFilter.delayAmount = 40; masterFilter.flangerAmount = 70; masterFilter.compAmount = 0;
+            break;
+        case 3: // Destroy
+            masterFilter.enabled = true;
+            masterFilter.delayAmount = 120; masterFilter.flangerAmount = 100; masterFilter.compAmount = 100;
+            break;
+    }
+    sendFilterUDP(-1, FILTER_DELAY);
+    sendFilterUDP(-1, FILTER_FLANGER);
+    sendFilterUDP(-1, FILTER_COMPRESSOR);
+    static const char* sceneNames[] = {"CLEAN", "SPACE", "ACID", "DESTROY"};
+    RED808_LOG_PRINTF("[BB] FX SCENE: %s\n", sceneNames[byteButtonFxScene]);
+}
 
 void handleByteButton() {
     if (!byteButtonConnected) return;
@@ -1713,7 +1759,7 @@ void handleByteButton() {
     uint8_t status = 0;
     bool readOk = false;
 
-    if (i2c_lock(8)) {
+    if (i2c_lock(20)) {
         if (byteButtonHubChannel >= 0) i2c_hub_select_raw(byteButtonHubChannel);
         else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
 
@@ -1741,60 +1787,35 @@ void handleByteButton() {
         memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
         for (int button = 0; button < BYTEBUTTON_BUTTONS; button++) {
             if ((pressedEdges & (1U << button)) == 0) continue;
+            int btn = (BYTEBUTTON_BUTTONS - 1) - button;  // mirror: hw bit0 = physical btn7
 
-            switch (button) {
-                case 0: // Pattern --
-                    if (currentPattern > 0) selectPatternOnMaster(currentPattern - 1);
+            switch (btn) {
+                case 0: // Back → menu
+                    navigateToScreen(SCREEN_MENU);
                     break;
-                case 1: // Pattern ++
-                    if (currentPattern < Config::MAX_PATTERNS - 1) selectPatternOnMaster(currentPattern + 1);
-                    break;
-                case 2: // Pattern = 1 (index 0)
-                    selectPatternOnMaster(0);
-                    break;
-                case 3: // Toggle volume mode SEQ <-> PAD
+                case 1: // Toggle volume mode SEQ ↔ PAD
                     volumeMode = (volumeMode == VOL_SEQUENCER) ? VOL_LIVE_PADS : VOL_SEQUENCER;
                     nvs_mark_dirty();
                     RED808_LOG_PRINTF("[BB] Volume mode: %s\n", volumeMode == VOL_SEQUENCER ? "SEQ" : "PAD");
                     break;
-                case 4: { // FX Delay toggle
-                    masterFilter.enabled = !masterFilter.enabled || (filterSelectedFX != FILTER_DELAY);
-                    filterSelectedFX = FILTER_DELAY;
-                    if (!masterFilter.enabled) masterFilter.delayAmount = 0;
-                    else if (masterFilter.delayAmount == 0) masterFilter.delayAmount = 64;
-                    sendFilterUDP(-1, FILTER_DELAY);
-                    RED808_LOG_PRINTF("[BB] FX DELAY %s\n", masterFilter.enabled ? "ON" : "OFF");
+                case 2: // Clean FX (all off)
+                    applyFxScene(0);
                     break;
-                }
-                case 5: { // FX Flanger toggle
-                    masterFilter.enabled = !masterFilter.enabled || (filterSelectedFX != FILTER_FLANGER);
-                    filterSelectedFX = FILTER_FLANGER;
-                    if (!masterFilter.enabled) masterFilter.flangerAmount = 0;
-                    else if (masterFilter.flangerAmount == 0) masterFilter.flangerAmount = 64;
-                    sendFilterUDP(-1, FILTER_FLANGER);
-                    RED808_LOG_PRINTF("[BB] FX FLANGER %s\n", masterFilter.enabled ? "ON" : "OFF");
+                case 3: // Space FX
+                    applyFxScene(1);
                     break;
-                }
-                case 6: { // FX Compressor toggle
-                    masterFilter.enabled = !masterFilter.enabled || (filterSelectedFX != FILTER_COMPRESSOR);
-                    filterSelectedFX = FILTER_COMPRESSOR;
-                    if (!masterFilter.enabled) masterFilter.compAmount = 0;
-                    else if (masterFilter.compAmount == 0) masterFilter.compAmount = 64;
-                    sendFilterUDP(-1, FILTER_COMPRESSOR);
-                    RED808_LOG_PRINTF("[BB] FX COMPRESSOR %s\n", masterFilter.enabled ? "ON" : "OFF");
+                case 4: // Acid FX
+                    applyFxScene(2);
                     break;
-                }
-                case 7: { // Clear ALL FX
-                    masterFilter.enabled = false;
-                    masterFilter.delayAmount = 0;
-                    masterFilter.flangerAmount = 0;
-                    masterFilter.compAmount = 0;
-                    sendFilterUDP(-1, FILTER_DELAY);
-                    sendFilterUDP(-1, FILTER_FLANGER);
-                    sendFilterUDP(-1, FILTER_COMPRESSOR);
-                    RED808_LOG_PRINTLN("[BB] ALL FX CLEARED");
+                case 5: // Destroy FX
+                    applyFxScene(3);
                     break;
-                }
+                case 6: // Pattern --
+                    if (currentPattern > 0) selectPatternOnMaster(currentPattern - 1);
+                    break;
+                case 7: // Pattern ++
+                    if (currentPattern < Config::MAX_PATTERNS - 1) selectPatternOnMaster(currentPattern + 1);
+                    break;
             }
         }
     }
