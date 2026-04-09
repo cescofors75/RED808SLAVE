@@ -27,6 +27,19 @@
 #define SCREEN_WIDTH   1024
 #define SCREEN_HEIGHT  600
 
+// Portrait mode: 0 = landscape (1024x600), 1 = portrait (600x1024 via SW rotation)
+#ifndef PORTRAIT_MODE
+#define PORTRAIT_MODE  1
+#endif
+
+#if PORTRAIT_MODE
+#define UI_W  600
+#define UI_H  1024
+#else
+#define UI_W  SCREEN_WIDTH
+#define UI_H  SCREEN_HEIGHT
+#endif
+
 // RGB LCD Signals
 #define LCD_VSYNC      GPIO_NUM_3
 #define LCD_HSYNC      GPIO_NUM_46

@@ -54,6 +54,7 @@ static bool IRAM_ATTR lvgl_on_vsync(esp_lcd_panel_handle_t panel,
 //
 // Because sem_gui_ready is given AFTER draw_bitmap, the ISR cannot fire for a
 // vsync that precedes the swap, eliminating the drain-loop race condition.
+#if !PORTRAIT_MODE
 static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
     esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)drv->user_data;
 
@@ -68,6 +69,17 @@ static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t*
 
     lv_disp_flush_ready(drv);
 }
+#endif
+
+// Portrait mode: partial-area flush — sw_rotate already rotated pixels to physical coords.
+// Writes the rendered area into the active framebuffer; bounce-buffer DMA picks it up.
+#if PORTRAIT_MODE
+static void disp_flush_portrait_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
+    esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)drv->user_data;
+    esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1, color_p);
+    lv_disp_flush_ready(drv);
+}
+#endif
 
 // Touch read
 static void touch_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
@@ -81,6 +93,8 @@ static void touch_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     uint8_t count = gt911_get_points(points, 1);
     if (count > 0 && points[0].pressed) {
         data->state = LV_INDEV_STATE_PRESSED;
+        // Pass raw physical coordinates — LVGL's sw_rotate handles
+        // the coordinate transformation automatically via disp_drv.rotated
         data->point.x = points[0].x;
         data->point.y = points[0].y;
     } else {
@@ -123,6 +137,27 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     lv_init();
     rgb_lcd_register_vsync_cb(lcd_panel, lvgl_on_vsync, NULL);
 
+#if PORTRAIT_MODE
+    // Portrait mode: partial rendering + sw_rotate.
+    // Allocate two render buffers in PSRAM (not the panel FBs).
+    static constexpr size_t PORT_BUF_LINES = 100;
+    const size_t buf_px = SCREEN_WIDTH * PORT_BUF_LINES;  // 1024 * 100 = 102400 px
+    lv_color_t* buf_a = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    lv_color_t* buf_b = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    lv_disp_draw_buf_init(&draw_buf, buf_a, buf_b, buf_px);
+
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res      = SCREEN_WIDTH;   // Physical: 1024
+    disp_drv.ver_res      = SCREEN_HEIGHT;  // Physical: 600
+    disp_drv.flush_cb     = disp_flush_portrait_cb;
+    disp_drv.draw_buf     = &draw_buf;
+    disp_drv.user_data    = lcd_panel;
+    disp_drv.sw_rotate    = 1;
+    disp_drv.rotated      = LV_DISP_ROT_90;
+    disp_drv.direct_mode  = 0;
+    disp_drv.full_refresh = 0;
+#else
+    // Landscape: zero-copy double-buffer (original fast path).
     // Get the panel's own PSRAM framebuffers — LVGL renders directly into
     // these. On flush, draw_bitmap recognises the pointer and does a
     // zero-copy swap instead of memcpy. Saves 2.4MB PSRAM and eliminates
@@ -145,6 +180,7 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     disp_drv.user_data    = lcd_panel;
     disp_drv.direct_mode  = 1;
     disp_drv.full_refresh = 1;
+#endif
     lv_disp_drv_register(&disp_drv);
 
     // Touch
@@ -156,8 +192,10 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     // LVGL task — core 1, priority 3 (higher = less preemption during flush)
     xTaskCreatePinnedToCore(lvgl_task, "lvgl", 12288, NULL, 3, NULL, 1);
 
-    ESP_LOGI(TAG, "LVGL port: %dx%d zero-copy double-buf, dual-semaphore vsync sync",
-             SCREEN_WIDTH, SCREEN_HEIGHT);
+    ESP_LOGI(TAG, "LVGL port: %dx%d %s, %s",
+             UI_W, UI_H,
+             PORTRAIT_MODE ? "portrait sw_rotate" : "landscape zero-copy",
+             PORTRAIT_MODE ? "partial render" : "dual-semaphore vsync sync");
 }
 
 bool lvgl_port_lock(int timeout_ms) {

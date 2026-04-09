@@ -28,8 +28,10 @@
 // =============================================================================
 // DISPLAY
 // =============================================================================
+// Max dimensions: 1024 covers both orientations (1024x600 landscape, 600x1024 portrait).
+// Actual resolution is set in disp_drv (lvgl_port.cpp).
 #define LV_HOR_RES_MAX     1024
-#define LV_VER_RES_MAX     600
+#define LV_VER_RES_MAX     1024
 #define LV_DPI_DEF         130
 
 // =============================================================================
