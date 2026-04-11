@@ -129,16 +129,24 @@
 #define ENCODERS_PER_MODULE    8
 #define M5_ENCODER_ADDR        0x41  // Both modules, separated by hub
 
-// DFRobot SEN0502 Visual Rotary Encoders (2x)
-#define DFROBOT_ENCODER_COUNT  2
+// DFRobot SEN0502 Visual Rotary Encoders (4x)
+#define DFROBOT_ENCODER_COUNT  4
 #define DFROBOT_ENCODER_ADDR   0x54  // Both encoders, separated by hub
-// DFRobot #1: FX control (rotation=amount, button=cycle effect)
-// DFRobot #2: Pattern select (rotation=navigate, button=reset)
+// DFRobot #1: Sequencer/Live volume (button=Play/Stop)
+// DFRobot #2: BPM (button=reset BPM)
+// DFRobot #3: Master volume (button=toggle volume mode)
+// DFRobot #4: Pattern select (button=request pattern sync)
 
-// M5 Unit ByteButton (1x)
+// M5 Unit ByteButton (up to 2x via hub channels)
 #define BYTEBUTTON_COUNT       1
 #define BYTEBUTTON_ADDR        0x47
 #define BYTEBUTTON_BUTTONS     8
+#define BYTEBUTTON1_HUB_CH     4
+
+// DFRobot 4x analog pot hub via I2C ADC converter (ADS1115-compatible)
+#define DFROBOT_POT_COUNT      4
+#define DFROBOT_POT_ADC_ADDR   0x48
+#define DFROBOT_POT_ADC_ADDR_ALT 0x49
 
 // =============================================================================
 // SD CARD (SDMMC 1-bit mode, CS via CH32V003 EXIO4)
@@ -219,11 +227,15 @@ namespace Config {
     constexpr int DF_BPM_STEP = 1;      // BPM change per encoder step
     constexpr uint32_t DF_BUTTON_GUARD_MS = 250;
     constexpr uint32_t LIVE_PAD_REPEAT_MS = 50;       // (legacy, kept for reference)
+    constexpr uint32_t DF_POT_READ_MS = 25;           // 40Hz poll for 4-pot hub
+    constexpr uint8_t DF_POT_MIDI_DEADBAND = 2;       // avoid UDP spam on ADC jitter
+    constexpr uint8_t DF_POT_STABLE_READS = 3;        // detent change must persist N reads
+    constexpr uint16_t DF_POT_MIN_SPAN = 16;          // avoid over-amplifying tiny noise windows
 
-    // GPIO analog rotary encoder (pattern select)
-    constexpr int ANALOG_ENC_PIN = 6;        // GPIO6 signal pin
-    constexpr int ANALOG_ENC_PATTERNS = 16;  // Number of pattern positions
-    constexpr int ANALOG_ENC_DEADBAND = 40;  // ADC noise deadband
+    // M5 Unit Fader on analog pin (replaces old analog rotary)
+    constexpr int UNIT_FADER_PIN = 6;        // GPIO6 signal pin
+    constexpr int UNIT_FADER_DEADBAND = 2;   // MIDI-level deadband
+    constexpr uint32_t UNIT_FADER_READ_MS = 20;
 
     // Menu
     constexpr int MENU_ITEMS = 6;

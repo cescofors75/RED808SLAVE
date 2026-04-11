@@ -94,8 +94,9 @@ EncoderMode encoderMode = ENC_MODE_VOLUME;
 
 // I2C Hub
 int m5HubChannel[M5_ENCODER_MODULES] = {-1, -1};
-int dfRobotHubChannel[DFROBOT_ENCODER_COUNT] = {-1, -1};
+int dfRobotHubChannel[DFROBOT_ENCODER_COUNT] = {-1, -1, -1, -1};
 int byteButtonHubChannel = -1;
+int dfRobotPotHubChannel = -1;
 bool hubDetected = false;
 
 // Connection
@@ -133,9 +134,11 @@ WiFiUDP udp;
 M5ROTATE8 m5encoders[M5_ENCODER_MODULES];
 bool m5encoderConnected[M5_ENCODER_MODULES] = {false, false};
 uint8_t m5FirmwareVersion[M5_ENCODER_MODULES] = {0, 0};  // stored at init for I2C health check
-DFRobot_VisualRotaryEncoder_I2C* dfEncoders[DFROBOT_ENCODER_COUNT] = {nullptr, nullptr};
-bool dfEncoderConnected[DFROBOT_ENCODER_COUNT] = {false, false};
+DFRobot_VisualRotaryEncoder_I2C* dfEncoders[DFROBOT_ENCODER_COUNT] = {};
+bool dfEncoderConnected[DFROBOT_ENCODER_COUNT] = {};
 bool byteButtonConnected = false;
+bool dfRobotPotConnected = false;
+uint8_t dfRobotPotAddr = DFROBOT_POT_ADC_ADDR;
 esp_lcd_panel_handle_t lcd_panel = NULL;
 
 // Encoder LED colors per track (full rainbow spectrum)
@@ -175,6 +178,35 @@ bool byteButtonLivePressed[BYTEBUTTON_BUTTONS] = {false, false, false, false, fa
 uint32_t byteButtonLedCache[BYTEBUTTON_BUTTONS + 1] = {};
 bool byteButtonLedInitialized = false;
 int byteButtonFxScene = 0;  // 0=clean, 1=space, 2=acid, 3=destroy
+const char* const byteButtonActionNames[] = {
+    "Back/Menu",
+    "Vol Mode SEQ/PAD",
+    "FX Scene: Clean",
+    "FX Scene: Space",
+    "FX Scene: Acid",
+    "FX Scene: Destroy",
+    "FX Target --",
+    "FX Target ++",
+    "Pattern --",
+    "Pattern ++"
+};
+uint8_t byteButtonActionMap[BYTEBUTTON_BUTTONS] = {
+    BB_ACTION_MENU,
+    BB_ACTION_VOL_MODE,
+    BB_ACTION_FX_CLEAN,
+    BB_ACTION_FX_SPACE,
+    BB_ACTION_FX_ACID,
+    BB_ACTION_FX_DESTROY,
+    BB_ACTION_FX_TARGET_PREV,
+    BB_ACTION_FX_TARGET_NEXT
+};
+uint16_t dfRobotPotRaw[DFROBOT_POT_COUNT] = {};
+uint8_t dfRobotPotMidi[DFROBOT_POT_COUNT] = {};
+uint8_t dfRobotPotPos[DFROBOT_POT_COUNT] = {};
+uint8_t dfRobotPotLastSent[DFROBOT_POT_COUNT] = {255, 255, 255, 255};
+uint8_t dfRobotPotPosLastSent[DFROBOT_POT_COUNT] = {255, 255, 255, 255};
+uint16_t dfRobotPotCalMin[DFROBOT_POT_COUNT] = {65535, 65535, 65535, 65535};
+uint16_t dfRobotPotCalMax[DFROBOT_POT_COUNT] = {0, 0, 0, 0};
 
 static constexpr uint8_t BYTEBUTTON_STATUS_REG      = 0x00;  // bitmask — unreliable polarity on some FW
 static constexpr uint8_t BYTEBUTTON_STATUS_8BYTE_REG = 0x60;  // per-button byte: 0x01=pressed, 0x00=released
@@ -248,10 +280,11 @@ void sendFilterUDP(int track, int fxType);
 void scanI2CHub();
 void handleM5Encoders();
 void handleDFRobotEncoders();
+void handleDFRobotPots();
 void handleByteButton();
 void updateByteButtonLeds();
 void updateTrackEncoderLED(int track);
-void handleAnalogEncoder();
+void handleUnitFader();
 void updateUI();
 static void encoder_task(void* arg);
 static void touch_task(void* arg);
@@ -344,7 +377,7 @@ static void requestMasterSync(bool requestState) {
 }
 
 static int quantizeDFDelta(int index, int16_t delta) {
-    static int accumulators[DFROBOT_ENCODER_COUNT] = {0, 0};
+    static int accumulators[DFROBOT_ENCODER_COUNT] = {};
     if (index < 0 || index >= DFROBOT_ENCODER_COUNT) return 0;
     if (delta == 0) return 0;
 
@@ -564,6 +597,15 @@ void initState() {
     }
     for (int i = 0; i < Config::MAX_TRACKS; i++) prevM5Counter[i] = 0;
     for (int i = 0; i < DFROBOT_ENCODER_COUNT; i++) prevDFValue[i] = 0;
+    for (int i = 0; i < DFROBOT_POT_COUNT; i++) {
+        dfRobotPotRaw[i] = 0;
+        dfRobotPotMidi[i] = 0;
+        dfRobotPotPos[i] = 0;
+        dfRobotPotLastSent[i] = 255;
+        dfRobotPotPosLastSent[i] = 255;
+        dfRobotPotCalMin[i] = 65535;
+        dfRobotPotCalMax[i] = 0;
+    }
     prevByteButtonState = 0;
     pendingLivePadTriggerMask = 0;
     memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
@@ -1045,6 +1087,178 @@ void sendFilterUDP(int track, int fxType) {
 // I2C HUB & DEVICE SCANNING
 // =============================================================================
 
+static bool ads1115WriteReg(uint8_t reg, uint16_t value) {
+    Wire.beginTransmission(dfRobotPotAddr);
+    Wire.write(reg);
+    Wire.write((uint8_t)(value >> 8));
+    Wire.write((uint8_t)(value & 0xFF));
+    return Wire.endTransmission() == 0;
+}
+
+static bool ads1115ReadReg(uint8_t reg, uint16_t& value) {
+    Wire.beginTransmission(dfRobotPotAddr);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((uint8_t)dfRobotPotAddr, (uint8_t)2) != 2) return false;
+    uint8_t msb = Wire.read();
+    uint8_t lsb = Wire.read();
+    value = (uint16_t)((msb << 8) | lsb);
+    return true;
+}
+
+static bool ads1115ReadChannel(uint8_t channel, uint16_t& raw) {
+    if (channel >= DFROBOT_POT_COUNT) return false;
+
+    // Single-shot conversion, AINx vs GND, PGA +-4.096V, 860SPS.
+    const uint16_t muxByChannel[DFROBOT_POT_COUNT] = {
+        0x4000, 0x5000, 0x6000, 0x7000
+    };
+    uint16_t config = 0x8000 | muxByChannel[channel] | 0x0200 | 0x0100 | 0x00E0 | 0x0003;
+    if (!ads1115WriteReg(0x01, config)) return false;
+
+    delay(2);
+
+    uint16_t conv = 0;
+    if (!ads1115ReadReg(0x00, conv)) return false;
+
+    int16_t signedValue = (int16_t)conv;
+    if (signedValue < 0) signedValue = 0;
+    raw = (uint16_t)signedValue;
+    return true;
+}
+
+void handleDFRobotPots() {
+    if (!dfRobotPotConnected) return;
+
+    static unsigned long lastReadMs = 0;
+    unsigned long now = millis();
+    if ((now - lastReadMs) < Config::DF_POT_READ_MS) return;
+    lastReadMs = now;
+
+    bool readOk = false;
+    uint16_t sampleRaw[DFROBOT_POT_COUNT] = {};
+    uint8_t sampleMidi[DFROBOT_POT_COUNT] = {};
+
+    if (i2c_lock(18)) {
+        if (dfRobotPotHubChannel >= 0) i2c_hub_select_raw(dfRobotPotHubChannel);
+        else if (dfRobotPotHubChannel == -2) i2c_hub_deselect_raw();
+
+        readOk = true;
+        for (uint8_t ch = 0; ch < DFROBOT_POT_COUNT; ch++) {
+            uint16_t raw = 0;
+            if (!ads1115ReadChannel(ch, raw)) {
+                readOk = false;
+                break;
+            }
+            sampleRaw[ch] = raw;
+            sampleMidi[ch] = (uint8_t)map((long)raw, 0L, 32767L, 0L, 127L);
+        }
+
+        if (dfRobotPotHubChannel >= 0) i2c_hub_deselect_raw();
+        i2c_unlock();
+    }
+
+    if (!readOk) return;
+
+    static bool potInit[DFROBOT_POT_COUNT] = {false, false, false, false};
+    static uint16_t potFilteredRaw[DFROBOT_POT_COUNT] = {0, 0, 0, 0};
+    static uint8_t potCandidatePos[DFROBOT_POT_COUNT] = {0, 0, 0, 0};
+    static uint8_t potCandidateCount[DFROBOT_POT_COUNT] = {0, 0, 0, 0};
+
+    for (int pot = 0; pot < DFROBOT_POT_COUNT; pot++) {
+        uint16_t raw = sampleRaw[pot];
+        if (!potInit[pot]) {
+            potFilteredRaw[pot] = raw;
+            potInit[pot] = true;
+        } else {
+            // 1st-order low-pass: smooth random ADC fluctuations at rest.
+            potFilteredRaw[pot] = (uint16_t)((potFilteredRaw[pot] * 3U + raw) / 4U);
+        }
+        raw = potFilteredRaw[pot];
+        dfRobotPotRaw[pot] = raw;
+
+        // Adaptive calibration per pot to expand narrow ADC spans (e.g. 77..96)
+        if (raw < dfRobotPotCalMin[pot]) dfRobotPotCalMin[pot] = raw;
+        if (raw > dfRobotPotCalMax[pot]) dfRobotPotCalMax[pot] = raw;
+
+        uint16_t minV = dfRobotPotCalMin[pot];
+        uint16_t maxV = dfRobotPotCalMax[pot];
+        uint8_t pos = dfRobotPotPos[pot];
+        if (maxV > minV + 8) {
+            long mapped = map((long)raw, (long)minV, (long)maxV, 0L, 11L);
+            pos = (uint8_t)constrain((int)mapped, 0, 11);
+        } else {
+            // Not enough travel captured yet; keep current detent value stable.
+            pos = dfRobotPotPos[pot];
+        }
+
+        if ((maxV - minV) < Config::DF_POT_MIN_SPAN) {
+            // Tiny window means we're likely seeing idle jitter; skip remap.
+            pos = dfRobotPotPos[pot];
+        }
+
+        // Require a detent to be observed in consecutive reads before accepting.
+        if (pos != dfRobotPotPos[pot]) {
+            if (potCandidatePos[pot] == pos) {
+                if (potCandidateCount[pot] < 255) potCandidateCount[pot]++;
+            } else {
+                potCandidatePos[pot] = pos;
+                potCandidateCount[pot] = 1;
+            }
+            if (potCandidateCount[pot] >= Config::DF_POT_STABLE_READS) {
+                dfRobotPotPos[pot] = pos;
+                potCandidateCount[pot] = 0;
+            } else {
+                pos = dfRobotPotPos[pot];
+            }
+        } else {
+            potCandidateCount[pot] = 0;
+        }
+
+        uint8_t midi = (uint8_t)((pos * 127U) / 11U);
+        dfRobotPotMidi[pot] = midi;
+
+        bool sendNow = false;
+        if (dfRobotPotPosLastSent[pot] == 255 || dfRobotPotPosLastSent[pot] != pos) {
+            sendNow = true;
+        } else if (dfRobotPotLastSent[pot] == 255) {
+            sendNow = true;
+        } else {
+            int delta = abs((int)midi - (int)dfRobotPotLastSent[pot]);
+            sendNow = delta >= Config::DF_POT_MIDI_DEADBAND;
+        }
+        if (!sendNow) continue;
+
+        dfRobotPotPosLastSent[pot] = pos;
+        dfRobotPotLastSent[pot] = midi;
+
+        JsonDocument doc(&sramAllocator);
+        if (pot == 0) {
+            // P1: Master volume (coarse lane)
+            masterVolume = map((int)midi, 0, 127, 0, Config::MAX_VOLUME);
+            doc["cmd"] = "setVolume";
+            doc["value"] = masterVolume;
+            sendUDPCommand(doc);
+            nvs_mark_dirty();
+        } else if (pot == 1) {
+            // P2: Master delay amount
+            masterFilter.enabled = masterFilter.enabled || (midi > 0);
+            masterFilter.delayAmount = midi;
+            sendFilterUDP(-1, FILTER_DELAY);
+        } else if (pot == 2) {
+            // P3: Master flanger amount
+            masterFilter.enabled = masterFilter.enabled || (midi > 0);
+            masterFilter.flangerAmount = midi;
+            sendFilterUDP(-1, FILTER_FLANGER);
+        } else {
+            // P4: Master compressor amount
+            masterFilter.enabled = masterFilter.enabled || (midi > 0);
+            masterFilter.compAmount = midi;
+            sendFilterUDP(-1, FILTER_COMPRESSOR);
+        }
+    }
+}
+
 void scanI2CHub() {
     RED808_LOG_PRINTLN("[I2C] Scanning bus...");
 
@@ -1059,9 +1273,10 @@ void scanI2CHub() {
     RED808_LOG_PRINTLN("[I2C] PCA9548A hub detected");
 
     int m5Found = 0, dfFound = 0;
-    bool byteButtonFound = false;
+    bool potHubFound = false;
+    const int expectedBB1 = BYTEBUTTON1_HUB_CH;
 
-    for (uint8_t ch = 0; ch < 8 && (m5Found < M5_ENCODER_MODULES || dfFound < DFROBOT_ENCODER_COUNT || !byteButtonFound); ch++) {
+    for (uint8_t ch = 0; ch < 8 && (m5Found < M5_ENCODER_MODULES || dfFound < DFROBOT_ENCODER_COUNT || !byteButtonConnected || !potHubFound); ch++) {
         i2c_hub_select(ch);
         delay(5);
 
@@ -1114,58 +1329,81 @@ void scanI2CHub() {
         // Re-select hub channel before ByteButton probe
         // (M5/DFRobot init blocks above may have deselected the hub,
         //  causing a false detection on the direct bus)
-        if (!byteButtonFound) {
+        if (!byteButtonConnected) {
             i2c_hub_select(ch);
             delay(2);
             if (i2c_device_present(BYTEBUTTON_ADDR)) {
-                byteButtonHubChannel = ch;
-                byteButtonConnected = true;
-                byteButtonFound = true;
-                prevByteButtonState = 0;
-                RED808_LOG_PRINTF("[I2C] M5 ByteButton found on hub ch %d\n", ch);
+                if (ch == expectedBB1) {
+                    byteButtonHubChannel = ch;
+                    byteButtonConnected = true;
+                    prevByteButtonState = 0;
+                    RED808_LOG_PRINTF("[I2C] M5 ByteButton #1 found on hub ch %d\n", ch);
 
-                if (i2c_lock(50)) {
-                    i2c_hub_select_raw(ch);
-                    byteButtonLedInitialized = byteButtonApplyLedConfigLocked();
-                    i2c_hub_deselect_raw();
-                    i2c_unlock();
+                    if (i2c_lock(50)) {
+                        i2c_hub_select_raw(ch);
+                        byteButtonLedInitialized = byteButtonApplyLedConfigLocked();
+                        i2c_hub_deselect_raw();
+                        i2c_unlock();
+                    }
+                } else {
+                    RED808_LOG_PRINTF("[I2C] ByteButton found on unexpected ch %d (expected %d), ignored\n",
+                                      ch, expectedBB1);
                 }
+            }
+        }
+
+        // Probe DFRobot 4-pot ADC hub converter (ADS1115-compatible, 0x48)
+        if (!potHubFound) {
+            i2c_hub_select(ch);
+            delay(2);
+            if (i2c_device_present(DFROBOT_POT_ADC_ADDR) || i2c_device_present(DFROBOT_POT_ADC_ADDR_ALT)) {
+                dfRobotPotAddr = i2c_device_present(DFROBOT_POT_ADC_ADDR) ? DFROBOT_POT_ADC_ADDR : DFROBOT_POT_ADC_ADDR_ALT;
+                dfRobotPotHubChannel = ch;
+                dfRobotPotConnected = true;
+                potHubFound = true;
+                RED808_LOG_PRINTF("[I2C] DFRobot 4-pot ADC found on hub ch %d (0x%02X)\n", ch, dfRobotPotAddr);
             }
         }
 
         i2c_hub_deselect();
     }
 
-    // Fallback: try ByteButton directly on bus (not behind hub)
-    if (!byteButtonFound) {
-        i2c_hub_deselect();  // deselect all hub channels
-        delay(5);
-        if (i2c_device_present(BYTEBUTTON_ADDR)) {
-            byteButtonHubChannel = -2;  // sentinel: direct bus, no hub channel
-            byteButtonConnected = true;
-            byteButtonFound = true;
-            prevByteButtonState = 0;
-            RED808_LOG_PRINTLN("[I2C] M5 ByteButton found DIRECT on bus (no hub)");
+    if (!byteButtonConnected) {
+        RED808_LOG_PRINTF("[I2C] WARNING: ByteButton missing on expected ch%d\n", expectedBB1);
+    }
 
-            if (i2c_lock(50)) {
-                byteButtonLedInitialized = byteButtonApplyLedConfigLocked();
-                i2c_unlock();
-            }
+    // Fallback: try 4-pot ADC directly on bus (not behind hub)
+    if (!potHubFound) {
+        i2c_hub_deselect();
+        delay(5);
+        if (i2c_device_present(DFROBOT_POT_ADC_ADDR) || i2c_device_present(DFROBOT_POT_ADC_ADDR_ALT)) {
+            dfRobotPotAddr = i2c_device_present(DFROBOT_POT_ADC_ADDR) ? DFROBOT_POT_ADC_ADDR : DFROBOT_POT_ADC_ADDR_ALT;
+            dfRobotPotHubChannel = -2;
+            dfRobotPotConnected = true;
+            potHubFound = true;
+            RED808_LOG_PRINTF("[I2C] DFRobot 4-pot ADC found DIRECT on bus (0x%02X, no hub)\n", dfRobotPotAddr);
         }
     }
 
-    if (!byteButtonFound) {
-        RED808_LOG_PRINTLN("[I2C] WARNING: ByteButton NOT found on any channel or direct bus!");
+    if (!potHubFound) {
+        RED808_LOG_PRINTLN("[I2C] WARNING: DFRobot 4-pot ADC NOT found on any channel or direct bus!");
     }
 
     diagInfo.m5encoder1Ok = m5encoderConnected[0];
     diagInfo.m5encoder2Ok = m5encoderConnected[1];
     diagInfo.dfrobot1Ok = dfEncoderConnected[0];
     diagInfo.dfrobot2Ok = dfEncoderConnected[1];
+    diagInfo.dfrobot3Ok = dfEncoderConnected[2];
+    diagInfo.dfrobot4Ok = dfEncoderConnected[3];
+    diagInfo.dfrobotPotsOk = dfRobotPotConnected;
     diagInfo.byteButtonOk = byteButtonConnected;
 
-    RED808_LOG_PRINTF("[I2C] Found: %d M5 modules, %d DFRobot rotaries, ByteButton: %s\n",
-                  m5Found, dfFound, byteButtonConnected ? "YES" : "NO");
+    int byteButtonFoundCount = (byteButtonConnected ? 1 : 0);
+    RED808_LOG_PRINTF("[I2C] Found: %d M5 modules, %d DFRobot rotaries, ByteButtons: %d, Pot ADC: %s\n",
+                  m5Found,
+                  dfFound,
+                  byteButtonFoundCount,
+                  dfRobotPotConnected ? "YES" : "NO");
 }
 
 void updateByteButtonLeds() {
@@ -1177,25 +1415,40 @@ void updateByteButtonLeds() {
 
     uint32_t desired[BYTEBUTTON_LED_COUNT] = {};
 
-    // ── Button LED colors (mirrored: hw bit N = physical btn 7-N) ───────────────
-    // Physical btn 0 (bit 7) = Back
-    desired[7] = theme_nav_color(6);
-
-    // Physical btn 1 (bit 6) = Vol mode toggle → blue=SEQ, orange=PAD
-    desired[6] = (volumeMode == VOL_SEQUENCER) ? 0x0055CC : 0xCC5500;
-
-    // Physical btns 2-5 (bits 5-2) = FX scenes — bright when active, dark otherwise
-    // 0=Clean, 1=Space, 2=Acid, 3=Destroy
     static const uint32_t fxSceneOn[4]  = { 0x00CC44, 0x0099CC, 0x33FF33, 0xFF2222 };
     static const uint32_t fxSceneOff[4] = { 0x112211, 0x001122, 0x002200, 0x220000 };
-    for (int s = 0; s < 4; s++) {
-        desired[5 - s] = (byteButtonFxScene == s) ? fxSceneOn[s] : fxSceneOff[s];
-    }
 
-    // Physical btn 6 (bit 1) = Pattern -- → amber dim, brighter if pattern > 0
-    desired[1] = (currentPattern > 0) ? 0xAA6600 : 0x221100;
-    // Physical btn 7 (bit 0) = Pattern ++ → amber dim, brighter if pattern < max-1
-    desired[0] = (currentPattern < Config::MAX_PATTERNS - 1) ? 0xAA6600 : 0x221100;
+    auto ledColorForAction = [&](uint8_t action) -> uint32_t {
+        switch ((ByteButtonAction)action) {
+            case BB_ACTION_MENU:
+                return theme_nav_color(6);
+            case BB_ACTION_VOL_MODE:
+                return (volumeMode == VOL_SEQUENCER) ? 0x0055CC : 0xCC5500;
+            case BB_ACTION_FX_CLEAN:
+                return (byteButtonFxScene == 0) ? fxSceneOn[0] : fxSceneOff[0];
+            case BB_ACTION_FX_SPACE:
+                return (byteButtonFxScene == 1) ? fxSceneOn[1] : fxSceneOff[1];
+            case BB_ACTION_FX_ACID:
+                return (byteButtonFxScene == 2) ? fxSceneOn[2] : fxSceneOff[2];
+            case BB_ACTION_FX_DESTROY:
+                return (byteButtonFxScene == 3) ? fxSceneOn[3] : fxSceneOff[3];
+            case BB_ACTION_FX_TARGET_PREV:
+            case BB_ACTION_FX_TARGET_NEXT:
+                return (filterSelectedTrack == -1) ? 0x7711AA : 0xAA11AA;
+            case BB_ACTION_PATTERN_PREV:
+                return (currentPattern > 0) ? 0xAA6600 : 0x221100;
+            case BB_ACTION_PATTERN_NEXT:
+                return (currentPattern < Config::MAX_PATTERNS - 1) ? 0xAA6600 : 0x221100;
+            default:
+                return 0x202020;
+        }
+    };
+
+    // ── Button LED colors (mirrored: hw bit N = physical btn 7-N) ───────────────
+    for (int btn = 0; btn < BYTEBUTTON_BUTTONS; btn++) {
+        int ledIndex = (BYTEBUTTON_BUTTONS - 1) - btn;
+        desired[ledIndex] = ledColorForAction(byteButtonActionMap[btn]);
+    }
 
     // LED 8 (status ring): master connection
     desired[8] = masterConnected ? theme_nav_color(1) : 0x222222;
@@ -1518,7 +1771,7 @@ void handleM5Encoders() {
 // =============================================================================
 
 void handleDFRobotEncoders() {
-    static unsigned long lastBtnMs[DFROBOT_ENCODER_COUNT] = {0, 0};
+    static unsigned long lastBtnMs[DFROBOT_ENCODER_COUNT] = {};
 
     for (int i = 0; i < DFROBOT_ENCODER_COUNT; i++) {
         if (!dfEncoderConnected[i]) continue;
@@ -1553,32 +1806,18 @@ void handleDFRobotEncoders() {
 
         // Process results outside of I2C lock
         if (i == 0) {
-            // DFRobot #0: Volume (SEQ or PAD based on volumeMode toggle)
-            //   Button = Play/Pause
+            // DFRobot #0: Sequencer volume
+            // Button: Play/Pause
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                if (volumeMode == VOL_LIVE_PADS) {
-                    // Modify live pads volume
-                    int newVol = constrain(livePadsVolume + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
-                    if (newVol != livePadsVolume) {
-                        livePadsVolume = newVol;
-                        nvs_mark_dirty();
-                        JsonDocument doc(&sramAllocator);
-                        doc["cmd"] = "setLiveVolume";
-                        doc["value"] = livePadsVolume;
-                        sendUDPCommand(doc);
-                    }
-                } else {
-                    // Modify sequencer volume
-                    int newVol = constrain(sequencerVolume + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
-                    if (newVol != sequencerVolume) {
-                        sequencerVolume = newVol;
-                        nvs_mark_dirty();
-                        JsonDocument doc(&sramAllocator);
-                        doc["cmd"] = "setSequencerVolume";
-                        doc["value"] = sequencerVolume;
-                        sendUDPCommand(doc);
-                    }
+                int newVol = constrain(sequencerVolume + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
+                if (newVol != sequencerVolume) {
+                    sequencerVolume = newVol;
+                    nvs_mark_dirty();
+                    JsonDocument doc(&sramAllocator);
+                    doc["cmd"] = "setSequencerVolume";
+                    doc["value"] = sequencerVolume;
+                    sendUDPCommand(doc);
                 }
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
@@ -1587,7 +1826,8 @@ void handleDFRobotEncoders() {
             }
         }
         else if (i == 1) {
-            // DFRobot #1: BPM (1 per step) + BACK button
+            // DFRobot #1: BPM
+            // Button: reset BPM to default
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
                 int newBPM = constrain(currentBPM + logical_delta * Config::DF_BPM_STEP, Config::MIN_BPM, Config::MAX_BPM);
@@ -1615,103 +1855,85 @@ void handleDFRobotEncoders() {
                 RED808_LOG_PRINTF("[DFRobot] BPM reset to %d\n", currentBPM);
             }
         }
+        else if (i == 2) {
+            // DFRobot #2: Selected track volume
+            // Button: toggle mute on selected track
+            int logical_delta = quantizeDFDelta(i, delta);
+            if (logical_delta != 0) {
+                int tr = constrain(selectedTrack, 0, Config::MAX_TRACKS - 1);
+                int newVol = constrain(trackVolumes[tr] + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
+                if (newVol != trackVolumes[tr]) {
+                    trackVolumes[tr] = newVol;
+                    nvs_mark_dirty();
+                    JsonDocument doc(&sramAllocator);
+                    doc["cmd"] = "setTrackVolume";
+                    doc["track"] = tr;
+                    doc["volume"] = trackVolumes[tr];
+                    sendUDPCommand(doc);
+                }
+            }
+            if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
+                lastBtnMs[i] = millis();
+                int tr = constrain(selectedTrack, 0, Config::MAX_TRACKS - 1);
+                trackMuted[tr] = !trackMuted[tr];
+                JsonDocument doc(&sramAllocator);
+                doc["cmd"] = "mute";
+                doc["track"] = tr;
+                doc["value"] = trackMuted[tr];
+                sendUDPCommand(doc);
+                RED808_LOG_PRINTF("[DFRobot] Track %d %s\n", tr, trackMuted[tr] ? "MUTED" : "UNMUTED");
+            }
+        }
+        else if (i == 3) {
+            // DFRobot #3: Pattern select
+            // Button: request pattern resync from master
+            int logical_delta = quantizeDFDelta(i, delta);
+            if (logical_delta != 0) {
+                int newPattern = constrain(currentPattern + logical_delta, 0, Config::MAX_PATTERNS - 1);
+                if (newPattern != currentPattern) {
+                    selectPatternOnMaster(newPattern);
+                }
+            }
+            if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
+                lastBtnMs[i] = millis();
+                requestPatternFromMaster();
+                RED808_LOG_PRINTF("[DFRobot] Pattern resync requested for %d\n", currentPattern);
+            }
+        }
     }
 }
 
 // =============================================================================
-// ANALOG ROTARY ENCODER (GPIO6) — 12-position visual theme selector
-// 12 positions → 6 themes (2 positions per theme)
+// M5 UNIT FADER (GPIO6) - analog control
 // =============================================================================
 
-void handleAnalogEncoder() {
-    static int  lastThemeIdx = -1;
-    static unsigned long lastChangeMs = 0;
-    // Ring buffer for robust median filtering
-    static constexpr int RING_SIZE = 7;
-    static int ring[RING_SIZE] = {};
-    static int ringIdx = 0;
-    static bool ringFull = false;
-    // Self-calibrating ADC range with noise margin
-    static int  calMin = 4095;
-    static int  calMax = 0;
-    static int  calSamples = 0;
-    // Stable theme confirmation
-    static int  candidateTheme = -1;
-    static int  candidateCount = 0;
+void handleUnitFader() {
+    static unsigned long lastReadMs = 0;
+    static int filtered = -1;
+    static int lastSentMidi = -1;
 
-    // 8-sample average per call — tames ESP32-S3 ADC noise
+    unsigned long now = millis();
+    if ((now - lastReadMs) < Config::UNIT_FADER_READ_MS) return;
+    lastReadMs = now;
+
     long sum = 0;
-    for (int i = 0; i < 8; i++) sum += analogRead(Config::ANALOG_ENC_PIN);
+    for (int i = 0; i < 8; i++) sum += analogRead(Config::UNIT_FADER_PIN);
     int raw = (int)(sum / 8);
 
-    // Store in ring buffer
-    ring[ringIdx] = raw;
-    ringIdx = (ringIdx + 1) % RING_SIZE;
-    if (!ringFull && ringIdx == 0) ringFull = true;
+    if (filtered < 0) filtered = raw;
+    filtered = (filtered * 3 + raw) / 4;
 
-    // Need at least 5 samples before processing
-    int count = ringFull ? RING_SIZE : ringIdx;
-    if (count < 5) return;
+    int midi = constrain((filtered * 127 + 2047) / 4095, 0, 127);
+    if (lastSentMidi >= 0 && abs(midi - lastSentMidi) < Config::UNIT_FADER_DEADBAND) return;
 
-    // Compute median of ring buffer (sort copy)
-    int sorted[RING_SIZE];
-    for (int i = 0; i < count; i++) sorted[i] = ring[i];
-    for (int i = 0; i < count - 1; i++)
-        for (int j = i + 1; j < count; j++)
-            if (sorted[j] < sorted[i]) { int t = sorted[i]; sorted[i] = sorted[j]; sorted[j] = t; }
-    int median = sorted[count / 2];
+    lastSentMidi = midi;
+    livePadsVolume = map(midi, 0, 127, 0, Config::MAX_VOLUME);
+    nvs_mark_dirty();
 
-    // Update calibration with median (rejects noise spikes)
-    // Only expand range if reading is significantly different from current bounds
-    calSamples++;
-    if (calSamples > 20) {
-        if (median < calMin - 10) calMin = median;
-        if (median > calMax + 10) calMax = median;
-    }
-
-    // Map to 12 positions using calibrated range
-    int position;
-    if ((calMax - calMin) >= 300) {
-        int margin = (calMax - calMin) / 15;  // ~7% dead zone on edges
-        position = constrain((int)map(median, calMin + margin, calMax - margin, 0, 11), 0, 11);
-    } else {
-        position = constrain((median * 12 + 2048) / 4096, 0, 11);
-    }
-
-    // Map 12 positions → 6 themes (2 positions per theme)
-    int themeIdx = constrain(position / 2, 0, (int)THEME_COUNT - 1);
-
-    // If same theme as currently active — reset candidate and return
-    if (themeIdx == lastThemeIdx) {
-        candidateTheme = -1;
-        candidateCount = 0;
-        return;
-    }
-
-    // Require 4 consecutive polls agreeing on the NEW theme before switching
-    if (themeIdx == candidateTheme) {
-        candidateCount++;
-    } else {
-        candidateTheme = themeIdx;
-        candidateCount = 1;
-    }
-    if (candidateCount < 4) return;
-
-    // Time guard — prevent rapid toggling
-    if ((millis() - lastChangeMs) < 300) return;
-
-    lastThemeIdx = themeIdx;
-    lastChangeMs = millis();
-    candidateTheme = -1;
-    candidateCount = 0;
-
-    if (themeIdx != (int)currentTheme) {
-        // Signal the UI loop to apply the theme change with proper LVGL lock.
-        // Direct call from encoder_task causes race conditions with lv_timer_handler.
-        pendingThemeIdx = themeIdx;
-        RED808_LOG_PRINTF("[ROTARY] median=%d cal=[%d..%d] pos=%d → pending theme %d '%s'\n",
-                          median, calMin, calMax, position, themeIdx, theme_presets[themeIdx].name);
-    }
+    JsonDocument doc(&sramAllocator);
+    doc["cmd"] = "setLiveVolume";
+    doc["value"] = livePadsVolume;
+    sendUDPCommand(doc);
 }
 
 // =============================================================================
@@ -1750,19 +1972,13 @@ static void applyFxScene(int scene) {
     RED808_LOG_PRINTF("[BB] FX SCENE: %s\n", sceneNames[byteButtonFxScene]);
 }
 
-void handleByteButton() {
-    if (!byteButtonConnected) return;
-
-    // Read 1-byte bitmask from register 0x00.  Bit N = 1 if button N is pressed.
-    // (Reverted from 8-byte reg 0x60: block-read on I2C devices without guaranteed
-    //  address auto-increment returned the same byte 8 times, causing ALL pads to
-    //  fire simultaneously and "go crazy" in LIVE mode.)
-    uint8_t status = 0;
+static bool readByteButtonStatus(int hubChannel, uint8_t& status) {
+    status = 0;
     bool readOk = false;
 
     if (i2c_lock(20)) {
-        if (byteButtonHubChannel >= 0) i2c_hub_select_raw(byteButtonHubChannel);
-        else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
+        if (hubChannel >= 0) i2c_hub_select_raw(hubChannel);
+        else if (hubChannel == -2) i2c_hub_deselect_raw();
 
         Wire.beginTransmission(BYTEBUTTON_ADDR);
         Wire.write(BYTEBUTTON_STATUS_REG);
@@ -1772,56 +1988,74 @@ void handleByteButton() {
             readOk = true;
         }
 
-        if (byteButtonHubChannel >= 0) i2c_hub_deselect_raw();
+        if (hubChannel >= 0) i2c_hub_deselect_raw();
         i2c_unlock();
     }
+    return readOk;
+}
 
-    if (!readOk) return;
+static void runByteButtonAction(uint8_t action) {
+    switch ((ByteButtonAction)action) {
+        case BB_ACTION_MENU:
+            navigateToScreen(SCREEN_MENU);
+            break;
+        case BB_ACTION_VOL_MODE:
+            volumeMode = (volumeMode == VOL_SEQUENCER) ? VOL_LIVE_PADS : VOL_SEQUENCER;
+            nvs_mark_dirty();
+            RED808_LOG_PRINTF("[BB1] Volume mode: %s\n", volumeMode == VOL_SEQUENCER ? "SEQ" : "PAD");
+            break;
+        case BB_ACTION_FX_CLEAN:
+            applyFxScene(0);
+            break;
+        case BB_ACTION_FX_SPACE:
+            applyFxScene(1);
+            break;
+        case BB_ACTION_FX_ACID:
+            applyFxScene(2);
+            break;
+        case BB_ACTION_FX_DESTROY:
+            applyFxScene(3);
+            break;
+        case BB_ACTION_FX_TARGET_PREV:
+            if (filterSelectedTrack == -1) filterSelectedTrack = Config::MAX_TRACKS - 1;
+            else filterSelectedTrack--;
+            RED808_LOG_PRINTF("[BB1] FX target: %s\n", filterSelectedTrack == -1 ? "MASTER" : trackNames[filterSelectedTrack]);
+            break;
+        case BB_ACTION_FX_TARGET_NEXT:
+            if (filterSelectedTrack >= Config::MAX_TRACKS - 1) filterSelectedTrack = -1;
+            else filterSelectedTrack++;
+            RED808_LOG_PRINTF("[BB1] FX target: %s\n", filterSelectedTrack == -1 ? "MASTER" : trackNames[filterSelectedTrack]);
+            break;
+        case BB_ACTION_PATTERN_PREV:
+            if (currentPattern > 0) selectPatternOnMaster(currentPattern - 1);
+            break;
+        case BB_ACTION_PATTERN_NEXT:
+            if (currentPattern < Config::MAX_PATTERNS - 1) selectPatternOnMaster(currentPattern + 1);
+            break;
+        default:
+            break;
+    }
+}
 
-    uint8_t previousState = prevByteButtonState;
-    uint8_t pressedEdges = status & (uint8_t)~previousState;
-    prevByteButtonState = status;
+static void handleByteButtonPrimaryEdges(uint8_t pressedEdges) {
+    memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
+    for (int button = 0; button < BYTEBUTTON_BUTTONS; button++) {
+        if ((pressedEdges & (1U << button)) == 0) continue;
+        int btn = (BYTEBUTTON_BUTTONS - 1) - button;
+        runByteButtonAction(byteButtonActionMap[btn]);
+    }
+    updateByteButtonLeds();
+}
 
-    unsigned long now = millis();
-    // ByteButton always uses navigation functions (all screens including LIVE)
-    {
-        memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
-        for (int button = 0; button < BYTEBUTTON_BUTTONS; button++) {
-            if ((pressedEdges & (1U << button)) == 0) continue;
-            int btn = (BYTEBUTTON_BUTTONS - 1) - button;  // mirror: hw bit0 = physical btn7
-
-            switch (btn) {
-                case 0: // Back → menu
-                    navigateToScreen(SCREEN_MENU);
-                    break;
-                case 1: // Toggle volume mode SEQ ↔ PAD
-                    volumeMode = (volumeMode == VOL_SEQUENCER) ? VOL_LIVE_PADS : VOL_SEQUENCER;
-                    nvs_mark_dirty();
-                    RED808_LOG_PRINTF("[BB] Volume mode: %s\n", volumeMode == VOL_SEQUENCER ? "SEQ" : "PAD");
-                    break;
-                case 2: // Clean FX (all off)
-                    applyFxScene(0);
-                    break;
-                case 3: // Space FX
-                    applyFxScene(1);
-                    break;
-                case 4: // Acid FX
-                    applyFxScene(2);
-                    break;
-                case 5: // Destroy FX
-                    applyFxScene(3);
-                    break;
-                case 6: // Pattern --
-                    if (currentPattern > 0) selectPatternOnMaster(currentPattern - 1);
-                    break;
-                case 7: // Pattern ++
-                    if (currentPattern < Config::MAX_PATTERNS - 1) selectPatternOnMaster(currentPattern + 1);
-                    break;
-            }
+void handleByteButton() {
+    if (byteButtonConnected) {
+        uint8_t status = 0;
+        if (readByteButtonStatus(byteButtonHubChannel, status)) {
+            uint8_t pressedEdges = status & (uint8_t)~prevByteButtonState;
+            prevByteButtonState = status;
+            if (pressedEdges) handleByteButtonPrimaryEdges(pressedEdges);
         }
     }
-
-    updateByteButtonLeds();
 }
 
 // =============================================================================
@@ -1939,10 +2173,10 @@ void setup() {
     lvgl_port_init(lcd_panel);
     RED808_LOG_PRINTLN("[LVGL] Port initialized (task paused)");
 
-    // 6. Analog rotary encoder GPIO setup
-    pinMode(Config::ANALOG_ENC_PIN, INPUT);
+    // 6. M5 Unit Fader GPIO setup
+    pinMode(Config::UNIT_FADER_PIN, INPUT);
     analogReadResolution(12);  // 12-bit ADC (0-4095)
-    RED808_LOG_PRINTLN("[ENC] Analog rotary on GPIO6 initialized");
+    RED808_LOG_PRINTLN("[FADER] Unit Fader on GPIO6 initialized");
 
     // 7. Scan I2C hub for M5 + DFRobot + ByteButton (before LVGL task starts - no I2C race)
     scanI2CHub();
@@ -2092,7 +2326,9 @@ static void encoder_task(void* arg) {
         taskYIELD();  // let loop() process touch triggers between I2C batches
         handleDFRobotEncoders();
         taskYIELD();
-        handleAnalogEncoder();
+        handleDFRobotPots();
+        taskYIELD();
+        handleUnitFader();
         handleByteButton();
         uint32_t period = encoder_poll_interval_ms(currentScreen);
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(period));
@@ -2197,6 +2433,9 @@ void loop() {
         RED808_LOG_PRINTF("  M5 #2:       %s (ch=%d)\n", m5encoderConnected[1] ? "OK" : "NO", m5HubChannel[1]);
         RED808_LOG_PRINTF("  DFRobot #1:  %s (ch=%d)\n", dfEncoderConnected[0] ? "OK" : "NO", dfRobotHubChannel[0]);
         RED808_LOG_PRINTF("  DFRobot #2:  %s (ch=%d)\n", dfEncoderConnected[1] ? "OK" : "NO", dfRobotHubChannel[1]);
+        RED808_LOG_PRINTF("  DFRobot #3:  %s (ch=%d)\n", dfEncoderConnected[2] ? "OK" : "NO", dfRobotHubChannel[2]);
+        RED808_LOG_PRINTF("  DFRobot #4:  %s (ch=%d)\n", dfEncoderConnected[3] ? "OK" : "NO", dfRobotHubChannel[3]);
+        RED808_LOG_PRINTF("  DFRobot 4P:  %s (ch=%d, addr=0x%02X)\n", dfRobotPotConnected ? "OK" : "NO", dfRobotPotHubChannel, dfRobotPotAddr);
         RED808_LOG_PRINTF("  ByteButton:  %s (ch=%d)\n", byteButtonConnected ? "OK" : "NO", byteButtonHubChannel);
         RED808_LOG_PRINTF("  LCD panel:   %s\n", lcd_panel ? "OK" : "FAIL");
         RED808_LOG_PRINTF("  Heap: %d  PSRAM: %d\n", ESP.getFreeHeap(), ESP.getFreePsram());

@@ -47,6 +47,20 @@ enum VolumeMode {
     VOL_LIVE_PADS
 };
 
+enum ByteButtonAction {
+    BB_ACTION_MENU = 0,
+    BB_ACTION_VOL_MODE,
+    BB_ACTION_FX_CLEAN,
+    BB_ACTION_FX_SPACE,
+    BB_ACTION_FX_ACID,
+    BB_ACTION_FX_DESTROY,
+    BB_ACTION_FX_TARGET_PREV,
+    BB_ACTION_FX_TARGET_NEXT,
+    BB_ACTION_PATTERN_PREV,
+    BB_ACTION_PATTERN_NEXT,
+    BB_ACTION_COUNT
+};
+
 // =============================================================================
 // STRUCTS
 // =============================================================================
@@ -80,6 +94,9 @@ struct DiagnosticInfo {
     bool m5encoder2Ok;
     bool dfrobot1Ok;
     bool dfrobot2Ok;
+    bool dfrobot3Ok;
+    bool dfrobot4Ok;
+    bool dfrobotPotsOk;
     bool byteButtonOk;
     String lastError;
 };
@@ -134,7 +151,15 @@ extern EncoderMode encoderMode;
 // I2C Hub
 extern int m5HubChannel[];
 extern int dfRobotHubChannel[];
+extern int byteButtonHubChannel;
+extern int dfRobotPotHubChannel;
+extern uint8_t dfRobotPotAddr;
+extern uint8_t dfRobotPotMidi[];
+extern uint8_t dfRobotPotPos[];
+extern bool byteButtonConnected;
 extern bool hubDetected;
+extern uint8_t byteButtonActionMap[];
+extern const char* const byteButtonActionNames[];
 
 // Connection
 extern bool udpConnected;

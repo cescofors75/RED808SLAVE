@@ -14,6 +14,7 @@
 extern void sendUDPCommand(JsonDocument& doc);
 extern void sendUDPCommand(const char* cmd);
 extern void sendFilterUDP(int track, int fxType);
+extern void updateByteButtonLeds();
 
 // SRAM allocator — same as main.cpp, avoids PSRAM bus contention with LCD DMA
 struct SramAllocatorUI : ArduinoJson::Allocator {
@@ -59,11 +60,12 @@ static lv_obj_t* lbl_menu_state = NULL;
 static lv_obj_t* lbl_menu_transport = NULL;
 
 // Status center runtime panel
-static lv_obj_t* diag_runtime_values[10] = {};
+static lv_obj_t* diag_runtime_values[12] = {};
 // diag_event_labels removed (EVENT LOG disabled)
 
 // Performance runtime panel
 static lv_obj_t* perf_runtime_values[8] = {};
+static lv_obj_t* perf_bb_action_labels[BYTEBUTTON_BUTTONS] = {};
 
 // diag_event_log removed (EVENT LOG disabled)
 
@@ -334,7 +336,7 @@ static const char* screen_name(Screen screen) {
         case SCREEN_VOLUMES: return "VOLUMES";
         case SCREEN_FILTERS: return "FILTERS";
         case SCREEN_SDCARD: return "SDCARD";
-        case SCREEN_PERFORMANCE: return "CONTROL MAP";
+        case SCREEN_PERFORMANCE: return "BUTTONS";
         case SCREEN_SAMPLES: return "SAMPLES";
         case SCREEN_SEQ_CIRCLE: return "SEQ CIRCLE";
         case SCREEN_ENCODER_TEST: return "ENC TEST";
@@ -767,7 +769,7 @@ void ui_create_menu_screen() {
         LV_SYMBOL_SETTINGS "  FILTERS FX",
         LV_SYMBOL_DRIVE "  PATTERNS",
         LV_SYMBOL_DRIVE "  SD BROWSER",
-        LV_SYMBOL_SETTINGS "  CONTROL MAP",
+        LV_SYMBOL_SETTINGS "  BUTTONS",
         LV_SYMBOL_HOME "  SETTINGS",
         LV_SYMBOL_EYE_OPEN "  STATUS"
     };
@@ -2852,7 +2854,7 @@ void ui_create_settings_screen() {
 // ============================================================================
 // DIAGNOSTICS SCREEN
 // ============================================================================
-#define DIAG_ROWS 11
+#define DIAG_ROWS 14
 static lv_obj_t* diag_labels[DIAG_ROWS];
 static lv_obj_t* diag_values[DIAG_ROWS];
 
@@ -2871,13 +2873,13 @@ void ui_create_diagnostics_screen() {
 
     static const char* row_names[DIAG_ROWS] = {
         "WiFi",  "UDP",  "Touch GT911",  "LCD RGB",  "I2C Hub PCA9548A",
-        "M5 Encoder #1", "M5 Encoder #2", "DFRobot Enc #1", "DFRobot Enc #2",
-        "M5 ByteButton", "SD Card"
+        "M5 Encoder #1", "M5 Encoder #2", "DFRobot Enc #1", "DFRobot Enc #2", "DFRobot Enc #3", "DFRobot Enc #4",
+        "DFRobot Analog Hub", "M5 ByteButton", "SD Card"
     };
 
 #if PORTRAIT_MODE
     int card_w = UI_W - 32;
-    lv_obj_t* health_card = create_section_shell(scr_diagnostics, 16, 100, card_w, 280);
+    lv_obj_t* health_card = create_section_shell(scr_diagnostics, 16, 100, card_w, 390);
 #else
     lv_obj_t* health_card = create_section_shell(scr_diagnostics, 24, 104, 300, 452);
 #endif
@@ -2910,7 +2912,7 @@ void ui_create_diagnostics_screen() {
     }
 
 #if PORTRAIT_MODE
-    lv_obj_t* runtime_card = create_section_shell(scr_diagnostics, 16, 395, card_w, 280);
+    lv_obj_t* runtime_card = create_section_shell(scr_diagnostics, 16, 520, card_w, 440);
 #else
     lv_obj_t* runtime_card = create_section_shell(scr_diagnostics, 340, 104, 322, 452);
 #endif
@@ -2923,10 +2925,16 @@ void ui_create_diagnostics_screen() {
     static const char* runtime_rows[] = {
         "Screen", "WiFi state", "Master pkt", "Step sync",
         "UI cadence", "UI load", "UDP traffic", "Heap",
-        "PSRAM", "Uptime"
+        "PSRAM", "Uptime", "POTS 1..4", "ByteButtons"
     };
     y = 38;
-    for (int i = 0; i < 10; i++) {
+        int runtime_row_h =
+    #if PORTRAIT_MODE
+        30;
+    #else
+        34;
+    #endif
+    for (int i = 0; i < 12; i++) {
         lv_obj_t* name = lv_label_create(runtime_card);
         lv_label_set_text(name, runtime_rows[i]);
         lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
@@ -2938,7 +2946,7 @@ void ui_create_diagnostics_screen() {
         lv_obj_set_style_text_font(diag_runtime_values[i], &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(diag_runtime_values[i], RED808_TEXT, 0);
         lv_obj_set_pos(diag_runtime_values[i], 128, y);
-        y += 34;
+        y += runtime_row_h;
     }
 
 // EVENT LOG panel removed for performance
@@ -2948,6 +2956,7 @@ void ui_update_diagnostics() {
     if (!scr_diagnostics) return;
 
     static bool prev_vals[DIAG_ROWS] = {};
+    static bool diag_rows_initialized = false;
     static uint32_t prev_heap = 0;
     static uint32_t prev_psram = 0;
     static uint32_t prev_uptime = 0;
@@ -2973,16 +2982,28 @@ void ui_update_diagnostics() {
         { diagInfo.m5encoder2Ok, "OK",            "Not detected" },
         { diagInfo.dfrobot1Ok,   "OK",            "Not detected" },
         { diagInfo.dfrobot2Ok,   "OK",            "Not detected" },
-        { diagInfo.byteButtonOk, "OK (0x41)",     "Not detected" },
+        { diagInfo.dfrobot3Ok,   "OK",            "Not detected" },
+        { diagInfo.dfrobot4Ok,   "OK",            "Not detected" },
+        { diagInfo.dfrobotPotsOk, "OK (0x48/0x49)", "Not detected" },
+        { diagInfo.byteButtonOk, "OK",     "Not detected" },
         { diagInfo.sdOk || sd_mounted, sd_mounted ? "Mounted (SD_MMC)" : "Not mounted", "No card" },
     };
 
-    for (int i = 0; i < 11; i++) {
-        if (rows[i].val != prev_vals[i]) {
+    for (int i = 0; i < DIAG_ROWS; i++) {
+        if (!diag_rows_initialized || rows[i].val != prev_vals[i]) {
             prev_vals[i] = rows[i].val;
-            lv_label_set_text(diag_values[i], rows[i].val ? rows[i].ok : rows[i].fail);
+            if (i == 12) {
+                lv_label_set_text_fmt(diag_values[i], rows[i].val ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel);
+            } else {
+                lv_label_set_text(diag_values[i], rows[i].val ? rows[i].ok : rows[i].fail);
+            }
             lv_obj_set_style_text_color(diag_values[i], rows[i].val ? RED808_SUCCESS : RED808_ERROR, 0);
         }
+    }
+    diag_rows_initialized = true;
+
+    if (diag_values[12]) {
+        lv_label_set_text_fmt(diag_values[12], diagInfo.byteButtonOk ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel);
     }
 
     if (wifiConnected != prev_wifi_connected) {
@@ -3043,6 +3064,18 @@ void ui_update_diagnostics() {
         lv_label_set_text_fmt(diag_runtime_values[9], "%02lu:%02lu:%02lu",
                               (unsigned long)hours, (unsigned long)minutes, (unsigned long)seconds);
 
+        lv_label_set_text_fmt(diag_runtime_values[10], "M %3u %3u %3u %3u  P %u %u %u %u",
+                      (unsigned)dfRobotPotMidi[0],
+                      (unsigned)dfRobotPotMidi[1],
+                      (unsigned)dfRobotPotMidi[2],
+                      (unsigned)dfRobotPotMidi[3],
+                      (unsigned)dfRobotPotPos[0],
+                      (unsigned)dfRobotPotPos[1],
+                      (unsigned)dfRobotPotPos[2],
+                      (unsigned)dfRobotPotPos[3]);
+        lv_label_set_text_fmt(diag_runtime_values[11], "BB %s ch%d",
+                      byteButtonConnected ? "OK" : "NO", byteButtonHubChannel);
+
         prev_ui_updates = ui_updates;
         prev_ui_skips = ui_skips;
         prev_udp_rx = udp_rx;
@@ -3076,6 +3109,12 @@ void ui_update_diagnostics() {
             if (diag_runtime_values[9]) {
                 lv_obj_set_style_text_color(diag_runtime_values[9], RED808_INFO, 0);
             }
+        }
+        if (diag_runtime_values[10]) {
+            lv_obj_set_style_text_color(diag_runtime_values[10], diagInfo.dfrobotPotsOk ? RED808_SUCCESS : RED808_WARNING, 0);
+        }
+        if (diag_runtime_values[11]) {
+            lv_obj_set_style_text_color(diag_runtime_values[11], diagInfo.byteButtonOk ? RED808_SUCCESS : RED808_WARNING, 0);
         }
     }
 }
@@ -3725,21 +3764,18 @@ void ui_update_sdcard() {
 // PERFORMANCE SCREEN - Hardware assignment map / control map
 // ============================================================================
 
-// Current HW assignment descriptions (read-only display of what each does)
-static const char* const byteButtonAssignNames[] = {
-    "Pattern --",
-    "Pattern ++",
-    "Pattern = 1",
-    "Vol Mode SEQ/PAD",
-    "FX Delay Toggle",
-    "FX Flanger Toggle",
-    "FX Compressor Toggle",
-    "Clear ALL FX"
+static const char* const dfRotaryAssignNames[] = {
+    "R1: Sequencer Vol | BTN: Play/Stop",
+    "R2: BPM Tempo    |  BTN: Reset BPM",
+    "R3: Sel Track Vol | BTN: Mute Track",
+    "R4: Pattern Sel  |  BTN: Request Sync"
 };
 
-static const char* const dfRotaryAssignNames[] = {
-    "Volume SEQ/PAD  |  BTN: Play/Stop",
-    "BPM Tempo       |  BTN: Back/Menu"
+static const char* const analogPotAssignNames[] = {
+    "P1: Master Volume (coarse)",
+    "P2: Delay Amount",
+    "P3: Flanger Amount",
+    "P4: Compressor Amount"
 };
 
 static const char* const m5EncoderAssignNames[] = {
@@ -3747,13 +3783,30 @@ static const char* const m5EncoderAssignNames[] = {
     "Mod 2 (Tracks 4-7): Vol + Mute"
 };
 
+static void perf_update_bb_assignment_labels() {
+    for (int i = 0; i < BYTEBUTTON_BUTTONS; i++) {
+        if (!perf_bb_action_labels[i]) continue;
+        uint8_t action = byteButtonActionMap[i];
+        if (action >= BB_ACTION_COUNT) action = BB_ACTION_MENU;
+        lv_label_set_text(perf_bb_action_labels[i], byteButtonActionNames[action]);
+    }
+}
+
+static void perf_bb_action_next_cb(lv_event_t* e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= BYTEBUTTON_BUTTONS) return;
+    byteButtonActionMap[idx] = (uint8_t)((byteButtonActionMap[idx] + 1) % BB_ACTION_COUNT);
+    perf_update_bb_assignment_labels();
+    updateByteButtonLeds();
+}
+
 void ui_create_performance_screen() {
     scr_performance = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_performance, RED808_BG, 0);
     ui_create_header(scr_performance);
 
     lv_obj_t* title = lv_label_create(scr_performance);
-    lv_label_set_text(title, LV_SYMBOL_SETTINGS "  CONTROL MAP");
+    lv_label_set_text(title, LV_SYMBOL_SETTINGS "  BUTTONS & CONTROL MAP");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 52);
@@ -3764,7 +3817,7 @@ void ui_create_performance_screen() {
 
     // ── SECTION: ByteButton (8 buttons) ──
     lv_obj_t* bb_title = lv_label_create(scr_performance);
-    lv_label_set_text(bb_title, "M5 BYTEBUTTON  (8 Buttons)");
+    lv_label_set_text(bb_title, "M5 BYTEBUTTON  (8 Buttons, tap Bx to rotate action)");
     lv_obj_set_style_text_font(bb_title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(bb_title, lv_color_hex(0x00D4FF), 0);
     lv_obj_set_pos(bb_title, col1_x, y);
@@ -3782,6 +3835,8 @@ void ui_create_performance_screen() {
         lv_obj_set_style_border_color(chip, lv_color_hex(0x00D4FF), 0);
         lv_obj_set_style_pad_all(chip, 0, 0);
         lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(chip, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(chip, perf_bb_action_next_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
 
         lv_obj_t* num = lv_label_create(chip);
         lv_label_set_text_fmt(num, "B%d", i + 1);
@@ -3791,10 +3846,11 @@ void ui_create_performance_screen() {
 
         // Function label
         lv_obj_t* fn = lv_label_create(scr_performance);
-        lv_label_set_text(fn, byteButtonAssignNames[i]);
+        lv_label_set_text(fn, "--");
         lv_obj_set_style_text_font(fn, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(fn, RED808_TEXT, 0);
         lv_obj_set_pos(fn, col1_x + 52, y + 4);
+        perf_bb_action_labels[i] = fn;
 
         // In LIVE mode label (right side)
         if (i < Config::MAX_SAMPLES) {
@@ -3808,17 +3864,19 @@ void ui_create_performance_screen() {
         y += 30;
     }
 
+    perf_update_bb_assignment_labels();
+
     y += section_gap;
 
-    // ── SECTION: DFRobot Rotary Encoders ──
+    // ── SECTION: DFRobot Gravity Rotary+Button ──
     lv_obj_t* df_title = lv_label_create(scr_performance);
-    lv_label_set_text(df_title, "DFROBOT ROTARY ENCODERS  (2x)");
+    lv_label_set_text(df_title, "DFROBOT ROTARY+BUTTON  (4x)");
     lv_obj_set_style_text_font(df_title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(df_title, lv_color_hex(0x39FF14), 0);
     lv_obj_set_pos(df_title, col1_x, y);
     y += 24;
 
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 4; i++) {
         lv_obj_t* chip = lv_obj_create(scr_performance);
         lv_obj_set_size(chip, 42, 26);
         lv_obj_set_pos(chip, col1_x, y);
@@ -3846,6 +3904,48 @@ void ui_create_performance_screen() {
     }
 
     y += section_gap;
+
+    // ── SECTION: Analog Pots (I2C ADC) + Unit Fader ──
+    lv_obj_t* pot_title = lv_label_create(scr_performance);
+    lv_label_set_text(pot_title, "ANALOG CONTROLS  (4x POT + 1x UNIT FADER)");
+    lv_obj_set_style_text_font(pot_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(pot_title, lv_color_hex(0xD4FF00), 0);
+    lv_obj_set_pos(pot_title, col1_x, y);
+    y += 24;
+
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t* chip = lv_obj_create(scr_performance);
+        lv_obj_set_size(chip, 42, 26);
+        lv_obj_set_pos(chip, col1_x, y);
+        lv_obj_set_style_bg_color(chip, lv_color_hex(0x2A2F12), 0);
+        lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(chip, 4, 0);
+        lv_obj_set_style_border_width(chip, 1, 0);
+        lv_obj_set_style_border_color(chip, lv_color_hex(0xD4FF00), 0);
+        lv_obj_set_style_pad_all(chip, 0, 0);
+        lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t* num = lv_label_create(chip);
+        lv_label_set_text_fmt(num, "P%d", i + 1);
+        lv_obj_set_style_text_font(num, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(num, lv_color_hex(0xD4FF00), 0);
+        lv_obj_center(num);
+
+        lv_obj_t* fn = lv_label_create(scr_performance);
+        lv_label_set_text(fn, analogPotAssignNames[i]);
+        lv_obj_set_style_text_font(fn, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(fn, RED808_TEXT, 0);
+        lv_obj_set_pos(fn, col1_x + 52, y + 4);
+        y += 30;
+    }
+
+    lv_obj_t* fader_fn = lv_label_create(scr_performance);
+    lv_label_set_text(fader_fn, "F1: M5 Unit Fader -> Live Pads Volume (fine lane)");
+    lv_obj_set_style_text_font(fader_fn, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(fader_fn, RED808_TEXT, 0);
+    lv_obj_set_pos(fader_fn, col1_x + 52, y + 2);
+
+    y += section_gap + 28;
 
     // ── SECTION: M5 ROTATE8 Encoders ──
     lv_obj_t* m5_title = lv_label_create(scr_performance);
@@ -3882,61 +3982,7 @@ void ui_create_performance_screen() {
         y += 30;
     }
 
-    // ── SECTION: Touch Screen ──
-    y += section_gap;
-    lv_obj_t* touch_title = lv_label_create(scr_performance);
-    lv_label_set_text(touch_title, "CAPACITIVE TOUCH  GT911 (5-point)");
-    lv_obj_set_style_text_font(touch_title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(touch_title, lv_color_hex(0xFF00AA), 0);
-    lv_obj_set_pos(touch_title, col1_x, y);
-    y += 22;
-
-    lv_obj_t* touch_fn = lv_label_create(scr_performance);
-    lv_label_set_text(touch_fn, "UI Navigation + Live Pads + Sequencer Grid + All Screens");
-    lv_obj_set_style_text_font(touch_fn, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(touch_fn, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(touch_fn, col1_x + 52, y);
-
-#if PORTRAIT_MODE
-    lv_obj_t* runtime_card = create_section_shell(scr_performance, 12, y + 16, UI_W - 24, 332);
-#else
-    lv_obj_t* runtime_card = create_section_shell(scr_performance, 646, 86, 336, 332);
-#endif
-    lv_obj_set_style_bg_opa(runtime_card, LV_OPA_50, 0);
-
-    lv_obj_t* runtime_title = lv_label_create(runtime_card);
-    lv_label_set_text(runtime_title, LV_SYMBOL_LIST "  ACTIVE MODES");
-    lv_obj_set_style_text_font(runtime_title, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(runtime_title, RED808_INFO, 0);
-    lv_obj_align(runtime_title, LV_ALIGN_TOP_LEFT, 0, 0);
-
-    static const char* perf_rows[] = {
-        "Volume mode",
-        "Theme",
-        "FX target",
-        "Selected FX",
-        "Pattern",
-        "Transport",
-        "Links",
-        "Touch/LCD"
-    };
-
-    int row_y = 42;
-    for (int i = 0; i < 8; i++) {
-        lv_obj_t* name = lv_label_create(runtime_card);
-        lv_label_set_text(name, perf_rows[i]);
-        lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(name, RED808_TEXT_DIM, 0);
-        lv_obj_set_pos(name, 0, row_y);
-
-        perf_runtime_values[i] = lv_label_create(runtime_card);
-        lv_label_set_text(perf_runtime_values[i], "--");
-        lv_obj_set_style_text_font(perf_runtime_values[i], &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(perf_runtime_values[i], RED808_TEXT, 0);
-        lv_obj_set_pos(perf_runtime_values[i], 122, row_y);
-
-        row_y += 34;
-    }
+    for (int i = 0; i < 8; i++) perf_runtime_values[i] = NULL;
 }
 
 void ui_update_performance() {
