@@ -547,6 +547,15 @@ static void back_btn_cb(lv_event_t* e) {
     nav_to(SCREEN_MENU, scr_menu);
 }
 
+static void set_bpm_label_text(lv_obj_t* label, const char* prefix) {
+    if (!label) return;
+    int bpm10 = (int)lroundf(currentBPMPrecise * 10.0f);
+    int whole = bpm10 / 10;
+    int frac = bpm10 % 10;
+    if (frac < 0) frac = -frac;
+    lv_label_set_text_fmt(label, "%s %d.%d", prefix, whole, frac);
+}
+
 void ui_create_header(lv_obj_t* parent) {
     Screen screen = screen_from_parent(parent);
     uint8_t slot = static_cast<uint8_t>(screen);
@@ -626,7 +635,7 @@ void ui_create_header(lv_obj_t* parent) {
     lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     create_info_chip(footer, RED808_WARNING, &lbl_bpm[slot]);
-    lv_label_set_text_fmt(lbl_bpm[slot], "BPM %.1f", currentBPMPrecise);
+    set_bpm_label_text(lbl_bpm[slot], "BPM");
 
     create_info_chip(footer, RED808_CYAN, &lbl_fx_values[slot]);
     lv_label_set_text_fmt(lbl_fx_values[slot], "FX %d/%d/%d",
@@ -672,7 +681,7 @@ void ui_update_header() {
     if (bpm10 != prev_bpm10) {
         prev_bpm10 = bpm10;
         if (lbl_bpm[slot]) {
-            lv_label_set_text_fmt(lbl_bpm[slot], "BPM: %.1f", currentBPMPrecise);
+            set_bpm_label_text(lbl_bpm[slot], "BPM");
         }
     }
     if (currentPattern != prev_pattern) {
@@ -1818,7 +1827,10 @@ void ui_update_sequencer() {
     if (seq_info_transport && (isPlaying != prev_playing || bpm10 != prev_bpm10)) {
         prev_playing = isPlaying;
         prev_bpm10 = bpm10;
-        lv_label_set_text_fmt(seq_info_transport, "%s  %.1f BPM", isPlaying ? "RUNNING" : "STOPPED", currentBPMPrecise);
+        int whole = bpm10 / 10;
+        int frac = bpm10 % 10;
+        if (frac < 0) frac = -frac;
+        lv_label_set_text_fmt(seq_info_transport, "%s  %d.%d BPM", isPlaying ? "RUNNING" : "STOPPED", whole, frac);
         lv_obj_set_style_text_color(seq_info_transport, isPlaying ? RED808_SUCCESS : RED808_WARNING, 0);
     }
 
@@ -2356,12 +2368,21 @@ void ui_create_filters_screen() {
     lv_obj_set_style_text_color(subtitle, RED808_TEXT_DIM, 0);
     lv_obj_set_pos(subtitle, 10, 34);
 
-#if PORTRAIT_MODE
-    lv_obj_t* compact_panel = create_section_shell(shell, 8, 72, UI_W - 40, 360);
-#else
-    lv_obj_t* compact_panel = create_section_shell(shell, 8, 94, 520, 332);
-#endif
-    lv_obj_set_style_bg_opa(compact_panel, LV_OPA_60, 0);
+    int shellW = lv_obj_get_width(shell);
+    int shellH = lv_obj_get_height(shell);
+    int panelX = 8;
+    int panelY = 76;
+    int panelW = shellW - 16;
+    int panelH = shellH - 90;
+    if (panelW < 220) panelW = 220;
+    if (panelH < 220) panelH = 220;
+
+    lv_obj_t* compact_panel = create_section_shell(shell, panelX, panelY, panelW, panelH);
+    lv_obj_set_style_bg_opa(compact_panel, LV_OPA_80, 0);
+    lv_obj_set_style_bg_color(compact_panel, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_border_width(compact_panel, 2, 0);
+    lv_obj_set_style_border_color(compact_panel, RED808_ACCENT, 0);
+    lv_obj_move_foreground(compact_panel);
 
     static const char* laneNames[] = {"DELAY", "FLANGER", "COMP"};
     static const lv_color_t laneColors[] = {
@@ -2383,8 +2404,9 @@ void ui_create_filters_screen() {
         int y = row * (cellH + gap);
 
         lv_obj_t* card = create_section_shell(compact_panel, x, y, cellW, cellH);
-        lv_obj_set_style_bg_opa(card, LV_OPA_50, 0);
-        lv_obj_set_style_border_width(card, 1, 0);
+        lv_obj_set_style_bg_color(card, lv_color_hex(0x17222B), 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_80, 0);
+        lv_obj_set_style_border_width(card, 2, 0);
         lv_obj_set_style_border_color(card, RED808_BORDER, 0);
 
         if (cell < 3) {
@@ -2401,17 +2423,17 @@ void ui_create_filters_screen() {
             lv_obj_set_pos(filter_grid_mute_labels[cell], cellW - 46, 10);
 
             filter_grid_arcs[cell] = lv_arc_create(card);
-            lv_obj_set_size(filter_grid_arcs[cell], 96, 96);
+            lv_obj_set_size(filter_grid_arcs[cell], 120, 120);
             lv_obj_set_pos(filter_grid_arcs[cell], 10, 34);
             lv_arc_set_rotation(filter_grid_arcs[cell], 135);
             lv_arc_set_bg_angles(filter_grid_arcs[cell], 0, 270);
             lv_arc_set_range(filter_grid_arcs[cell], 0, 127);
-            lv_arc_set_value(filter_grid_arcs[cell], 0);
+            lv_arc_set_value(filter_grid_arcs[cell], constrain(dfFxParamValue[cell], 0, 127));
             lv_obj_clear_flag(filter_grid_arcs[cell], LV_OBJ_FLAG_CLICKABLE);
             lv_obj_remove_style(filter_grid_arcs[cell], NULL, LV_PART_KNOB);
-            lv_obj_set_style_arc_width(filter_grid_arcs[cell], 8, LV_PART_MAIN);
-            lv_obj_set_style_arc_color(filter_grid_arcs[cell], lv_color_hex(0x22303A), LV_PART_MAIN);
-            lv_obj_set_style_arc_width(filter_grid_arcs[cell], 10, LV_PART_INDICATOR);
+            lv_obj_set_style_arc_width(filter_grid_arcs[cell], 12, LV_PART_MAIN);
+            lv_obj_set_style_arc_color(filter_grid_arcs[cell], lv_color_hex(0x3A4B58), LV_PART_MAIN);
+            lv_obj_set_style_arc_width(filter_grid_arcs[cell], 14, LV_PART_INDICATOR);
             lv_obj_set_style_arc_color(filter_grid_arcs[cell], laneColors[cell], LV_PART_INDICATOR);
 
             filter_df_mode_labels[cell] = lv_label_create(card);
