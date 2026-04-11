@@ -212,6 +212,9 @@ namespace Config {
     constexpr int TOUCH_X_SCALE_PCT = 100;
     constexpr int TOUCH_Y_SCALE_PCT = 100;
     constexpr int TOUCH_JITTER_PX = 3;
+    constexpr uint8_t LIVE_PAD_HIT_MARGIN_PCT = 10;   // adaptive pad hit expansion
+    constexpr uint8_t LIVE_PAD_HIT_MARGIN_MIN = 6;
+    constexpr uint8_t LIVE_PAD_HIT_MARGIN_MAX = 24;
     constexpr uint8_t TOUCH_MAX_POINTS = 5;
     // Raw touch range calibration (GT911 reported range before transform)
     constexpr int TOUCH_RAW_MIN_X = 0;
@@ -225,12 +228,20 @@ namespace Config {
     constexpr int DF_COUNTS_PER_STEP = 4;
     constexpr int DF_VOLUME_STEP = 3;   // Master volume change per encoder step
     constexpr int DF_BPM_STEP = 1;      // BPM change per encoder step
+    constexpr int DF_FX_STEP_FINE = 2;  // DF1-DF3 sensitivity (fine)
+    constexpr int DF_FX_STEP_AGGR = 4;  // DF1-DF3 sensitivity (aggressive)
+    constexpr int DF_FX_STEP = DF_FX_STEP_FINE;
     constexpr uint32_t DF_BUTTON_GUARD_MS = 250;
     constexpr uint32_t LIVE_PAD_REPEAT_MS = 50;       // (legacy, kept for reference)
     constexpr uint32_t DF_POT_READ_MS = 25;           // 40Hz poll for 4-pot hub
     constexpr uint8_t DF_POT_MIDI_DEADBAND = 2;       // avoid UDP spam on ADC jitter
     constexpr uint8_t DF_POT_STABLE_READS = 3;        // detent change must persist N reads
     constexpr uint16_t DF_POT_MIN_SPAN = 16;          // avoid over-amplifying tiny noise windows
+    constexpr uint16_t DF_POT_RAW_IDLE_DB = 24;       // ignore tiny raw movement near rest
+    constexpr uint8_t DF_POT_HYST_NUM = 35;           // detent hysteresis numerator (~0.35 step)
+    constexpr uint8_t DF_POT_HYST_DEN = 100;          // detent hysteresis denominator
+    constexpr int DF_IDLE_DELTA_DB = 2;               // ignore tiny delta chatter on DFRobot rotary
+    constexpr int DF_NEAR_ZERO_REPEAT = 4;            // require repeat when delta magnitude <= this
 
     // M5 Unit Fader on analog pin (replaces old analog rotary)
     constexpr int UNIT_FADER_PIN = 6;        // GPIO6 signal pin

@@ -50,6 +50,10 @@ enum VolumeMode {
 enum ByteButtonAction {
     BB_ACTION_MENU = 0,
     BB_ACTION_VOL_MODE,
+    BB_ACTION_SCREEN_LIVE,
+    BB_ACTION_SCREEN_SEQUENCER,
+    BB_ACTION_SCREEN_FILTERS,
+    BB_ACTION_SCREEN_VOLUMES,
     BB_ACTION_FX_CLEAN,
     BB_ACTION_FX_SPACE,
     BB_ACTION_FX_ACID,
@@ -58,6 +62,7 @@ enum ByteButtonAction {
     BB_ACTION_FX_TARGET_NEXT,
     BB_ACTION_PATTERN_PREV,
     BB_ACTION_PATTERN_NEXT,
+    BB_ACTION_PLAY_PAUSE,
     BB_ACTION_COUNT
 };
 
@@ -117,6 +122,7 @@ extern int currentStep;
 extern int selectedTrack;
 extern bool isPlaying;
 extern int currentBPM;
+extern float currentBPMPrecise;
 extern int currentKit;
 
 // Volume
@@ -156,6 +162,10 @@ extern int dfRobotPotHubChannel;
 extern uint8_t dfRobotPotAddr;
 extern uint8_t dfRobotPotMidi[];
 extern uint8_t dfRobotPotPos[];
+extern uint8_t analogFxSceneIndex[];
+extern uint8_t dfFxParamMode[];
+extern int dfFxParamValue[];
+extern bool dfFxMuted[];
 extern bool byteButtonConnected;
 extern bool hubDetected;
 extern uint8_t byteButtonActionMap[];

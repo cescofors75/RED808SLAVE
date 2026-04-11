@@ -9,6 +9,7 @@
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
+#include <math.h>
 #include "nvs_flash.h"
 #include "esp_heap_caps.h"
 #include <M5ROTATE8.h>
@@ -64,6 +65,7 @@ int currentStep = 0;
 int selectedTrack = 0;
 bool isPlaying = false;
 int currentBPM = Config::DEFAULT_BPM;
+float currentBPMPrecise = (float)Config::DEFAULT_BPM;
 int currentKit = 0;
 
 // Volume
@@ -152,7 +154,7 @@ uint8_t encoderLEDColors[Config::MAX_TRACKS][3] = {
 // Live pad touch guard (prevent phantom triggers on screen enter)
 unsigned long liveScreenEnteredMs = 0;
 static constexpr unsigned long LIVE_TOUCH_GUARD_MS = 150;
-static constexpr unsigned long TOUCH_RELEASE_DEBOUNCE_MS = 8;  // minimal debounce for tremolo drumming
+static constexpr unsigned long TOUCH_RELEASE_DEBOUNCE_MS = 16;  // avoid false releases on fast GT911 cache gaps
 static constexpr unsigned long LIVE_PAD_REPEAT_INTERVAL_MS = 75;
 static constexpr unsigned long LIVE_PAD_FLASH_MS = 25;
 static unsigned long livePadReleaseMs[Config::MAX_SAMPLES] = {}; // when each pad last went untouched
@@ -166,6 +168,7 @@ unsigned long lastUDPCheck = 0;
 unsigned long lastMasterPacketMs = 0;
 unsigned long lastStepUpdateMs = 0;   // last UDP step_update/step_sync received
 unsigned long lastLocalStepMs  = 0;   // last local-clock step advance (independent of UDP)
+uint32_t lastLocalStepUs = 0;         // microsecond local clock anchor for decimal BPM precision
 int32_t prevM5Counter[Config::MAX_TRACKS];
 uint16_t prevDFValue[DFROBOT_ENCODER_COUNT];
 unsigned long lastLivePadTriggerMs[Config::MAX_SAMPLES];
@@ -180,7 +183,11 @@ bool byteButtonLedInitialized = false;
 int byteButtonFxScene = 0;  // 0=clean, 1=space, 2=acid, 3=destroy
 const char* const byteButtonActionNames[] = {
     "Back/Menu",
-    "Vol Mode SEQ/PAD",
+    "Master Link Sync",
+    "Go Live Pads",
+    "Go Sequencer",
+    "Go FX",
+    "Go Volumes",
     "FX Scene: Clean",
     "FX Scene: Space",
     "FX Scene: Acid",
@@ -188,18 +195,23 @@ const char* const byteButtonActionNames[] = {
     "FX Target --",
     "FX Target ++",
     "Pattern --",
-    "Pattern ++"
+    "Pattern ++",
+    "Play/Pause"
 };
 uint8_t byteButtonActionMap[BYTEBUTTON_BUTTONS] = {
     BB_ACTION_MENU,
-    BB_ACTION_VOL_MODE,
-    BB_ACTION_FX_CLEAN,
-    BB_ACTION_FX_SPACE,
-    BB_ACTION_FX_ACID,
-    BB_ACTION_FX_DESTROY,
-    BB_ACTION_FX_TARGET_PREV,
-    BB_ACTION_FX_TARGET_NEXT
+    BB_ACTION_SCREEN_LIVE,
+    BB_ACTION_SCREEN_SEQUENCER,
+    BB_ACTION_SCREEN_FILTERS,
+    BB_ACTION_SCREEN_VOLUMES,
+    BB_ACTION_PATTERN_PREV,
+    BB_ACTION_PATTERN_NEXT,
+    BB_ACTION_PLAY_PAUSE
 };
+uint8_t analogFxSceneIndex[3] = {0, 0, 0};
+uint8_t dfFxParamMode[3] = {0, 0, 0};
+int dfFxParamValue[3] = {55, 40, 40};
+bool dfFxMuted[3] = {false, false, false};
 uint16_t dfRobotPotRaw[DFROBOT_POT_COUNT] = {};
 uint8_t dfRobotPotMidi[DFROBOT_POT_COUNT] = {};
 uint8_t dfRobotPotPos[DFROBOT_POT_COUNT] = {};
@@ -270,6 +282,8 @@ static void startWiFiReconnectAttempt();
 static void requestMasterSync(bool requestState);
 void sendUDPCommand(const char* cmd);
 void sendUDPCommand(JsonDocument& doc);
+static void applyUnifiedMasterVolume(int value, bool sendToMaster);
+static void applyBPMPrecise(float bpm, bool sendToMaster);
 void receiveUDPData();
 void requestPatternFromMaster();
 void sendPlayStateCommand(bool shouldPlay);
@@ -299,6 +313,20 @@ static constexpr const char* NVS_NAMESPACE = "red808";
 static unsigned long nvs_last_save_ms = 0;
 static bool nvs_dirty = false;
 
+static void applyBPMPrecise(float bpm, bool sendToMaster) {
+    float clamped = constrain(bpm, (float)Config::MIN_BPM, (float)Config::MAX_BPM);
+    currentBPMPrecise = clamped;
+    currentBPM = (int)lroundf(clamped);
+    nvs_dirty = true;
+
+    if (!sendToMaster || !udpConnected) return;
+
+    JsonDocument doc(&sramAllocator);
+    doc["cmd"] = "tempo";
+    doc["value"] = currentBPMPrecise;
+    sendUDPCommand(doc);
+}
+
 static void nvs_load_settings() {
     nvs_handle_t h;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
@@ -307,19 +335,45 @@ static void nvs_load_settings() {
     }
     uint8_t val8;
     int32_t val32;
+    bool hasMasterVol = false;
+    bool hasSeqVol = false;
+    bool hasLiveVol = false;
 
     if (nvs_get_u8(h, "theme", &val8) == ESP_OK && val8 < THEME_COUNT)
         currentTheme = (VisualTheme)val8;
-    if (nvs_get_i32(h, "masterVol", &val32) == ESP_OK)
+    if (nvs_get_i32(h, "masterVol", &val32) == ESP_OK) {
         masterVolume = constrain((int)val32, 0, Config::MAX_VOLUME);
-    if (nvs_get_i32(h, "seqVol", &val32) == ESP_OK)
+        hasMasterVol = true;
+    }
+    if (nvs_get_i32(h, "seqVol", &val32) == ESP_OK) {
         sequencerVolume = constrain((int)val32, 0, Config::MAX_VOLUME);
-    if (nvs_get_i32(h, "liveVol", &val32) == ESP_OK)
+        hasSeqVol = true;
+    }
+    if (nvs_get_i32(h, "liveVol", &val32) == ESP_OK) {
         livePadsVolume = constrain((int)val32, 0, Config::MAX_VOLUME);
-    if (nvs_get_i32(h, "bpm", &val32) == ESP_OK)
+        hasLiveVol = true;
+    }
+    if (nvs_get_i32(h, "bpm", &val32) == ESP_OK) {
         currentBPM = constrain((int)val32, Config::MIN_BPM, Config::MAX_BPM);
+        currentBPMPrecise = (float)currentBPM;
+    }
+    if (nvs_get_i32(h, "bpm10", &val32) == ESP_OK) {
+        currentBPMPrecise = constrain((float)val32 / 10.0f, (float)Config::MIN_BPM, (float)Config::MAX_BPM);
+        currentBPM = (int)lroundf(currentBPMPrecise);
+    }
     if (nvs_get_u8(h, "volMode", &val8) == ESP_OK)
         volumeMode = (val8 == 1) ? VOL_LIVE_PADS : VOL_SEQUENCER;
+
+    // Unified master volume mode: keep all lanes locked to one value.
+    int unified = masterVolume;
+    if (!hasMasterVol) {
+        if (hasSeqVol) unified = sequencerVolume;
+        else if (hasLiveVol) unified = livePadsVolume;
+    }
+    masterVolume = unified;
+    sequencerVolume = unified;
+    livePadsVolume = unified;
+    volumeMode = VOL_SEQUENCER;
 
     nvs_close(h);
     RED808_LOG_PRINTF("[NVS] Loaded: theme=%d bpm=%d vol=%d/%d/%d\n",
@@ -332,10 +386,11 @@ void nvs_save_settings() {
 
     nvs_set_u8(h, "theme", (uint8_t)currentTheme);
     nvs_set_i32(h, "masterVol", masterVolume);
-    nvs_set_i32(h, "seqVol", sequencerVolume);
-    nvs_set_i32(h, "liveVol", livePadsVolume);
+    nvs_set_i32(h, "seqVol", masterVolume);
+    nvs_set_i32(h, "liveVol", masterVolume);
     nvs_set_i32(h, "bpm", currentBPM);
-    nvs_set_u8(h, "volMode", volumeMode == VOL_LIVE_PADS ? 1 : 0);
+    nvs_set_i32(h, "bpm10", (int32_t)lroundf(currentBPMPrecise * 10.0f));
+    nvs_set_u8(h, "volMode", 0);
 
     nvs_commit(h);
     nvs_close(h);
@@ -345,6 +400,32 @@ void nvs_save_settings() {
 
 // Mark settings dirty — will be flushed on next periodic check
 void nvs_mark_dirty() { nvs_dirty = true; }
+
+static void applyUnifiedMasterVolume(int value, bool sendToMaster) {
+    int v = constrain(value, 0, Config::MAX_VOLUME);
+    masterVolume = v;
+    sequencerVolume = v;
+    livePadsVolume = v;
+    volumeMode = VOL_SEQUENCER;
+    nvs_mark_dirty();
+
+    if (!sendToMaster || !udpConnected) return;
+
+    JsonDocument doc(&sramAllocator);
+    doc["cmd"] = "setVolume";
+    doc["value"] = v;
+    sendUDPCommand(doc);
+
+    doc.clear();
+    doc["cmd"] = "setSequencerVolume";
+    doc["value"] = v;
+    sendUDPCommand(doc);
+
+    doc.clear();
+    doc["cmd"] = "setLiveVolume";
+    doc["value"] = v;
+    sendUDPCommand(doc);
+}
 
 // Call from loop() — debounced save every 5 seconds when dirty
 static void nvs_periodic_save() {
@@ -392,6 +473,33 @@ static int quantizeDFDelta(int index, int16_t delta) {
         accumulators[index] += Config::DF_COUNTS_PER_STEP;
     }
     return logical_step;
+}
+
+static int16_t filterDFDeltaJitter(int index, int16_t delta) {
+    static int8_t lastSign[DFROBOT_ENCODER_COUNT] = {};
+    static uint8_t confirmCount[DFROBOT_ENCODER_COUNT] = {};
+
+    if (index < 0 || index >= DFROBOT_ENCODER_COUNT) return 0;
+    if (delta == 0) return 0;
+
+    int mag = abs((int)delta);
+    if (mag <= Config::DF_IDLE_DELTA_DB) return 0;
+
+    int8_t sign = (delta > 0) ? 1 : -1;
+    if (mag <= Config::DF_NEAR_ZERO_REPEAT) {
+        if (lastSign[index] == sign) {
+            if (confirmCount[index] < 255) confirmCount[index]++;
+        } else {
+            lastSign[index] = sign;
+            confirmCount[index] = 1;
+        }
+        if (confirmCount[index] < 2) return 0;
+    } else {
+        lastSign[index] = sign;
+        confirmCount[index] = 0;
+    }
+
+    return delta;
 }
 
 static void handleLivePadTouchMatrix(unsigned long now) {
@@ -939,11 +1047,16 @@ void receiveUDPData() {
         if (playing && !isPlaying) {
             currentStep = 0;
             lastLocalStepMs = millis();
+            lastLocalStepUs = micros();
         }
         isPlaying = playing;
     }
     else if (strcmp(cmd, "start") == 0) {
-        if (!isPlaying) { currentStep = 0; lastLocalStepMs = millis(); }
+        if (!isPlaying) {
+            currentStep = 0;
+            lastLocalStepMs = millis();
+            lastLocalStepUs = micros();
+        }
         isPlaying = true;
     }
     else if (strcmp(cmd, "stop") == 0) {
@@ -951,23 +1064,20 @@ void receiveUDPData() {
         currentStep = 0;
     }
     else if (strcmp(cmd, "tempo_sync") == 0 || strcmp(cmd, "tempo") == 0) {
-        currentBPM = constrain(doc["value"] | Config::DEFAULT_BPM, Config::MIN_BPM, Config::MAX_BPM);
-        nvs_mark_dirty();
+        float bpm = doc["value"].is<float>() ? doc["value"].as<float>() : (float)(doc["value"] | Config::DEFAULT_BPM);
+        applyBPMPrecise(bpm, false);
     }
     else if (strcmp(cmd, "volume_sync") == 0 ||
              strcmp(cmd, "master_volume_sync") == 0 ||
              strcmp(cmd, "volume_master_sync") == 0 ||
              strcmp(cmd, "setVolume") == 0) {
-        masterVolume = constrain(doc["value"] | Config::DEFAULT_VOLUME, 0, Config::MAX_VOLUME);
-        nvs_mark_dirty();
+        applyUnifiedMasterVolume(doc["value"] | Config::DEFAULT_VOLUME, false);
     }
     else if (strcmp(cmd, "volume_seq_sync") == 0 || strcmp(cmd, "setSequencerVolume") == 0) {
-        sequencerVolume = constrain(doc["value"] | Config::DEFAULT_VOLUME, 0, Config::MAX_VOLUME);
-        nvs_mark_dirty();
+        applyUnifiedMasterVolume(doc["value"] | Config::DEFAULT_VOLUME, false);
     }
     else if (strcmp(cmd, "volume_live_sync") == 0 || strcmp(cmd, "setLiveVolume") == 0) {
-        livePadsVolume = constrain(doc["value"] | 100, 0, Config::MAX_VOLUME);
-        nvs_mark_dirty();
+        applyUnifiedMasterVolume(doc["value"] | Config::DEFAULT_VOLUME, false);
     }
     else if (strcmp(cmd, "trackVolumes") == 0 ||
              strcmp(cmd, "track_volumes") == 0 ||
@@ -1162,6 +1272,7 @@ void handleDFRobotPots() {
 
     static bool potInit[DFROBOT_POT_COUNT] = {false, false, false, false};
     static uint16_t potFilteredRaw[DFROBOT_POT_COUNT] = {0, 0, 0, 0};
+    static uint16_t potAnchorRaw[DFROBOT_POT_COUNT] = {0, 0, 0, 0};
     static uint8_t potCandidatePos[DFROBOT_POT_COUNT] = {0, 0, 0, 0};
     static uint8_t potCandidateCount[DFROBOT_POT_COUNT] = {0, 0, 0, 0};
 
@@ -1169,12 +1280,20 @@ void handleDFRobotPots() {
         uint16_t raw = sampleRaw[pot];
         if (!potInit[pot]) {
             potFilteredRaw[pot] = raw;
+            potAnchorRaw[pot] = raw;
             potInit[pot] = true;
         } else {
             // 1st-order low-pass: smooth random ADC fluctuations at rest.
             potFilteredRaw[pot] = (uint16_t)((potFilteredRaw[pot] * 3U + raw) / 4U);
         }
         raw = potFilteredRaw[pot];
+
+        // Hold value around a stable anchor to suppress idle wander.
+        if (abs((int)raw - (int)potAnchorRaw[pot]) <= (int)Config::DF_POT_RAW_IDLE_DB) {
+            raw = potAnchorRaw[pot];
+        } else {
+            potAnchorRaw[pot] = raw;
+        }
         dfRobotPotRaw[pot] = raw;
 
         // Adaptive calibration per pot to expand narrow ADC spans (e.g. 77..96)
@@ -1187,6 +1306,19 @@ void handleDFRobotPots() {
         if (maxV > minV + 8) {
             long mapped = map((long)raw, (long)minV, (long)maxV, 0L, 11L);
             pos = (uint8_t)constrain((int)mapped, 0, 11);
+
+            // Hysteresis around detent boundaries to avoid oscillation at rest.
+            uint8_t cur = dfRobotPotPos[pot];
+            int span = (int)(maxV - minV);
+            int hys = (span * Config::DF_POT_HYST_NUM) / (11 * Config::DF_POT_HYST_DEN);
+            if (hys < 1) hys = 1;
+            if (pos > cur && cur < 11) {
+                long boundary = (long)minV + ((long)(2 * cur + 1) * (long)span) / 22L;
+                if ((long)raw < (boundary + hys)) pos = cur;
+            } else if (pos < cur && cur > 0) {
+                long boundary = (long)minV + ((long)(2 * cur - 1) * (long)span) / 22L;
+                if ((long)raw > (boundary - hys)) pos = cur;
+            }
         } else {
             // Not enough travel captured yet; keep current detent value stable.
             pos = dfRobotPotPos[pot];
@@ -1234,27 +1366,53 @@ void handleDFRobotPots() {
 
         JsonDocument doc(&sramAllocator);
         if (pot == 0) {
-            // P1: Master volume (coarse lane)
-            masterVolume = map((int)midi, 0, 127, 0, Config::MAX_VOLUME);
-            doc["cmd"] = "setVolume";
-            doc["value"] = masterVolume;
-            sendUDPCommand(doc);
-            nvs_mark_dirty();
-        } else if (pot == 1) {
-            // P2: Master delay amount
-            masterFilter.enabled = masterFilter.enabled || (midi > 0);
-            masterFilter.delayAmount = midi;
-            sendFilterUDP(-1, FILTER_DELAY);
-        } else if (pot == 2) {
-            // P3: Master flanger amount
-            masterFilter.enabled = masterFilter.enabled || (midi > 0);
-            masterFilter.flangerAmount = midi;
-            sendFilterUDP(-1, FILTER_FLANGER);
+            // P1: Master volume with explicit 12 detents mapped to 0..150.
+            int newVol = (int)lroundf(((float)pos / 11.0f) * (float)Config::MAX_VOLUME);
+            applyUnifiedMasterVolume(newVol, true);
         } else {
-            // P4: Master compressor amount
-            masterFilter.enabled = masterFilter.enabled || (midi > 0);
-            masterFilter.compAmount = midi;
-            sendFilterUDP(-1, FILTER_COMPRESSOR);
+            // P2/P3/P4: 12-scene FX macros for Delay/Flanger/Comp respectively.
+            static const uint8_t delayScenes[12][3] = {
+                {0, 0, 0}, {18, 10, 12}, {28, 16, 22}, {36, 24, 30},
+                {44, 32, 38}, {56, 42, 50}, {68, 52, 60}, {80, 62, 74},
+                {92, 74, 86}, {104, 86, 98}, {116, 96, 112}, {127, 112, 127}
+            };
+            static const uint8_t flangerScenes[12][3] = {
+                {0, 0, 0}, {8, 14, 12}, {14, 22, 20}, {20, 30, 28},
+                {26, 38, 36}, {32, 46, 44}, {40, 54, 52}, {52, 66, 62},
+                {64, 78, 74}, {76, 90, 86}, {92, 106, 102}, {110, 122, 120}
+            };
+            static const uint8_t compScenes[12][3] = {
+                {0, 1, 0}, {10, 2, 16}, {18, 2, 24}, {28, 3, 34},
+                {38, 3, 46}, {50, 4, 58}, {62, 4, 70}, {74, 5, 82},
+                {86, 6, 96}, {98, 7, 108}, {112, 8, 120}, {127, 10, 127}
+            };
+
+            int scene = constrain((int)pos, 0, 11);
+            int lane = pot - 1;
+            analogFxSceneIndex[lane] = (uint8_t)scene;
+
+            if (pot == 1) {
+                const uint8_t* s = delayScenes[scene];
+                doc["cmd"] = "setDelayTime"; doc["value"] = s[0]; sendUDPCommand(doc); doc.clear();
+                doc["cmd"] = "setDelayFeedback"; doc["value"] = s[1]; sendUDPCommand(doc); doc.clear();
+                doc["cmd"] = "setDelayMix"; doc["value"] = s[2]; sendUDPCommand(doc);
+                masterFilter.delayAmount = s[2];
+                masterFilter.enabled = masterFilter.enabled || (s[2] > 0);
+            } else if (pot == 2) {
+                const uint8_t* s = flangerScenes[scene];
+                doc["cmd"] = "setFlangerRate"; doc["value"] = s[0]; sendUDPCommand(doc); doc.clear();
+                doc["cmd"] = "setFlangerDepth"; doc["value"] = s[1]; sendUDPCommand(doc); doc.clear();
+                doc["cmd"] = "setFlangerFeedback"; doc["value"] = s[2]; sendUDPCommand(doc);
+                masterFilter.flangerAmount = s[1];
+                masterFilter.enabled = masterFilter.enabled || (s[1] > 0);
+            } else {
+                const uint8_t* s = compScenes[scene];
+                doc["cmd"] = "setCompThreshold"; doc["value"] = s[0]; sendUDPCommand(doc); doc.clear();
+                doc["cmd"] = "setCompRatio"; doc["value"] = s[1]; sendUDPCommand(doc); doc.clear();
+                doc["cmd"] = "setCompActive"; doc["value"] = s[2] > 0 ? 1 : 0; sendUDPCommand(doc);
+                masterFilter.compAmount = s[2];
+                masterFilter.enabled = masterFilter.enabled || (s[2] > 0);
+            }
         }
     }
 }
@@ -1423,7 +1581,15 @@ void updateByteButtonLeds() {
             case BB_ACTION_MENU:
                 return theme_nav_color(6);
             case BB_ACTION_VOL_MODE:
-                return (volumeMode == VOL_SEQUENCER) ? 0x0055CC : 0xCC5500;
+                return 0x0055CC;
+            case BB_ACTION_SCREEN_LIVE:
+                return 0x22AAFF;
+            case BB_ACTION_SCREEN_SEQUENCER:
+                return 0x55CC55;
+            case BB_ACTION_SCREEN_FILTERS:
+                return 0xCC66FF;
+            case BB_ACTION_SCREEN_VOLUMES:
+                return 0xFFAA33;
             case BB_ACTION_FX_CLEAN:
                 return (byteButtonFxScene == 0) ? fxSceneOn[0] : fxSceneOff[0];
             case BB_ACTION_FX_SPACE:
@@ -1439,6 +1605,8 @@ void updateByteButtonLeds() {
                 return (currentPattern > 0) ? 0xAA6600 : 0x221100;
             case BB_ACTION_PATTERN_NEXT:
                 return (currentPattern < Config::MAX_PATTERNS - 1) ? 0xAA6600 : 0x221100;
+            case BB_ACTION_PLAY_PAUSE:
+                return isPlaying ? 0x00AA44 : 0x224422;
             default:
                 return 0x202020;
         }
@@ -1772,6 +1940,37 @@ void handleM5Encoders() {
 
 void handleDFRobotEncoders() {
     static unsigned long lastBtnMs[DFROBOT_ENCODER_COUNT] = {};
+    static int laneStoredValue[3] = {55, 40, 40};
+
+    auto syncMasterEnabled = [&]() {
+        masterFilter.enabled = (masterFilter.delayAmount > 0 ||
+                                masterFilter.flangerAmount > 0 ||
+                                masterFilter.compAmount > 0);
+    };
+
+    auto sendFxLane = [&](int lane, int value, bool muted) {
+        int effective = muted ? 0 : constrain(value, 0, 127);
+        JsonDocument doc(&sramAllocator);
+
+        if (lane == 0) {
+            doc["cmd"] = "setDelayActive"; doc["value"] = effective > 0 ? 1 : 0; sendUDPCommand(doc); doc.clear();
+            doc["cmd"] = "setDelayMix"; doc["value"] = effective; sendUDPCommand(doc);
+            masterFilter.delayAmount = (uint8_t)effective;
+        } else if (lane == 1) {
+            doc["cmd"] = "setFlangerActive"; doc["value"] = effective > 0 ? 1 : 0; sendUDPCommand(doc); doc.clear();
+            doc["cmd"] = "setFlangerDepth"; doc["value"] = effective; sendUDPCommand(doc);
+            masterFilter.flangerAmount = (uint8_t)effective;
+        } else {
+            doc["cmd"] = "setCompActive"; doc["value"] = effective > 0 ? 1 : 0; sendUDPCommand(doc); doc.clear();
+            doc["cmd"] = "setCompThreshold"; doc["value"] = effective; sendUDPCommand(doc); doc.clear();
+            doc["cmd"] = "setCompRatio"; doc["value"] = constrain(1 + effective / 14, 1, 10); sendUDPCommand(doc);
+            masterFilter.compAmount = (uint8_t)effective;
+        }
+
+        syncMasterEnabled();
+        dfFxParamMode[lane] = 0;
+        dfFxParamValue[lane] = laneStoredValue[lane];
+    };
 
     for (int i = 0; i < DFROBOT_ENCODER_COUNT; i++) {
         if (!dfEncoderConnected[i]) continue;
@@ -1792,7 +1991,7 @@ void handleDFRobotEncoders() {
         } else {
             if (delta > Config::DF_DELTA_CLAMP) delta = Config::DF_DELTA_CLAMP;
             if (delta < -Config::DF_DELTA_CLAMP) delta = -Config::DF_DELTA_CLAMP;
-            if (abs((int)delta) <= 1) delta = 0;
+            delta = filterDFDeltaJitter(i, delta);
         }
         prevDFValue[i] = val;
 
@@ -1806,98 +2005,72 @@ void handleDFRobotEncoders() {
 
         // Process results outside of I2C lock
         if (i == 0) {
-            // DFRobot #0: Sequencer volume
-            // Button: Play/Pause
+            // DFRobot #0: Delay lane. Button toggles mute for this FX lane.
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                int newVol = constrain(sequencerVolume + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
-                if (newVol != sequencerVolume) {
-                    sequencerVolume = newVol;
-                    nvs_mark_dirty();
-                    JsonDocument doc(&sramAllocator);
-                    doc["cmd"] = "setSequencerVolume";
-                    doc["value"] = sequencerVolume;
-                    sendUDPCommand(doc);
+                int newVal = constrain(laneStoredValue[0] + logical_delta * Config::DF_FX_STEP, 0, 127);
+                if (newVal != laneStoredValue[0]) {
+                    laneStoredValue[0] = newVal;
+                    if (!dfFxMuted[0]) sendFxLane(0, laneStoredValue[0], false);
+                    dfFxParamValue[0] = laneStoredValue[0];
                 }
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();
-                sendPlayStateCommand(!isPlaying);
+                dfFxMuted[0] = !dfFxMuted[0];
+                sendFxLane(0, laneStoredValue[0], dfFxMuted[0]);
+                RED808_LOG_PRINTF("[DFRobot] Delay lane %s\n", dfFxMuted[0] ? "MUTED" : "UNMUTED");
             }
         }
         else if (i == 1) {
-            // DFRobot #1: BPM
-            // Button: reset BPM to default
+            // DFRobot #1: Flanger lane. Button toggles mute for this FX lane.
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                int newBPM = constrain(currentBPM + logical_delta * Config::DF_BPM_STEP, Config::MIN_BPM, Config::MAX_BPM);
-                if (newBPM != currentBPM) {
-                    currentBPM = newBPM;
-                    nvs_mark_dirty();
-                    JsonDocument doc(&sramAllocator);
-                    doc["cmd"] = "tempo";
-                    doc["value"] = currentBPM;
-                    sendUDPCommand(doc);
+                int newVal = constrain(laneStoredValue[1] + logical_delta * Config::DF_FX_STEP, 0, 127);
+                if (newVal != laneStoredValue[1]) {
+                    laneStoredValue[1] = newVal;
+                    if (!dfFxMuted[1]) sendFxLane(1, laneStoredValue[1], false);
+                    dfFxParamValue[1] = laneStoredValue[1];
                 }
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();
-                // Reset BPM to default
-                int newBPM = Config::DEFAULT_BPM;
-                if (newBPM != currentBPM) {
-                    currentBPM = newBPM;
-                    nvs_mark_dirty();
-                    JsonDocument doc(&sramAllocator);
-                    doc["cmd"] = "tempo";
-                    doc["value"] = currentBPM;
-                    sendUDPCommand(doc);
-                }
-                RED808_LOG_PRINTF("[DFRobot] BPM reset to %d\n", currentBPM);
+                dfFxMuted[1] = !dfFxMuted[1];
+                sendFxLane(1, laneStoredValue[1], dfFxMuted[1]);
+                RED808_LOG_PRINTF("[DFRobot] Flanger lane %s\n", dfFxMuted[1] ? "MUTED" : "UNMUTED");
             }
         }
         else if (i == 2) {
-            // DFRobot #2: Selected track volume
-            // Button: toggle mute on selected track
+            // DFRobot #2: Compressor lane. Button toggles mute for this FX lane.
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                int tr = constrain(selectedTrack, 0, Config::MAX_TRACKS - 1);
-                int newVol = constrain(trackVolumes[tr] + logical_delta * Config::DF_VOLUME_STEP, 0, Config::MAX_VOLUME);
-                if (newVol != trackVolumes[tr]) {
-                    trackVolumes[tr] = newVol;
-                    nvs_mark_dirty();
-                    JsonDocument doc(&sramAllocator);
-                    doc["cmd"] = "setTrackVolume";
-                    doc["track"] = tr;
-                    doc["volume"] = trackVolumes[tr];
-                    sendUDPCommand(doc);
+                int newVal = constrain(laneStoredValue[2] + logical_delta * Config::DF_FX_STEP, 0, 127);
+                if (newVal != laneStoredValue[2]) {
+                    laneStoredValue[2] = newVal;
+                    if (!dfFxMuted[2]) sendFxLane(2, laneStoredValue[2], false);
+                    dfFxParamValue[2] = laneStoredValue[2];
                 }
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();
-                int tr = constrain(selectedTrack, 0, Config::MAX_TRACKS - 1);
-                trackMuted[tr] = !trackMuted[tr];
-                JsonDocument doc(&sramAllocator);
-                doc["cmd"] = "mute";
-                doc["track"] = tr;
-                doc["value"] = trackMuted[tr];
-                sendUDPCommand(doc);
-                RED808_LOG_PRINTF("[DFRobot] Track %d %s\n", tr, trackMuted[tr] ? "MUTED" : "UNMUTED");
+                dfFxMuted[2] = !dfFxMuted[2];
+                sendFxLane(2, laneStoredValue[2], dfFxMuted[2]);
+                RED808_LOG_PRINTF("[DFRobot] Comp lane %s\n", dfFxMuted[2] ? "MUTED" : "UNMUTED");
             }
         }
         else if (i == 3) {
-            // DFRobot #3: Pattern select
-            // Button: request pattern resync from master
+            // DFRobot #3: BPM control in tenths. Button resets to default BPM.
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                int newPattern = constrain(currentPattern + logical_delta, 0, Config::MAX_PATTERNS - 1);
-                if (newPattern != currentPattern) {
-                    selectPatternOnMaster(newPattern);
+                float newBpm = currentBPMPrecise + (float)logical_delta * 0.1f;
+                if (fabsf(newBpm - currentBPMPrecise) >= 0.05f) {
+                    applyBPMPrecise(newBpm, true);
                 }
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();
-                requestPatternFromMaster();
-                RED808_LOG_PRINTF("[DFRobot] Pattern resync requested for %d\n", currentPattern);
+                applyBPMPrecise((float)Config::DEFAULT_BPM, true);
+                RED808_LOG_PRINTF("[DFRobot] BPM reset to %.1f\n", currentBPMPrecise);
             }
         }
     }
@@ -1910,7 +2083,8 @@ void handleDFRobotEncoders() {
 void handleUnitFader() {
     static unsigned long lastReadMs = 0;
     static int filtered = -1;
-    static int lastSentMidi = -1;
+    static int lastRaw = -1;
+    static int accum = 0;
 
     unsigned long now = millis();
     if ((now - lastReadMs) < Config::UNIT_FADER_READ_MS) return;
@@ -1923,17 +2097,24 @@ void handleUnitFader() {
     if (filtered < 0) filtered = raw;
     filtered = (filtered * 3 + raw) / 4;
 
-    int midi = constrain((filtered * 127 + 2047) / 4095, 0, 127);
-    if (lastSentMidi >= 0 && abs(midi - lastSentMidi) < Config::UNIT_FADER_DEADBAND) return;
+    if (lastRaw < 0) {
+        lastRaw = filtered;
+        return;
+    }
 
-    lastSentMidi = midi;
-    livePadsVolume = map(midi, 0, 127, 0, Config::MAX_VOLUME);
-    nvs_mark_dirty();
+    int delta = filtered - lastRaw;
+    lastRaw = filtered;
+    if (abs(delta) < Config::UNIT_FADER_DEADBAND) return;
 
-    JsonDocument doc(&sramAllocator);
-    doc["cmd"] = "setLiveVolume";
-    doc["value"] = livePadsVolume;
-    sendUDPCommand(doc);
+    accum += delta;
+    const int countsPerTenth = 18;
+    int steps = 0;
+    while (accum >= countsPerTenth) { steps++; accum -= countsPerTenth; }
+    while (accum <= -countsPerTenth) { steps--; accum += countsPerTenth; }
+    if (steps == 0) return;
+
+    float bpmFine = currentBPMPrecise + (float)steps * 0.1f;
+    applyBPMPrecise(bpmFine, true);
 }
 
 // =============================================================================
@@ -2000,9 +2181,20 @@ static void runByteButtonAction(uint8_t action) {
             navigateToScreen(SCREEN_MENU);
             break;
         case BB_ACTION_VOL_MODE:
-            volumeMode = (volumeMode == VOL_SEQUENCER) ? VOL_LIVE_PADS : VOL_SEQUENCER;
-            nvs_mark_dirty();
-            RED808_LOG_PRINTF("[BB1] Volume mode: %s\n", volumeMode == VOL_SEQUENCER ? "SEQ" : "PAD");
+            applyUnifiedMasterVolume(masterVolume, true);
+            RED808_LOG_PRINTF("[BB1] Master volume resync: %d\n", masterVolume);
+            break;
+        case BB_ACTION_SCREEN_LIVE:
+            navigateToScreen(SCREEN_LIVE);
+            break;
+        case BB_ACTION_SCREEN_SEQUENCER:
+            navigateToScreen(SCREEN_SEQUENCER);
+            break;
+        case BB_ACTION_SCREEN_FILTERS:
+            navigateToScreen(SCREEN_FILTERS);
+            break;
+        case BB_ACTION_SCREEN_VOLUMES:
+            navigateToScreen(SCREEN_VOLUMES);
             break;
         case BB_ACTION_FX_CLEAN:
             applyFxScene(0);
@@ -2031,6 +2223,9 @@ static void runByteButtonAction(uint8_t action) {
             break;
         case BB_ACTION_PATTERN_NEXT:
             if (currentPattern < Config::MAX_PATTERNS - 1) selectPatternOnMaster(currentPattern + 1);
+            break;
+        case BB_ACTION_PLAY_PAUSE:
+            sendPlayStateCommand(!isPlaying);
             break;
         default:
             break;
@@ -2384,17 +2579,21 @@ void loop() {
 
     // Local step clock: PRIMARY driver of currentStep (same approach as old project).
     // Master step_update is ignored for position — UDP packet loss makes it unreliable.
-    // BPM is synced via tempo_sync, so local clock stays accurate (<1ms drift/step).
+    // Uses microsecond period so decimal BPM (e.g. 120.5 vs 120.7) has real timing effect.
     // SNAP-TO-NOW: never catch up — max 1 step per loop iteration = smooth visual always.
-    if (isPlaying && currentBPM > 0) {
-        unsigned long step_ms = 60000UL / (unsigned long)currentBPM / 4;
-        if (step_ms < 50) step_ms = 50;
-        if ((now - lastLocalStepMs) >= step_ms) {
-            lastLocalStepMs = now;  // snap to now — NEVER accumulate, NEVER catch up
+    if (isPlaying && currentBPMPrecise > 0.0f) {
+        uint32_t nowUs = micros();
+        uint32_t step_us = (uint32_t)(60000000.0f / currentBPMPrecise / 4.0f);
+        if (step_us < 50000U) step_us = 50000U;
+        if (lastLocalStepUs == 0) lastLocalStepUs = nowUs;
+        if ((uint32_t)(nowUs - lastLocalStepUs) >= step_us) {
+            lastLocalStepUs = nowUs;  // snap to now — NEVER accumulate, NEVER catch up
+            lastLocalStepMs = now;
             currentStep = (currentStep + 1) % Config::MAX_STEPS;
         }
     } else if (!isPlaying) {
         lastLocalStepMs = now;
+        lastLocalStepUs = micros();
     }
 
     // Encoders run in dedicated encoder_task — no polling here
