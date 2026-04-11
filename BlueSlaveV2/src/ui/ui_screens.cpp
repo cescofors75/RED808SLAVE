@@ -17,6 +17,7 @@ extern void sendFilterUDP(int track, int fxType);
 extern void updateByteButtonLeds();
 extern uint8_t dfFxParamMode[];
 extern int dfFxParamValue[];
+extern bool analogFxMuted[];
 
 // SRAM allocator — same as main.cpp, avoids PSRAM bus contention with LCD DMA
 struct SramAllocatorUI : ArduinoJson::Allocator {
@@ -126,13 +127,16 @@ static lv_obj_t* filter_target_prev_btn = NULL;
 static lv_obj_t* filter_target_next_btn = NULL;
 static lv_obj_t* filter_target_label = NULL;
 static lv_obj_t* filter_preset_label = NULL;  // rotary theme indicator
-static lv_obj_t* filter_df_mode_labels[3] = {};
-static lv_obj_t* filter_df_value_labels[3] = {};
-static lv_obj_t* filter_df_unit_labels[3] = {};
+static lv_obj_t* filter_df_mode_labels[6] = {};
+static lv_obj_t* filter_df_value_labels[6] = {};
+static lv_obj_t* filter_df_unit_labels[6] = {};
 static lv_obj_t* filter_scene_value_labels[3] = {};
-static lv_obj_t* filter_grid_arcs[3] = {};
-static lv_obj_t* filter_grid_mute_labels[3] = {};
+static lv_obj_t* filter_grid_arcs[6] = {};
+static lv_obj_t* filter_grid_mute_labels[6] = {};
 static lv_obj_t* filter_scene_cell_title = NULL;
+static lv_obj_t* filter_resp_label = NULL;
+static lv_obj_t* filter_resp_btns[3] = {};
+static lv_obj_t* filter_resp_btn_labels[3] = {};
 
 // Live pads
 static lv_obj_t* live_pads[Config::MAX_SAMPLES];
@@ -2275,6 +2279,36 @@ static void filter_ext_slider_cb(lv_event_t* e) {
     filter_set_status_text("Extended FX updated over UDP");
 }
 
+static const char* fx_mode_name(FxResponseMode mode) {
+    switch (mode) {
+        case FX_MODE_PRECISION: return "PREC";
+        case FX_MODE_LIVE:
+        default: return "LIVE";
+    }
+}
+
+static void filter_update_response_mode_ui() {
+    if (filter_resp_label) {
+        lv_label_set_text_fmt(filter_resp_label, "RESP: %s", fx_mode_name((FxResponseMode)fxResponseMode));
+    }
+    for (int i = 0; i < 2; i++) {
+        if (!filter_resp_btns[i]) continue;
+        bool selected = ((int)fxResponseMode == i);
+        lv_obj_set_style_bg_color(filter_resp_btns[i], selected ? RED808_ACCENT : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(filter_resp_btns[i], selected ? RED808_ACCENT : RED808_BORDER, 0);
+        if (filter_resp_btn_labels[i]) {
+            lv_obj_set_style_text_color(filter_resp_btn_labels[i], selected ? RED808_BG : RED808_TEXT, 0);
+        }
+    }
+}
+
+static void filter_response_mode_cb(lv_event_t* e) {
+    int mode = (int)(intptr_t)lv_event_get_user_data(e);
+    if (mode < 0 || mode > 1) return;
+    fxResponseMode = (FxResponseMode)mode;
+    filter_update_response_mode_ui();
+}
+
 void ui_create_filters_screen() {
     static const char* fx_names[] = {"DELAY", "FLANGER", "COMP"};
     static const lv_color_t fx_colors[] = {
@@ -2304,11 +2338,25 @@ void ui_create_filters_screen() {
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
     lv_obj_set_pos(title, 8, 4);
 
-    lv_obj_t* subtitle = lv_label_create(shell);
-    lv_label_set_text(subtitle, "Direct FX mode: 3 DFRobot lanes + 3 analog FX params");
-    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(subtitle, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(subtitle, 10, 34);
+    filter_resp_label = lv_label_create(shell);
+    lv_label_set_text(filter_resp_label, "RESP: LIVE");
+    lv_obj_set_style_text_font(filter_resp_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(filter_resp_label, RED808_WARNING, 0);
+    lv_obj_set_pos(filter_resp_label, 14, 36);
+
+    static const char* modeNames[] = {"PREC", "LIVE"};
+    for (int i = 0; i < 2; i++) {
+        filter_resp_btns[i] = lv_btn_create(shell);
+        lv_obj_set_size(filter_resp_btns[i], 96, 32);
+        lv_obj_align(filter_resp_btns[i], LV_ALIGN_TOP_RIGHT, -212 + i * 102, 30);
+        lv_obj_set_style_radius(filter_resp_btns[i], 13, 0);
+        lv_obj_add_event_cb(filter_resp_btns[i], filter_response_mode_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        filter_resp_btn_labels[i] = lv_label_create(filter_resp_btns[i]);
+        lv_label_set_text(filter_resp_btn_labels[i], modeNames[i]);
+        lv_obj_set_style_text_font(filter_resp_btn_labels[i], &lv_font_montserrat_12, 0);
+        lv_obj_center(filter_resp_btn_labels[i]);
+    }
+    filter_update_response_mode_ui();
 
     /* Use the explicit sizes we just set – lv_obj_get_width/height may
        return 0 before the first LVGL layout pass, producing negative
@@ -2320,10 +2368,11 @@ void ui_create_filters_screen() {
     const int shellW = 988;
     const int shellH = 500;
 #endif
-    int panelX = 8;
-    int panelY = 76;
-    int panelW = shellW - 16;
-    int panelH = shellH - 90;
+    const int shellPad = 14;  // create_section_shell() default pad
+    int panelX = 0;
+    int panelY = 72;
+    int panelW = shellW - (shellPad * 2);
+    int panelH = shellH - panelY - shellPad;
     if (panelW < 220) panelW = 220;
     if (panelH < 220) panelH = 220;
 
@@ -2332,13 +2381,18 @@ void ui_create_filters_screen() {
     lv_obj_set_style_bg_color(compact_panel, lv_color_hex(0x101820), 0);
     lv_obj_set_style_border_width(compact_panel, 2, 0);
     lv_obj_set_style_border_color(compact_panel, RED808_ACCENT, 0);
+    lv_obj_set_style_pad_all(compact_panel, 0, 0);
     lv_obj_move_foreground(compact_panel);
 
-    static const char* laneNames[] = {"DELAY", "FLANGER", "COMP"};
+    static const char* laneNames[] = {"DELAY", "FLANGER", "COMP", "CUTOFF", "RESONANCE", "DRIVE"};
+    static const char* laneSources[] = {"DF-1", "DF-2", "DF-3", "P2", "P3", "P4"};
     static const lv_color_t laneColors[] = {
         lv_color_hex(0x58A6FF),
         lv_color_hex(0x39D2C0),
         lv_color_hex(0xD29922),
+        lv_color_hex(0xB58BFF),
+        lv_color_hex(0xFF8F5A),
+        lv_color_hex(0x7DD36F),
     };
 
     /* Use panelW/panelH directly – compact_panel was just created with
@@ -2346,14 +2400,16 @@ void ui_create_filters_screen() {
     const int gridW = panelW;
     const int gridH = panelH;
     const int gap = 10;
-    const int cellW = (gridW - gap) / 2;
-    const int cellH = (gridH - gap) / 2;
-    const int usedW = (cellW * 2) + gap;
-    const int usedH = (cellH * 2) + gap;
+    const int cols = 2;
+    const int rows = 3;
+    const int cellW = (gridW - (gap * (cols - 1))) / cols;
+    const int cellH = (gridH - (gap * (rows - 1))) / rows;
+    const int usedW = (cellW * cols) + gap * (cols - 1);
+    const int usedH = (cellH * rows) + gap * (rows - 1);
     const int startX = (gridW - usedW) / 2;
     const int startY = (gridH - usedH) / 2;
 
-    for (int cell = 0; cell < 4; cell++) {
+    for (int cell = 0; cell < 6; cell++) {
         int col = cell % 2;
         int row = cell / 2;
         int x = startX + col * (cellW + gap);
@@ -2365,92 +2421,81 @@ void ui_create_filters_screen() {
         lv_obj_set_style_border_width(card, 2, 0);
         lv_obj_set_style_border_color(card, RED808_BORDER, 0);
 
-        if (cell < 3) {
-            lv_obj_t* title = lv_label_create(card);
-            lv_label_set_text(title, laneNames[cell]);
-            lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
-            lv_obj_set_style_text_color(title, laneColors[cell], 0);
-            lv_obj_set_width(title, cellW - 24);
-            lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_pos(title, 12, 8);
+        lv_obj_t* title = lv_label_create(card);
+        lv_label_set_text(title, laneNames[cell]);
+        lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(title, laneColors[cell], 0);
+        lv_obj_set_width(title, cellW - 24);
+        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(title, 12, 8);
 
-            filter_grid_mute_labels[cell] = lv_label_create(card);
-            lv_label_set_text(filter_grid_mute_labels[cell], "ON");
-            lv_obj_set_style_text_font(filter_grid_mute_labels[cell], &lv_font_montserrat_12, 0);
-            lv_obj_set_style_text_color(filter_grid_mute_labels[cell], RED808_SUCCESS, 0);
-            lv_obj_set_style_bg_opa(filter_grid_mute_labels[cell], LV_OPA_30, 0);
-            lv_obj_set_style_bg_color(filter_grid_mute_labels[cell], RED808_SUCCESS, 0);
-            lv_obj_set_style_radius(filter_grid_mute_labels[cell], 8, 0);
-            lv_obj_set_style_pad_left(filter_grid_mute_labels[cell], 6, 0);
-            lv_obj_set_style_pad_right(filter_grid_mute_labels[cell], 6, 0);
-            lv_obj_set_style_pad_top(filter_grid_mute_labels[cell], 2, 0);
-            lv_obj_set_style_pad_bottom(filter_grid_mute_labels[cell], 2, 0);
-            lv_obj_align(filter_grid_mute_labels[cell], LV_ALIGN_TOP_RIGHT, -8, 10);
+        filter_grid_mute_labels[cell] = lv_label_create(card);
+        bool analogMuted = (cell >= 3) ? analogFxMuted[cell - 3] : false;
+        lv_label_set_text(filter_grid_mute_labels[cell], cell < 3 ? "ON" : (analogMuted ? "MUTE" : "ANLG"));
+        lv_obj_set_style_text_font(filter_grid_mute_labels[cell], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(filter_grid_mute_labels[cell],
+                        cell < 3 ? RED808_SUCCESS : (analogMuted ? RED808_ERROR : RED808_ACCENT2), 0);
+        lv_obj_set_style_bg_opa(filter_grid_mute_labels[cell], LV_OPA_30, 0);
+        lv_obj_set_style_bg_color(filter_grid_mute_labels[cell],
+                      cell < 3 ? RED808_SUCCESS : (analogMuted ? RED808_ERROR : RED808_ACCENT2), 0);
+        lv_obj_set_style_radius(filter_grid_mute_labels[cell], 8, 0);
+        lv_obj_set_style_pad_left(filter_grid_mute_labels[cell], 6, 0);
+        lv_obj_set_style_pad_right(filter_grid_mute_labels[cell], 6, 0);
+        lv_obj_set_style_pad_top(filter_grid_mute_labels[cell], 2, 0);
+        lv_obj_set_style_pad_bottom(filter_grid_mute_labels[cell], 2, 0);
+        lv_obj_align(filter_grid_mute_labels[cell], LV_ALIGN_TOP_RIGHT, -8, 10);
 
-            const int topBand = 34;
-            const int bottomBand = 36;
-            int arcSize = min(cellW - 24, cellH - topBand - bottomBand);
-            arcSize = constrain(arcSize, 110, 230);
-            int arcX = (cellW - arcSize) / 2;
-            int arcY = topBand + ((cellH - topBand - bottomBand - arcSize) / 2);
-            if (arcY < 32) arcY = 32;
+        const int topBand = 34;
+        const int bottomBand = 34;
+        int arcSize = min(cellW - 24, cellH - topBand - bottomBand);
+        arcSize = constrain(arcSize, 84, 180);
+        int arcX = (cellW - arcSize) / 2;
+        int arcY = topBand + ((cellH - topBand - bottomBand - arcSize) / 2);
+        if (arcY < 30) arcY = 30;
 
-            filter_grid_arcs[cell] = lv_arc_create(card);
-            lv_obj_set_size(filter_grid_arcs[cell], arcSize, arcSize);
-            lv_obj_set_pos(filter_grid_arcs[cell], arcX, arcY);
-            lv_arc_set_rotation(filter_grid_arcs[cell], 135);
-            lv_arc_set_bg_angles(filter_grid_arcs[cell], 0, 270);
-            lv_arc_set_range(filter_grid_arcs[cell], 0, 127);
-            lv_arc_set_value(filter_grid_arcs[cell], constrain(dfFxParamValue[cell], 0, 127));
-            lv_obj_clear_flag(filter_grid_arcs[cell], LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_remove_style(filter_grid_arcs[cell], NULL, LV_PART_KNOB);
-            lv_obj_set_style_arc_width(filter_grid_arcs[cell], 10, LV_PART_MAIN);
-            lv_obj_set_style_arc_color(filter_grid_arcs[cell], lv_color_hex(0x3A4B58), LV_PART_MAIN);
-            lv_obj_set_style_arc_width(filter_grid_arcs[cell], 16, LV_PART_INDICATOR);
-            lv_obj_set_style_arc_color(filter_grid_arcs[cell], laneColors[cell], LV_PART_INDICATOR);
+        int initValue = 0;
+        if (cell < 3) initValue = constrain(dfFxParamValue[cell], 0, 127);
+        else if (cell == 3) initValue = analogFxMuted[0] ? 0 : filter_cutoff_to_slider(fxFilterCutoffHz);
+        else if (cell == 4) initValue = analogFxMuted[1] ? 0 : constrain(((fxFilterResonanceX10 - 10) * 127) / 90, 0, 127);
+        else initValue = analogFxMuted[2] ? 0 : constrain((fxDistortionPercent * 127) / 100, 0, 127);
 
-            filter_df_mode_labels[cell] = lv_label_create(card);
-            lv_label_set_text_fmt(filter_df_mode_labels[cell], "DF-%d", cell + 1);
-            lv_obj_set_style_text_font(filter_df_mode_labels[cell], &lv_font_montserrat_12, 0);
-            lv_obj_set_style_text_color(filter_df_mode_labels[cell], RED808_TEXT_DIM, 0);
-            lv_obj_set_width(filter_df_mode_labels[cell], cellW);
-            lv_obj_set_style_text_align(filter_df_mode_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_pos(filter_df_mode_labels[cell], 0, cellH - 26);
+        filter_grid_arcs[cell] = lv_arc_create(card);
+        lv_obj_set_size(filter_grid_arcs[cell], arcSize, arcSize);
+        lv_obj_set_pos(filter_grid_arcs[cell], arcX, arcY);
+        lv_arc_set_rotation(filter_grid_arcs[cell], 135);
+        lv_arc_set_bg_angles(filter_grid_arcs[cell], 0, 270);
+        lv_arc_set_range(filter_grid_arcs[cell], 0, 127);
+        lv_arc_set_value(filter_grid_arcs[cell], initValue);
+        lv_obj_clear_flag(filter_grid_arcs[cell], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_style(filter_grid_arcs[cell], NULL, LV_PART_KNOB);
+        lv_obj_set_style_arc_width(filter_grid_arcs[cell], 10, LV_PART_MAIN);
+        lv_obj_set_style_arc_color(filter_grid_arcs[cell], lv_color_hex(0x3A4B58), LV_PART_MAIN);
+        lv_obj_set_style_arc_width(filter_grid_arcs[cell], 16, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(filter_grid_arcs[cell], laneColors[cell], LV_PART_INDICATOR);
 
-            filter_df_value_labels[cell] = lv_label_create(card);
-            lv_label_set_text(filter_df_value_labels[cell], "000");
-            lv_obj_set_style_text_font(filter_df_value_labels[cell], &lv_font_montserrat_22, 0);
-            lv_obj_set_style_text_color(filter_df_value_labels[cell], RED808_TEXT, 0);
-            lv_obj_set_width(filter_df_value_labels[cell], cellW);
-            lv_obj_set_style_text_align(filter_df_value_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_pos(filter_df_value_labels[cell], 0, arcY + (arcSize / 2) - 14);
+        filter_df_mode_labels[cell] = lv_label_create(card);
+        lv_label_set_text(filter_df_mode_labels[cell], laneSources[cell]);
+        lv_obj_set_style_text_font(filter_df_mode_labels[cell], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(filter_df_mode_labels[cell], RED808_TEXT_DIM, 0);
+        lv_obj_set_width(filter_df_mode_labels[cell], cellW);
+        lv_obj_set_style_text_align(filter_df_mode_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(filter_df_mode_labels[cell], 0, cellH - 26);
 
-            filter_df_unit_labels[cell] = lv_label_create(card);
-            lv_label_set_text(filter_df_unit_labels[cell], "%");
-            lv_obj_set_style_text_font(filter_df_unit_labels[cell], &lv_font_montserrat_12, 0);
-            lv_obj_set_style_text_color(filter_df_unit_labels[cell], RED808_TEXT_DIM, 0);
-            lv_obj_set_width(filter_df_unit_labels[cell], cellW);
-            lv_obj_set_style_text_align(filter_df_unit_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_pos(filter_df_unit_labels[cell], 0, arcY + (arcSize / 2) + 12);
-        } else {
-            filter_scene_cell_title = lv_label_create(card);
-            lv_label_set_text(filter_scene_cell_title, "ANALOG FX");
-            lv_obj_set_style_text_font(filter_scene_cell_title, &lv_font_montserrat_16, 0);
-            lv_obj_set_style_text_color(filter_scene_cell_title, RED808_ACCENT2, 0);
-            lv_obj_set_width(filter_scene_cell_title, cellW - 24);
-            lv_obj_set_style_text_align(filter_scene_cell_title, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_pos(filter_scene_cell_title, 12, 8);
+        filter_df_value_labels[cell] = lv_label_create(card);
+        lv_label_set_text(filter_df_value_labels[cell], "000");
+        lv_obj_set_style_text_font(filter_df_value_labels[cell], &lv_font_montserrat_22, 0);
+        lv_obj_set_style_text_color(filter_df_value_labels[cell], RED808_TEXT, 0);
+        lv_obj_set_width(filter_df_value_labels[cell], cellW);
+        lv_obj_set_style_text_align(filter_df_value_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(filter_df_value_labels[cell], 0, arcY + (arcSize / 2) - 14);
 
-            for (int i = 0; i < 3; i++) {
-                filter_scene_value_labels[i] = lv_label_create(card);
-                lv_label_set_text(filter_scene_value_labels[i], "P2 CUTOFF 2000Hz");
-                lv_obj_set_style_text_font(filter_scene_value_labels[i], &lv_font_montserrat_14, 0);
-                lv_obj_set_style_text_color(filter_scene_value_labels[i], RED808_TEXT, 0);
-                lv_obj_set_width(filter_scene_value_labels[i], cellW - 24);
-                lv_obj_set_style_text_align(filter_scene_value_labels[i], LV_TEXT_ALIGN_CENTER, 0);
-                lv_obj_set_pos(filter_scene_value_labels[i], 12, 42 + i * 24);
-            }
-        }
+        filter_df_unit_labels[cell] = lv_label_create(card);
+        lv_label_set_text(filter_df_unit_labels[cell], "%");
+        lv_obj_set_style_text_font(filter_df_unit_labels[cell], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(filter_df_unit_labels[cell], RED808_TEXT_DIM, 0);
+        lv_obj_set_width(filter_df_unit_labels[cell], cellW);
+        lv_obj_set_style_text_align(filter_df_unit_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(filter_df_unit_labels[cell], 0, arcY + (arcSize / 2) + 12);
     }
 
     filter_target_label = lv_label_create(shell);
@@ -2657,7 +2702,13 @@ void ui_update_filters() {
     static int prev_distortion = -1;
     static int prev_sample_rate = -1;
     static int prev_bit_crush = -1;
-    static int arcDisplayValue[3] = {-1, -1, -1};
+    static int arcDisplayValue[6] = {-1, -1, -1, -1, -1, -1};
+    static int prev_response_mode = -1;
+
+    if ((int)fxResponseMode != prev_response_mode) {
+        prev_response_mode = (int)fxResponseMode;
+        filter_update_response_mode_ui();
+    }
 
     TrackFilter& filter = filter_target_state();
     uint8_t amounts[] = { filter.delayAmount, filter.flangerAmount, filter.compAmount };
@@ -2763,10 +2814,15 @@ void ui_update_filters() {
         lv_color_hex(0x58A6FF),
         lv_color_hex(0x39D2C0),
         lv_color_hex(0xD29922),
+        lv_color_hex(0xB58BFF),
+        lv_color_hex(0xFF8F5A),
+        lv_color_hex(0x7DD36F),
     };
     static const lv_color_t laneMutedColor = lv_color_hex(0xFF4444);
     static const lv_color_t laneTrackColor = lv_color_hex(0x384754);
     static const lv_color_t laneMutedBg = lv_color_hex(0x4E4E4E);
+    static const char* laneSources[] = {"DF-1", "DF-2", "DF-3", "P2", "P3", "P4"};
+
     for (int i = 0; i < 3; i++) {
         int value = constrain(dfFxParamValue[i], 0, 127);
         if (filter_grid_arcs[i]) {
@@ -2788,7 +2844,7 @@ void ui_update_filters() {
                                        LV_PART_INDICATOR);
         }
         if (filter_df_mode_labels[i]) {
-            lv_label_set_text_fmt(filter_df_mode_labels[i], "DF-%d", i + 1);
+            lv_label_set_text(filter_df_mode_labels[i], laneSources[i]);
         }
         if (filter_df_value_labels[i]) {
             lv_label_set_text_fmt(filter_df_value_labels[i], "%03d", value);
@@ -2801,14 +2857,57 @@ void ui_update_filters() {
             lv_obj_set_style_text_color(filter_grid_mute_labels[i], dfFxMuted[i] ? RED808_ERROR : RED808_SUCCESS, 0);
             lv_obj_set_style_bg_color(filter_grid_mute_labels[i], dfFxMuted[i] ? RED808_ERROR : RED808_SUCCESS, 0);
         }
-        if (filter_scene_value_labels[i]) {
-            if (i == 0) {
-                if (fxFilterCutoffHz >= 1000) lv_label_set_text_fmt(filter_scene_value_labels[i], "P2 CUTOFF %d.%dkHz", fxFilterCutoffHz / 1000, (fxFilterCutoffHz % 1000) / 100);
-                else lv_label_set_text_fmt(filter_scene_value_labels[i], "P2 CUTOFF %dHz", fxFilterCutoffHz);
-            } else if (i == 1) {
-                lv_label_set_text_fmt(filter_scene_value_labels[i], "P3 RES %d.%dQ", fxFilterResonanceX10 / 10, fxFilterResonanceX10 % 10);
+    }
+
+    int analogRaw[3] = {
+        filter_cutoff_to_slider(fxFilterCutoffHz),
+        constrain(((fxFilterResonanceX10 - 10) * 127) / 90, 0, 127),
+        constrain((fxDistortionPercent * 127) / 100, 0, 127)
+    };
+
+    for (int i = 3; i < 6; i++) {
+        int idx = i - 3;
+        int target = analogFxMuted[idx] ? 0 : analogRaw[idx];
+        if (filter_grid_arcs[i]) {
+            if (arcDisplayValue[i] < 0) arcDisplayValue[i] = target;
+            int delta = target - arcDisplayValue[i];
+            if (delta != 0) {
+                int step = constrain(abs(delta), 2, 10);
+                if (delta > 0) arcDisplayValue[i] = min(target, arcDisplayValue[i] + step);
+                else arcDisplayValue[i] = max(target, arcDisplayValue[i] - step);
+                lv_arc_set_value(filter_grid_arcs[i], arcDisplayValue[i]);
+            }
+            lv_obj_set_style_arc_color(filter_grid_arcs[i], laneTrackColor, LV_PART_MAIN);
+            lv_obj_set_style_arc_color(filter_grid_arcs[i], analogFxMuted[idx] ? laneMutedColor : laneActiveColors[i], LV_PART_INDICATOR);
+        }
+
+        if (filter_df_mode_labels[i]) {
+            lv_label_set_text(filter_df_mode_labels[i], laneSources[i]);
+        }
+        if (filter_grid_mute_labels[i]) {
+            lv_label_set_text(filter_grid_mute_labels[i], analogFxMuted[idx] ? "MUTE" : "ANLG");
+            lv_obj_set_style_text_color(filter_grid_mute_labels[i], analogFxMuted[idx] ? RED808_ERROR : RED808_ACCENT2, 0);
+            lv_obj_set_style_bg_color(filter_grid_mute_labels[i], analogFxMuted[idx] ? RED808_ERROR : RED808_ACCENT2, 0);
+        }
+
+        if (filter_df_value_labels[i]) {
+            if (i == 3) {
+                if (fxFilterCutoffHz >= 1000) lv_label_set_text_fmt(filter_df_value_labels[i], "%d.%dk", fxFilterCutoffHz / 1000, (fxFilterCutoffHz % 1000) / 100);
+                else lv_label_set_text_fmt(filter_df_value_labels[i], "%d", fxFilterCutoffHz);
+            } else if (i == 4) {
+                lv_label_set_text_fmt(filter_df_value_labels[i], "%d.%d", fxFilterResonanceX10 / 10, fxFilterResonanceX10 % 10);
             } else {
-                lv_label_set_text_fmt(filter_scene_value_labels[i], "P4 DRIVE %d%%", fxDistortionPercent);
+                lv_label_set_text_fmt(filter_df_value_labels[i], "%d", fxDistortionPercent);
+            }
+        }
+
+        if (filter_df_unit_labels[i]) {
+            if (i == 3) {
+                lv_label_set_text(filter_df_unit_labels[i], fxFilterCutoffHz >= 1000 ? "kHz" : "Hz");
+            } else if (i == 4) {
+                lv_label_set_text(filter_df_unit_labels[i], "Q");
+            } else {
+                lv_label_set_text(filter_df_unit_labels[i], "%");
             }
         }
     }

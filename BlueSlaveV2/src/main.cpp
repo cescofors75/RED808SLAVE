@@ -180,6 +180,7 @@ uint8_t prevByteButtonState = 0;
 bool byteButtonLivePressed[BYTEBUTTON_BUTTONS] = {false, false, false, false, false, false, false, false};
 uint32_t byteButtonLedCache[BYTEBUTTON_BUTTONS + 1] = {};
 bool byteButtonLedInitialized = false;
+volatile FxResponseMode fxResponseMode = FX_MODE_LIVE;
 const char* const byteButtonActionNames[] = {
     "Back/Menu",
     "Master Link Sync",
@@ -187,10 +188,10 @@ const char* const byteButtonActionNames[] = {
     "Go Sequencer",
     "Go FX",
     "Go Volumes",
-    "FX Scene 1 (disabled)",
-    "FX Scene 2 (disabled)",
-    "FX Scene 3 (disabled)",
-    "FX Scene 4 (disabled)",
+    "FX Mute P2 Cutoff",
+    "FX Mute P3 Resonance",
+    "FX Mute P4 Drive",
+    "FX Mute Analog ALL",
     "FX Target --",
     "FX Target ++",
     "Pattern --",
@@ -199,10 +200,10 @@ const char* const byteButtonActionNames[] = {
 };
 uint8_t byteButtonActionMap[BYTEBUTTON_BUTTONS] = {
     BB_ACTION_MENU,
-    BB_ACTION_SCREEN_LIVE,
-    BB_ACTION_SCREEN_SEQUENCER,
+    BB_ACTION_FX_CLEAN,
+    BB_ACTION_FX_SPACE,
+    BB_ACTION_FX_ACID,
     BB_ACTION_SCREEN_FILTERS,
-    BB_ACTION_SCREEN_VOLUMES,
     BB_ACTION_PATTERN_PREV,
     BB_ACTION_PATTERN_NEXT,
     BB_ACTION_PLAY_PAUSE
@@ -210,6 +211,7 @@ uint8_t byteButtonActionMap[BYTEBUTTON_BUTTONS] = {
 uint8_t dfFxParamMode[3] = {0, 0, 0};
 int dfFxParamValue[3] = {55, 40, 40};
 bool dfFxMuted[3] = {false, false, false};
+bool analogFxMuted[3] = {false, false, false};
 uint16_t dfRobotPotRaw[DFROBOT_POT_COUNT] = {};
 uint8_t dfRobotPotMidi[DFROBOT_POT_COUNT] = {};
 uint8_t dfRobotPotPos[DFROBOT_POT_COUNT] = {};
@@ -226,6 +228,54 @@ static constexpr uint8_t BYTEBUTTON_LED_RGB888_REG = 0x20;
 static constexpr uint8_t BYTEBUTTON_LED_COUNT = BYTEBUTTON_BUTTONS + 1;
 static constexpr uint8_t BYTEBUTTON_LED_USER_DEFINED = 0;
 static constexpr uint8_t BYTEBUTTON_BRIGHTNESS = 180;
+
+static int fx_df_step() {
+    switch (fxResponseMode) {
+        case FX_MODE_PRECISION: return 2;
+        case FX_MODE_LIVE:
+        default: return 6;
+    }
+}
+
+static int fx_df_accel_threshold() {
+    switch (fxResponseMode) {
+        case FX_MODE_PRECISION: return 99;
+        case FX_MODE_LIVE:
+        default: return 3;
+    }
+}
+
+static int fx_df_accel_mult() {
+    switch (fxResponseMode) {
+        case FX_MODE_PRECISION: return 1;
+        case FX_MODE_LIVE:
+        default: return 2;
+    }
+}
+
+static uint32_t fx_pot_read_ms() {
+    switch (fxResponseMode) {
+        case FX_MODE_PRECISION: return 18;
+        case FX_MODE_LIVE:
+        default: return 10;
+    }
+}
+
+static uint8_t fx_pot_midi_deadband() {
+    switch (fxResponseMode) {
+        case FX_MODE_PRECISION: return 2;
+        case FX_MODE_LIVE:
+        default: return 1;
+    }
+}
+
+static uint8_t fx_pot_stable_reads() {
+    switch (fxResponseMode) {
+        case FX_MODE_PRECISION: return 2;
+        case FX_MODE_LIVE:
+        default: return 1;
+    }
+}
 
 static uint32_t ui_refresh_interval_ms(Screen screen, bool playing_now) {
     switch (screen) {
@@ -1240,7 +1290,7 @@ void handleDFRobotPots() {
 
     static unsigned long lastReadMs = 0;
     unsigned long now = millis();
-    if ((now - lastReadMs) < Config::DF_POT_READ_MS) return;
+    if ((now - lastReadMs) < fx_pot_read_ms()) return;
     lastReadMs = now;
 
     bool readOk = false;
@@ -1282,12 +1332,18 @@ void handleDFRobotPots() {
             potInit[pot] = true;
         } else {
             // 1st-order low-pass: smooth random ADC fluctuations at rest.
-            potFilteredRaw[pot] = (uint16_t)((potFilteredRaw[pot] * 3U + raw) / 4U);
+            if (fxResponseMode == FX_MODE_PRECISION) {
+                potFilteredRaw[pot] = (uint16_t)((potFilteredRaw[pot] * 7U + raw) / 8U);
+            } else {
+                potFilteredRaw[pot] = (uint16_t)((potFilteredRaw[pot] * 3U + raw) / 4U);
+            }
         }
         raw = potFilteredRaw[pot];
 
         // Hold value around a stable anchor to suppress idle wander.
-        if (abs((int)raw - (int)potAnchorRaw[pot]) <= (int)Config::DF_POT_RAW_IDLE_DB) {
+        int idleDb = Config::DF_POT_RAW_IDLE_DB;
+        if (fxResponseMode == FX_MODE_LIVE) idleDb = (Config::DF_POT_RAW_IDLE_DB * 2) / 3;
+        if (abs((int)raw - (int)potAnchorRaw[pot]) <= idleDb) {
             raw = potAnchorRaw[pot];
         } else {
             potAnchorRaw[pot] = raw;
@@ -1335,7 +1391,7 @@ void handleDFRobotPots() {
                 potCandidatePos[pot] = pos;
                 potCandidateCount[pot] = 1;
             }
-            if (potCandidateCount[pot] >= Config::DF_POT_STABLE_READS) {
+            if (potCandidateCount[pot] >= fx_pot_stable_reads()) {
                 dfRobotPotPos[pot] = pos;
                 potCandidateCount[pot] = 0;
             } else {
@@ -1346,7 +1402,12 @@ void handleDFRobotPots() {
         }
 
         uint8_t midi = (uint8_t)((pos * 127U) / 11U);
-        dfRobotPotMidi[pot] = midi;
+        uint8_t midiFast = midi;
+        if (maxV > minV + 8) {
+            long mappedMidi = map((long)raw, (long)minV, (long)maxV, 0L, 127L);
+            midiFast = (uint8_t)constrain((int)mappedMidi, 0, 127);
+        }
+        dfRobotPotMidi[pot] = midiFast;
 
         bool sendNow = false;
         if (dfRobotPotPosLastSent[pot] == 255 || dfRobotPotPosLastSent[pot] != pos) {
@@ -1354,13 +1415,13 @@ void handleDFRobotPots() {
         } else if (dfRobotPotLastSent[pot] == 255) {
             sendNow = true;
         } else {
-            int delta = abs((int)midi - (int)dfRobotPotLastSent[pot]);
-            sendNow = delta >= Config::DF_POT_MIDI_DEADBAND;
+            int delta = abs((int)midiFast - (int)dfRobotPotLastSent[pot]);
+            sendNow = delta >= fx_pot_midi_deadband();
         }
         if (!sendNow) continue;
 
         dfRobotPotPosLastSent[pot] = pos;
-        dfRobotPotLastSent[pot] = midi;
+        dfRobotPotLastSent[pot] = midiFast;
 
         JsonDocument doc(&sramAllocator);
         if (pot == 0) {
@@ -1369,29 +1430,50 @@ void handleDFRobotPots() {
             applyUnifiedMasterVolume(newVol, true);
         } else {
             // P2/P3/P4: direct analog FX controls (no scene macros).
+            float tFast = (float)midiFast / 127.0f;
             if (pot == 1) {
                 // 20..20000 Hz (log-like curve for useful low-end resolution).
-                float t = (float)pos / 11.0f;
-                float hz = 20.0f * powf(1000.0f, t);
+                float hz = 20.0f * powf(1000.0f, tFast);
                 fxFilterCutoffHz = constrain((int)lroundf(hz), 20, 20000);
-                doc["cmd"] = "setFilterCutoff";
-                doc["value"] = fxFilterCutoffHz;
-                sendUDPCommand(doc);
+                if (!analogFxMuted[0]) {
+                    doc["cmd"] = "setFilterCutoff";
+                    doc["value"] = fxFilterCutoffHz;
+                    sendUDPCommand(doc);
+                }
             } else if (pot == 2) {
                 // 1.0 .. 10.0 Q
-                fxFilterResonanceX10 = constrain((int)lroundf(10.0f + ((float)pos / 11.0f) * 90.0f), 10, 100);
-                doc["cmd"] = "setFilterResonance";
-                doc["value"] = (float)fxFilterResonanceX10 / 10.0f;
-                sendUDPCommand(doc);
+                fxFilterResonanceX10 = constrain((int)lroundf(10.0f + tFast * 90.0f), 10, 100);
+                if (!analogFxMuted[1]) {
+                    doc["cmd"] = "setFilterResonance";
+                    doc["value"] = (float)fxFilterResonanceX10 / 10.0f;
+                    sendUDPCommand(doc);
+                }
             } else {
                 // 0 .. 100% distortion drive
-                fxDistortionPercent = constrain((int)lroundf(((float)pos / 11.0f) * 100.0f), 0, 100);
-                doc["cmd"] = "setDistortion";
-                doc["value"] = (float)fxDistortionPercent / 100.0f;
-                sendUDPCommand(doc);
+                fxDistortionPercent = constrain((int)lroundf(tFast * 100.0f), 0, 100);
+                if (!analogFxMuted[2]) {
+                    doc["cmd"] = "setDistortion";
+                    doc["value"] = (float)fxDistortionPercent / 100.0f;
+                    sendUDPCommand(doc);
+                }
             }
         }
     }
+}
+
+static void sendAnalogFxParamNow(int lane) {
+    JsonDocument doc(&sramAllocator);
+    if (lane == 0) {
+        doc["cmd"] = "setFilterCutoff";
+        doc["value"] = analogFxMuted[0] ? 20 : fxFilterCutoffHz;
+    } else if (lane == 1) {
+        doc["cmd"] = "setFilterResonance";
+        doc["value"] = analogFxMuted[1] ? 1.0f : ((float)fxFilterResonanceX10 / 10.0f);
+    } else {
+        doc["cmd"] = "setDistortion";
+        doc["value"] = analogFxMuted[2] ? 0.0f : ((float)fxDistortionPercent / 100.0f);
+    }
+    sendUDPCommand(doc);
 }
 
 void scanI2CHub() {
@@ -1565,13 +1647,13 @@ void updateByteButtonLeds() {
             case BB_ACTION_SCREEN_VOLUMES:
                 return 0xFFAA33;
             case BB_ACTION_FX_CLEAN:
-                return 0x224422;
+                return analogFxMuted[0] ? 0xAA2222 : 0x225522;
             case BB_ACTION_FX_SPACE:
-                return 0x223344;
+                return analogFxMuted[1] ? 0xAA2222 : 0x336655;
             case BB_ACTION_FX_ACID:
-                return 0x334422;
+                return analogFxMuted[2] ? 0xAA2222 : 0x557733;
             case BB_ACTION_FX_DESTROY:
-                return 0x442222;
+                return (analogFxMuted[0] && analogFxMuted[1] && analogFxMuted[2]) ? 0xCC2222 : 0x553333;
             case BB_ACTION_FX_TARGET_PREV:
             case BB_ACTION_FX_TARGET_NEXT:
                 return (filterSelectedTrack == -1) ? 0x7711AA : 0xAA11AA;
@@ -1982,7 +2064,8 @@ void handleDFRobotEncoders() {
             // DFRobot #0: Delay lane. Button toggles mute for this FX lane.
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                int newVal = constrain(laneStoredValue[0] + logical_delta * Config::DF_FX_STEP, 0, 127);
+                int accel = (abs(logical_delta) >= fx_df_accel_threshold()) ? fx_df_accel_mult() : 1;
+                int newVal = constrain(laneStoredValue[0] + logical_delta * fx_df_step() * accel, 0, 127);
                 if (newVal != laneStoredValue[0]) {
                     laneStoredValue[0] = newVal;
                     if (!dfFxMuted[0]) sendFxLane(0, laneStoredValue[0], false);
@@ -2000,7 +2083,8 @@ void handleDFRobotEncoders() {
             // DFRobot #1: Flanger lane. Button toggles mute for this FX lane.
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                int newVal = constrain(laneStoredValue[1] + logical_delta * Config::DF_FX_STEP, 0, 127);
+                int accel = (abs(logical_delta) >= fx_df_accel_threshold()) ? fx_df_accel_mult() : 1;
+                int newVal = constrain(laneStoredValue[1] + logical_delta * fx_df_step() * accel, 0, 127);
                 if (newVal != laneStoredValue[1]) {
                     laneStoredValue[1] = newVal;
                     if (!dfFxMuted[1]) sendFxLane(1, laneStoredValue[1], false);
@@ -2018,7 +2102,8 @@ void handleDFRobotEncoders() {
             // DFRobot #2: Compressor lane. Button toggles mute for this FX lane.
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                int newVal = constrain(laneStoredValue[2] + logical_delta * Config::DF_FX_STEP, 0, 127);
+                int accel = (abs(logical_delta) >= fx_df_accel_threshold()) ? fx_df_accel_mult() : 1;
+                int newVal = constrain(laneStoredValue[2] + logical_delta * fx_df_step() * accel, 0, 127);
                 if (newVal != laneStoredValue[2]) {
                     laneStoredValue[2] = newVal;
                     if (!dfFxMuted[2]) sendFxLane(2, laneStoredValue[2], false);
@@ -2139,16 +2224,32 @@ static void runByteButtonAction(uint8_t action) {
             navigateToScreen(SCREEN_VOLUMES);
             break;
         case BB_ACTION_FX_CLEAN:
-            RED808_LOG_PRINTLN("[BB1] FX Scene actions disabled (using 6 direct rotary FX controls)");
+            analogFxMuted[0] = !analogFxMuted[0];
+            sendAnalogFxParamNow(0);
+            RED808_LOG_PRINTF("[BB1] P2 CUTOFF mute: %s\n", analogFxMuted[0] ? "ON" : "OFF");
             break;
         case BB_ACTION_FX_SPACE:
-            RED808_LOG_PRINTLN("[BB1] FX Scene actions disabled (using 6 direct rotary FX controls)");
+            analogFxMuted[1] = !analogFxMuted[1];
+            sendAnalogFxParamNow(1);
+            RED808_LOG_PRINTF("[BB1] P3 RESONANCE mute: %s\n", analogFxMuted[1] ? "ON" : "OFF");
             break;
         case BB_ACTION_FX_ACID:
-            RED808_LOG_PRINTLN("[BB1] FX Scene actions disabled (using 6 direct rotary FX controls)");
+            analogFxMuted[2] = !analogFxMuted[2];
+            sendAnalogFxParamNow(2);
+            RED808_LOG_PRINTF("[BB1] P4 DRIVE mute: %s\n", analogFxMuted[2] ? "ON" : "OFF");
             break;
         case BB_ACTION_FX_DESTROY:
-            RED808_LOG_PRINTLN("[BB1] FX Scene actions disabled (using 6 direct rotary FX controls)");
+            {
+                bool allMuted = analogFxMuted[0] && analogFxMuted[1] && analogFxMuted[2];
+                bool newState = !allMuted;
+                analogFxMuted[0] = newState;
+                analogFxMuted[1] = newState;
+                analogFxMuted[2] = newState;
+                sendAnalogFxParamNow(0);
+                sendAnalogFxParamNow(1);
+                sendAnalogFxParamNow(2);
+                RED808_LOG_PRINTF("[BB1] Analog FX mute ALL: %s\n", newState ? "ON" : "OFF");
+            }
             break;
         case BB_ACTION_FX_TARGET_PREV:
             if (filterSelectedTrack == -1) filterSelectedTrack = Config::MAX_TRACKS - 1;

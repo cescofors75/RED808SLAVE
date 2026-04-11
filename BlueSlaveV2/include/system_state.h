@@ -47,6 +47,11 @@ enum VolumeMode {
     VOL_LIVE_PADS
 };
 
+enum FxResponseMode {
+    FX_MODE_PRECISION = 0,
+    FX_MODE_LIVE
+};
+
 enum ByteButtonAction {
     BB_ACTION_MENU = 0,
     BB_ACTION_VOL_MODE,
@@ -153,6 +158,7 @@ extern int fxBitCrushBits;
 extern int fxDistortionPercent;
 extern int fxSampleRateHz;
 extern EncoderMode encoderMode;
+extern volatile FxResponseMode fxResponseMode;
 
 // I2C Hub
 extern int m5HubChannel[];
@@ -165,6 +171,7 @@ extern uint8_t dfRobotPotPos[];
 extern uint8_t dfFxParamMode[];
 extern int dfFxParamValue[];
 extern bool dfFxMuted[];
+extern bool analogFxMuted[];
 extern bool byteButtonConnected;
 extern bool hubDetected;
 extern uint8_t byteButtonActionMap[];
