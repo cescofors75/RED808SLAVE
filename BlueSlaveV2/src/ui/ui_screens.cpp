@@ -439,19 +439,20 @@ static const char* get_play_state_text(bool playing) {
 static lv_obj_t* create_info_chip(lv_obj_t* parent, const lv_color_t bg_color, lv_obj_t** out_label) {
     lv_obj_t* chip = lv_obj_create(parent);
     lv_obj_set_width(chip, LV_SIZE_CONTENT);
-    lv_obj_set_height(chip, 26);
-    lv_obj_set_style_radius(chip, 13, 0);
-    lv_obj_set_style_bg_color(chip, bg_color, 0);
-    lv_obj_set_style_bg_opa(chip, LV_OPA_30, 0);
+    lv_obj_set_height(chip, 28);
+    lv_obj_set_style_radius(chip, 10, 0);
+    lv_obj_set_style_bg_color(chip, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_opa(chip, LV_OPA_70, 0);
     lv_obj_set_style_border_width(chip, 1, 0);
-    lv_obj_set_style_border_color(chip, bg_color, 0);
-    lv_obj_set_style_pad_hor(chip, 8, 0);
-    lv_obj_set_style_pad_ver(chip, 2, 0);
+    lv_obj_set_style_border_color(chip, RED808_BORDER, 0);
+    lv_obj_set_style_pad_hor(chip, 10, 0);
+    lv_obj_set_style_pad_ver(chip, 3, 0);
+    lv_obj_set_style_shadow_width(chip, 0, 0);
     lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* label = lv_label_create(chip);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(label, RED808_TEXT, 0);
+    lv_obj_set_style_text_color(label, bg_color, 0);
     lv_obj_center(label);
     if (out_label) {
         *out_label = label;
@@ -568,12 +569,12 @@ void ui_create_header(lv_obj_t* parent) {
 #endif
     lv_obj_set_pos(header, 12, 10);
     lv_obj_set_style_bg_color(header, RED808_PANEL, 0);
-    lv_obj_set_style_bg_opa(header, LV_OPA_80, 0);
+    lv_obj_set_style_bg_opa(header, LV_OPA_90, 0);
     lv_obj_set_style_border_width(header, 1, 0);
     lv_obj_set_style_border_color(header, RED808_BORDER, 0);
     lv_obj_set_style_radius(header, 18, 0);
-    lv_obj_set_style_pad_left(header, 10, 0);
-    lv_obj_set_style_pad_right(header, 10, 0);
+    lv_obj_set_style_pad_left(header, 12, 0);
+    lv_obj_set_style_pad_right(header, 12, 0);
     lv_obj_set_style_pad_top(header, 6, 0);
     lv_obj_set_style_pad_bottom(header, 6, 0);
     lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
@@ -600,7 +601,7 @@ void ui_create_header(lv_obj_t* parent) {
     lv_obj_set_style_bg_opa(status_top, LV_OPA_0, 0);
     lv_obj_set_style_border_width(status_top, 0, 0);
     lv_obj_set_style_pad_all(status_top, 0, 0);
-    lv_obj_set_style_pad_gap(status_top, 6, 0);
+    lv_obj_set_style_pad_gap(status_top, 8, 0);
     lv_obj_clear_flag(status_top, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(status_top, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(status_top, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -608,44 +609,50 @@ void ui_create_header(lv_obj_t* parent) {
 
     chip_seq_volume[slot] = create_info_chip(status_top, RED808_ACCENT, &lbl_seq_volume[slot]);
     lv_label_set_text_fmt(lbl_seq_volume[slot], "MASTER %d", masterVolume);
-    lv_obj_set_style_bg_opa(chip_seq_volume[slot], LV_OPA_80, 0);
     lv_obj_set_style_border_width(chip_seq_volume[slot], 2, 0);
+    lv_obj_set_style_border_color(chip_seq_volume[slot], RED808_ACCENT, 0);
 
-    create_info_chip(status_top, RED808_INFO, &lbl_pattern[slot]);
+    lv_obj_t* chip_pattern = create_info_chip(status_top, RED808_INFO, &lbl_pattern[slot]);
     lv_label_set_text_fmt(lbl_pattern[slot], "PTN %d", currentPattern + 1);
 
-    create_info_chip(status_top, isPlaying ? RED808_SUCCESS : RED808_ERROR, &lbl_play[slot]);
+    lv_obj_t* chip_play = create_info_chip(status_top, isPlaying ? RED808_SUCCESS : RED808_ERROR, &lbl_play[slot]);
     lv_label_set_text(lbl_play[slot], get_play_state_text(isPlaying));
+    lv_obj_set_style_border_color(chip_pattern, RED808_INFO, 0);
+    lv_obj_set_style_border_color(chip_play, isPlaying ? RED808_SUCCESS : RED808_ERROR, 0);
 
     // FOOTER ROW: BPM + FX + scenes (studio bottom strip)
     lv_obj_t* footer = lv_obj_create(parent);
-    lv_obj_set_size(footer, UI_W - 24, 44);
+    lv_obj_set_size(footer, UI_W - 24, 46);
     lv_obj_set_pos(footer, 12, UI_H - 52);
     lv_obj_set_style_bg_color(footer, RED808_PANEL, 0);
-    lv_obj_set_style_bg_opa(footer, LV_OPA_80, 0);
+    lv_obj_set_style_bg_opa(footer, LV_OPA_90, 0);
     lv_obj_set_style_border_width(footer, 1, 0);
     lv_obj_set_style_border_color(footer, RED808_BORDER, 0);
     lv_obj_set_style_radius(footer, 14, 0);
-    lv_obj_set_style_pad_left(footer, 8, 0);
-    lv_obj_set_style_pad_right(footer, 8, 0);
+    lv_obj_set_style_pad_left(footer, 10, 0);
+    lv_obj_set_style_pad_right(footer, 10, 0);
     lv_obj_set_style_pad_top(footer, 4, 0);
     lv_obj_set_style_pad_bottom(footer, 4, 0);
     lv_obj_clear_flag(footer, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_gap(footer, 8, 0);
+    lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    create_info_chip(footer, RED808_WARNING, &lbl_bpm[slot]);
+    lv_obj_t* chip_bpm = create_info_chip(footer, RED808_WARNING, &lbl_bpm[slot]);
     set_bpm_label_text(lbl_bpm[slot], "BPM");
 
-    create_info_chip(footer, RED808_CYAN, &lbl_fx_values[slot]);
+    lv_obj_t* chip_fx = create_info_chip(footer, RED808_CYAN, &lbl_fx_values[slot]);
     lv_label_set_text_fmt(lbl_fx_values[slot], "FX %d/%d/%d",
                           dfFxParamValue[0], dfFxParamValue[1], dfFxParamValue[2]);
 
-    create_info_chip(footer, RED808_ACCENT2, &lbl_fx_scenes[slot]);
+    lv_obj_t* chip_scn = create_info_chip(footer, RED808_ACCENT2, &lbl_fx_scenes[slot]);
     lv_label_set_text_fmt(lbl_fx_scenes[slot], "SCN %d-%d-%d",
                           (int)analogFxSceneIndex[0] + 1,
                           (int)analogFxSceneIndex[1] + 1,
                           (int)analogFxSceneIndex[2] + 1);
+    lv_obj_set_flex_grow(chip_bpm, 1);
+    lv_obj_set_flex_grow(chip_fx, 1);
+    lv_obj_set_flex_grow(chip_scn, 1);
 }
 
 void ui_update_header() {
@@ -2368,8 +2375,16 @@ void ui_create_filters_screen() {
     lv_obj_set_style_text_color(subtitle, RED808_TEXT_DIM, 0);
     lv_obj_set_pos(subtitle, 10, 34);
 
-    int shellW = lv_obj_get_width(shell);
-    int shellH = lv_obj_get_height(shell);
+    /* Use the explicit sizes we just set – lv_obj_get_width/height may
+       return 0 before the first LVGL layout pass, producing negative
+       cell dimensions and invisible widgets.                           */
+#if PORTRAIT_MODE
+    const int shellW = UI_W - 24;
+    const int shellH = UI_H - 130;
+#else
+    const int shellW = 988;
+    const int shellH = 500;
+#endif
     int panelX = 8;
     int panelY = 76;
     int panelW = shellW - 16;
@@ -2391,8 +2406,10 @@ void ui_create_filters_screen() {
         lv_color_hex(0xD29922),
     };
 
-    int gridW = lv_obj_get_width(compact_panel);
-    int gridH = lv_obj_get_height(compact_panel);
+    /* Use panelW/panelH directly – compact_panel was just created with
+       those sizes but LVGL has not laid it out yet.                     */
+    const int gridW = panelW;
+    const int gridH = panelH;
     int gap = 10;
     int cellW = (gridW - gap) / 2;
     int cellH = (gridH - gap) / 2;
@@ -2414,52 +2431,77 @@ void ui_create_filters_screen() {
             lv_label_set_text(title, laneNames[cell]);
             lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
             lv_obj_set_style_text_color(title, laneColors[cell], 0);
-            lv_obj_set_pos(title, 10, 8);
+            lv_obj_set_width(title, cellW - 24);
+            lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_pos(title, 12, 8);
 
             filter_grid_mute_labels[cell] = lv_label_create(card);
             lv_label_set_text(filter_grid_mute_labels[cell], "ON");
             lv_obj_set_style_text_font(filter_grid_mute_labels[cell], &lv_font_montserrat_12, 0);
             lv_obj_set_style_text_color(filter_grid_mute_labels[cell], RED808_SUCCESS, 0);
-            lv_obj_set_pos(filter_grid_mute_labels[cell], cellW - 46, 10);
+            lv_obj_set_style_bg_opa(filter_grid_mute_labels[cell], LV_OPA_30, 0);
+            lv_obj_set_style_bg_color(filter_grid_mute_labels[cell], RED808_SUCCESS, 0);
+            lv_obj_set_style_radius(filter_grid_mute_labels[cell], 8, 0);
+            lv_obj_set_style_pad_left(filter_grid_mute_labels[cell], 6, 0);
+            lv_obj_set_style_pad_right(filter_grid_mute_labels[cell], 6, 0);
+            lv_obj_set_style_pad_top(filter_grid_mute_labels[cell], 2, 0);
+            lv_obj_set_style_pad_bottom(filter_grid_mute_labels[cell], 2, 0);
+            lv_obj_align(filter_grid_mute_labels[cell], LV_ALIGN_TOP_RIGHT, -8, 10);
+
+            const int topBand = 34;
+            const int bottomBand = 34;
+            int arcSize = min(cellW - 24, cellH - topBand - bottomBand);
+            arcSize = constrain(arcSize, 110, 230);
+            int arcX = (cellW - arcSize) / 2;
+            int arcY = topBand + ((cellH - topBand - bottomBand - arcSize) / 2);
+            if (arcY < 32) arcY = 32;
 
             filter_grid_arcs[cell] = lv_arc_create(card);
-            lv_obj_set_size(filter_grid_arcs[cell], 120, 120);
-            lv_obj_set_pos(filter_grid_arcs[cell], 10, 34);
+            lv_obj_set_size(filter_grid_arcs[cell], arcSize, arcSize);
+            lv_obj_set_pos(filter_grid_arcs[cell], arcX, arcY);
             lv_arc_set_rotation(filter_grid_arcs[cell], 135);
             lv_arc_set_bg_angles(filter_grid_arcs[cell], 0, 270);
             lv_arc_set_range(filter_grid_arcs[cell], 0, 127);
             lv_arc_set_value(filter_grid_arcs[cell], constrain(dfFxParamValue[cell], 0, 127));
             lv_obj_clear_flag(filter_grid_arcs[cell], LV_OBJ_FLAG_CLICKABLE);
             lv_obj_remove_style(filter_grid_arcs[cell], NULL, LV_PART_KNOB);
-            lv_obj_set_style_arc_width(filter_grid_arcs[cell], 12, LV_PART_MAIN);
+            lv_obj_set_style_arc_width(filter_grid_arcs[cell], 10, LV_PART_MAIN);
             lv_obj_set_style_arc_color(filter_grid_arcs[cell], lv_color_hex(0x3A4B58), LV_PART_MAIN);
-            lv_obj_set_style_arc_width(filter_grid_arcs[cell], 14, LV_PART_INDICATOR);
+            lv_obj_set_style_arc_width(filter_grid_arcs[cell], 16, LV_PART_INDICATOR);
             lv_obj_set_style_arc_color(filter_grid_arcs[cell], laneColors[cell], LV_PART_INDICATOR);
 
             filter_df_mode_labels[cell] = lv_label_create(card);
-            lv_label_set_text_fmt(filter_df_mode_labels[cell], "DF%d", cell + 1);
+            lv_label_set_text_fmt(filter_df_mode_labels[cell], "DF-%d", cell + 1);
             lv_obj_set_style_text_font(filter_df_mode_labels[cell], &lv_font_montserrat_12, 0);
             lv_obj_set_style_text_color(filter_df_mode_labels[cell], RED808_TEXT_DIM, 0);
-            lv_obj_set_pos(filter_df_mode_labels[cell], 92, 44);
+            lv_obj_set_width(filter_df_mode_labels[cell], cellW);
+            lv_obj_set_style_text_align(filter_df_mode_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_pos(filter_df_mode_labels[cell], 0, cellH - 26);
 
             filter_df_value_labels[cell] = lv_label_create(card);
-            lv_label_set_text(filter_df_value_labels[cell], "VAL 0");
-            lv_obj_set_style_text_font(filter_df_value_labels[cell], &lv_font_montserrat_18, 0);
+            lv_label_set_text(filter_df_value_labels[cell], "000");
+            lv_obj_set_style_text_font(filter_df_value_labels[cell], &lv_font_montserrat_22, 0);
             lv_obj_set_style_text_color(filter_df_value_labels[cell], RED808_TEXT, 0);
-            lv_obj_set_pos(filter_df_value_labels[cell], 92, 66);
+            lv_obj_set_width(filter_df_value_labels[cell], cellW);
+            lv_obj_set_style_text_align(filter_df_value_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_pos(filter_df_value_labels[cell], 0, arcY + (arcSize / 2) - 14);
         } else {
             filter_scene_cell_title = lv_label_create(card);
             lv_label_set_text(filter_scene_cell_title, "SCENAS FX");
             lv_obj_set_style_text_font(filter_scene_cell_title, &lv_font_montserrat_16, 0);
             lv_obj_set_style_text_color(filter_scene_cell_title, RED808_ACCENT2, 0);
-            lv_obj_set_pos(filter_scene_cell_title, 10, 8);
+            lv_obj_set_width(filter_scene_cell_title, cellW - 24);
+            lv_obj_set_style_text_align(filter_scene_cell_title, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_pos(filter_scene_cell_title, 12, 8);
 
             for (int i = 0; i < 3; i++) {
                 filter_scene_value_labels[i] = lv_label_create(card);
                 lv_label_set_text(filter_scene_value_labels[i], "P2 S1/12");
                 lv_obj_set_style_text_font(filter_scene_value_labels[i], &lv_font_montserrat_14, 0);
-                lv_obj_set_style_text_color(filter_scene_value_labels[i], RED808_SUCCESS, 0);
-                lv_obj_set_pos(filter_scene_value_labels[i], 12, 38 + i * 24);
+                lv_obj_set_style_text_color(filter_scene_value_labels[i], RED808_TEXT, 0);
+                lv_obj_set_width(filter_scene_value_labels[i], cellW - 24);
+                lv_obj_set_style_text_align(filter_scene_value_labels[i], LV_TEXT_ALIGN_CENTER, 0);
+                lv_obj_set_pos(filter_scene_value_labels[i], 12, 42 + i * 24);
             }
         }
     }
@@ -2472,7 +2514,7 @@ void ui_create_filters_screen() {
 
     filter_target_prev_btn = lv_btn_create(shell);
     lv_obj_set_size(filter_target_prev_btn, 40, 28);
-    lv_obj_set_pos(filter_target_prev_btn, 250, 60);
+    lv_obj_set_pos(filter_target_prev_btn, (shellW / 2) - 68, 60);
     lv_obj_set_style_radius(filter_target_prev_btn, 14, 0);
     lv_obj_add_event_cb(filter_target_prev_btn, filter_target_shift_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
     lv_obj_t* prev_lbl = lv_label_create(filter_target_prev_btn);
@@ -2481,7 +2523,7 @@ void ui_create_filters_screen() {
 
     filter_target_next_btn = lv_btn_create(shell);
     lv_obj_set_size(filter_target_next_btn, 40, 28);
-    lv_obj_set_pos(filter_target_next_btn, 296, 60);
+    lv_obj_set_pos(filter_target_next_btn, (shellW / 2) - 22, 60);
     lv_obj_set_style_radius(filter_target_next_btn, 14, 0);
     lv_obj_add_event_cb(filter_target_next_btn, filter_target_shift_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
     lv_obj_t* next_lbl = lv_label_create(filter_target_next_btn);
@@ -2492,21 +2534,13 @@ void ui_create_filters_screen() {
     lv_label_set_text(filter_master_tag, "MASTER BUS");
     lv_obj_set_style_text_font(filter_master_tag, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(filter_master_tag, lv_color_hex(0x6BE0FF), 0);
-#if PORTRAIT_MODE
-    lv_obj_set_pos(filter_master_tag, 200, 66);
-#else
-    lv_obj_set_pos(filter_master_tag, 356, 66);
-#endif
+    lv_obj_align(filter_master_tag, LV_ALIGN_TOP_MID, 80, 66);
 
     filter_preset_label = lv_label_create(shell);
     lv_label_set_text(filter_preset_label, "PRESET: --");
     lv_obj_set_style_text_font(filter_preset_label, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(filter_preset_label, lv_color_hex(0x80FF80), 0);
-#if PORTRAIT_MODE
-    lv_obj_set_pos(filter_preset_label, 360, 66);
-#else
-    lv_obj_set_pos(filter_preset_label, 758, 64);
-#endif
+    lv_obj_align(filter_preset_label, LV_ALIGN_TOP_RIGHT, -14, 66);
 
 #if PORTRAIT_MODE
     lv_obj_t* macro_panel = create_section_shell(shell, 4, 96, UI_W - 56, 260);
@@ -2824,7 +2858,8 @@ void ui_update_filters() {
         lv_color_hex(0xD29922),
     };
     static const lv_color_t laneMutedColor = lv_color_hex(0xFF4444);
-    static const lv_color_t laneMutedBg = lv_color_hex(0x505050);
+    static const lv_color_t laneTrackColor = lv_color_hex(0x384754);
+    static const lv_color_t laneMutedBg = lv_color_hex(0x4E4E4E);
     for (int i = 0; i < 3; i++) {
         int value = constrain(dfFxParamValue[i], 0, 127);
         if (filter_grid_arcs[i]) {
@@ -2839,21 +2874,22 @@ void ui_update_filters() {
             }
 
             lv_obj_set_style_arc_color(filter_grid_arcs[i],
-                                       dfFxMuted[i] ? laneMutedBg : laneActiveColors[i],
+                                       dfFxMuted[i] ? laneMutedBg : laneTrackColor,
                                        LV_PART_MAIN);
             lv_obj_set_style_arc_color(filter_grid_arcs[i],
                                        dfFxMuted[i] ? laneMutedColor : laneActiveColors[i],
                                        LV_PART_INDICATOR);
         }
         if (filter_df_mode_labels[i]) {
-            lv_label_set_text_fmt(filter_df_mode_labels[i], "DF%d", i + 1);
+            lv_label_set_text_fmt(filter_df_mode_labels[i], "DF-%d", i + 1);
         }
         if (filter_df_value_labels[i]) {
-            lv_label_set_text_fmt(filter_df_value_labels[i], "VAL %d", value);
+            lv_label_set_text_fmt(filter_df_value_labels[i], "%03d", value);
         }
         if (filter_grid_mute_labels[i]) {
             lv_label_set_text(filter_grid_mute_labels[i], dfFxMuted[i] ? "MUTE" : "ON");
             lv_obj_set_style_text_color(filter_grid_mute_labels[i], dfFxMuted[i] ? RED808_ERROR : RED808_SUCCESS, 0);
+            lv_obj_set_style_bg_color(filter_grid_mute_labels[i], dfFxMuted[i] ? RED808_ERROR : RED808_SUCCESS, 0);
         }
         if (filter_scene_value_labels[i]) {
             lv_label_set_text_fmt(filter_scene_value_labels[i], "P%d %s S%d/12", i + 2, laneNames[i], (int)analogFxSceneIndex[i] + 1);
