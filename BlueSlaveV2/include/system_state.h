@@ -162,7 +162,6 @@ extern int dfRobotPotHubChannel;
 extern uint8_t dfRobotPotAddr;
 extern uint8_t dfRobotPotMidi[];
 extern uint8_t dfRobotPotPos[];
-extern uint8_t analogFxSceneIndex[];
 extern uint8_t dfFxParamMode[];
 extern int dfFxParamValue[];
 extern bool dfFxMuted[];

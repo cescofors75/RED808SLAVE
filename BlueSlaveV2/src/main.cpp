@@ -180,7 +180,6 @@ uint8_t prevByteButtonState = 0;
 bool byteButtonLivePressed[BYTEBUTTON_BUTTONS] = {false, false, false, false, false, false, false, false};
 uint32_t byteButtonLedCache[BYTEBUTTON_BUTTONS + 1] = {};
 bool byteButtonLedInitialized = false;
-int byteButtonFxScene = 0;  // 0=clean, 1=space, 2=acid, 3=destroy
 const char* const byteButtonActionNames[] = {
     "Back/Menu",
     "Master Link Sync",
@@ -188,10 +187,10 @@ const char* const byteButtonActionNames[] = {
     "Go Sequencer",
     "Go FX",
     "Go Volumes",
-    "FX Scene: Clean",
-    "FX Scene: Space",
-    "FX Scene: Acid",
-    "FX Scene: Destroy",
+    "FX Scene 1 (disabled)",
+    "FX Scene 2 (disabled)",
+    "FX Scene 3 (disabled)",
+    "FX Scene 4 (disabled)",
     "FX Target --",
     "FX Target ++",
     "Pattern --",
@@ -208,7 +207,6 @@ uint8_t byteButtonActionMap[BYTEBUTTON_BUTTONS] = {
     BB_ACTION_PATTERN_NEXT,
     BB_ACTION_PLAY_PAUSE
 };
-uint8_t analogFxSceneIndex[3] = {0, 0, 0};
 uint8_t dfFxParamMode[3] = {0, 0, 0};
 int dfFxParamValue[3] = {55, 40, 40};
 bool dfFxMuted[3] = {false, false, false};
@@ -1370,48 +1368,27 @@ void handleDFRobotPots() {
             int newVol = (int)lroundf(((float)pos / 11.0f) * (float)Config::MAX_VOLUME);
             applyUnifiedMasterVolume(newVol, true);
         } else {
-            // P2/P3/P4: 12-scene FX macros for Delay/Flanger/Comp respectively.
-            static const uint8_t delayScenes[12][3] = {
-                {0, 0, 0}, {18, 10, 12}, {28, 16, 22}, {36, 24, 30},
-                {44, 32, 38}, {56, 42, 50}, {68, 52, 60}, {80, 62, 74},
-                {92, 74, 86}, {104, 86, 98}, {116, 96, 112}, {127, 112, 127}
-            };
-            static const uint8_t flangerScenes[12][3] = {
-                {0, 0, 0}, {8, 14, 12}, {14, 22, 20}, {20, 30, 28},
-                {26, 38, 36}, {32, 46, 44}, {40, 54, 52}, {52, 66, 62},
-                {64, 78, 74}, {76, 90, 86}, {92, 106, 102}, {110, 122, 120}
-            };
-            static const uint8_t compScenes[12][3] = {
-                {0, 1, 0}, {10, 2, 16}, {18, 2, 24}, {28, 3, 34},
-                {38, 3, 46}, {50, 4, 58}, {62, 4, 70}, {74, 5, 82},
-                {86, 6, 96}, {98, 7, 108}, {112, 8, 120}, {127, 10, 127}
-            };
-
-            int scene = constrain((int)pos, 0, 11);
-            int lane = pot - 1;
-            analogFxSceneIndex[lane] = (uint8_t)scene;
-
+            // P2/P3/P4: direct analog FX controls (no scene macros).
             if (pot == 1) {
-                const uint8_t* s = delayScenes[scene];
-                doc["cmd"] = "setDelayTime"; doc["value"] = s[0]; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setDelayFeedback"; doc["value"] = s[1]; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setDelayMix"; doc["value"] = s[2]; sendUDPCommand(doc);
-                masterFilter.delayAmount = s[2];
-                masterFilter.enabled = masterFilter.enabled || (s[2] > 0);
+                // 20..20000 Hz (log-like curve for useful low-end resolution).
+                float t = (float)pos / 11.0f;
+                float hz = 20.0f * powf(1000.0f, t);
+                fxFilterCutoffHz = constrain((int)lroundf(hz), 20, 20000);
+                doc["cmd"] = "setFilterCutoff";
+                doc["value"] = fxFilterCutoffHz;
+                sendUDPCommand(doc);
             } else if (pot == 2) {
-                const uint8_t* s = flangerScenes[scene];
-                doc["cmd"] = "setFlangerRate"; doc["value"] = s[0]; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setFlangerDepth"; doc["value"] = s[1]; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setFlangerFeedback"; doc["value"] = s[2]; sendUDPCommand(doc);
-                masterFilter.flangerAmount = s[1];
-                masterFilter.enabled = masterFilter.enabled || (s[1] > 0);
+                // 1.0 .. 10.0 Q
+                fxFilterResonanceX10 = constrain((int)lroundf(10.0f + ((float)pos / 11.0f) * 90.0f), 10, 100);
+                doc["cmd"] = "setFilterResonance";
+                doc["value"] = (float)fxFilterResonanceX10 / 10.0f;
+                sendUDPCommand(doc);
             } else {
-                const uint8_t* s = compScenes[scene];
-                doc["cmd"] = "setCompThreshold"; doc["value"] = s[0]; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setCompRatio"; doc["value"] = s[1]; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setCompActive"; doc["value"] = s[2] > 0 ? 1 : 0; sendUDPCommand(doc);
-                masterFilter.compAmount = s[2];
-                masterFilter.enabled = masterFilter.enabled || (s[2] > 0);
+                // 0 .. 100% distortion drive
+                fxDistortionPercent = constrain((int)lroundf(((float)pos / 11.0f) * 100.0f), 0, 100);
+                doc["cmd"] = "setDistortion";
+                doc["value"] = (float)fxDistortionPercent / 100.0f;
+                sendUDPCommand(doc);
             }
         }
     }
@@ -1573,9 +1550,6 @@ void updateByteButtonLeds() {
 
     uint32_t desired[BYTEBUTTON_LED_COUNT] = {};
 
-    static const uint32_t fxSceneOn[4]  = { 0x00CC44, 0x0099CC, 0x33FF33, 0xFF2222 };
-    static const uint32_t fxSceneOff[4] = { 0x112211, 0x001122, 0x002200, 0x220000 };
-
     auto ledColorForAction = [&](uint8_t action) -> uint32_t {
         switch ((ByteButtonAction)action) {
             case BB_ACTION_MENU:
@@ -1591,13 +1565,13 @@ void updateByteButtonLeds() {
             case BB_ACTION_SCREEN_VOLUMES:
                 return 0xFFAA33;
             case BB_ACTION_FX_CLEAN:
-                return (byteButtonFxScene == 0) ? fxSceneOn[0] : fxSceneOff[0];
+                return 0x224422;
             case BB_ACTION_FX_SPACE:
-                return (byteButtonFxScene == 1) ? fxSceneOn[1] : fxSceneOff[1];
+                return 0x223344;
             case BB_ACTION_FX_ACID:
-                return (byteButtonFxScene == 2) ? fxSceneOn[2] : fxSceneOff[2];
+                return 0x334422;
             case BB_ACTION_FX_DESTROY:
-                return (byteButtonFxScene == 3) ? fxSceneOn[3] : fxSceneOff[3];
+                return 0x442222;
             case BB_ACTION_FX_TARGET_PREV:
             case BB_ACTION_FX_TARGET_NEXT:
                 return (filterSelectedTrack == -1) ? 0x7711AA : 0xAA11AA;
@@ -2121,38 +2095,6 @@ void handleUnitFader() {
 // BYTEBUTTON HANDLING
 // =============================================================================
 
-// FX scenes applied by ByteButton:
-//   0 = Clean  — all FX off
-//   1 = Space  — light delay + comp (ambient/spacious)
-//   2 = Acid   — delay + heavy flanger (classic acid)
-//   3 = Destroy — all FX heavy
-static void applyFxScene(int scene) {
-    byteButtonFxScene = constrain(scene, 0, 3);
-    switch (byteButtonFxScene) {
-        case 0: // Clean
-            masterFilter.enabled = false;
-            masterFilter.delayAmount = 0; masterFilter.flangerAmount = 0; masterFilter.compAmount = 0;
-            break;
-        case 1: // Space
-            masterFilter.enabled = true;
-            masterFilter.delayAmount = 55; masterFilter.flangerAmount = 0; masterFilter.compAmount = 40;
-            break;
-        case 2: // Acid
-            masterFilter.enabled = true;
-            masterFilter.delayAmount = 40; masterFilter.flangerAmount = 70; masterFilter.compAmount = 0;
-            break;
-        case 3: // Destroy
-            masterFilter.enabled = true;
-            masterFilter.delayAmount = 120; masterFilter.flangerAmount = 100; masterFilter.compAmount = 100;
-            break;
-    }
-    sendFilterUDP(-1, FILTER_DELAY);
-    sendFilterUDP(-1, FILTER_FLANGER);
-    sendFilterUDP(-1, FILTER_COMPRESSOR);
-    static const char* sceneNames[] = {"CLEAN", "SPACE", "ACID", "DESTROY"};
-    RED808_LOG_PRINTF("[BB] FX SCENE: %s\n", sceneNames[byteButtonFxScene]);
-}
-
 static bool readByteButtonStatus(int hubChannel, uint8_t& status) {
     status = 0;
     bool readOk = false;
@@ -2197,16 +2139,16 @@ static void runByteButtonAction(uint8_t action) {
             navigateToScreen(SCREEN_VOLUMES);
             break;
         case BB_ACTION_FX_CLEAN:
-            applyFxScene(0);
+            RED808_LOG_PRINTLN("[BB1] FX Scene actions disabled (using 6 direct rotary FX controls)");
             break;
         case BB_ACTION_FX_SPACE:
-            applyFxScene(1);
+            RED808_LOG_PRINTLN("[BB1] FX Scene actions disabled (using 6 direct rotary FX controls)");
             break;
         case BB_ACTION_FX_ACID:
-            applyFxScene(2);
+            RED808_LOG_PRINTLN("[BB1] FX Scene actions disabled (using 6 direct rotary FX controls)");
             break;
         case BB_ACTION_FX_DESTROY:
-            applyFxScene(3);
+            RED808_LOG_PRINTLN("[BB1] FX Scene actions disabled (using 6 direct rotary FX controls)");
             break;
         case BB_ACTION_FX_TARGET_PREV:
             if (filterSelectedTrack == -1) filterSelectedTrack = Config::MAX_TRACKS - 1;

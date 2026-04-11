@@ -15,7 +15,6 @@ extern void sendUDPCommand(JsonDocument& doc);
 extern void sendUDPCommand(const char* cmd);
 extern void sendFilterUDP(int track, int fxType);
 extern void updateByteButtonLeds();
-extern uint8_t analogFxSceneIndex[];
 extern uint8_t dfFxParamMode[];
 extern int dfFxParamValue[];
 
@@ -55,7 +54,6 @@ static lv_obj_t* lbl_pattern[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_play[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_wifi[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_fx_values[HEADER_SLOT_COUNT] = {};
-static lv_obj_t* lbl_fx_scenes[HEADER_SLOT_COUNT] = {};
 
 // Menu status card labels
 static lv_obj_t* lbl_master = NULL;
@@ -122,8 +120,6 @@ static lv_obj_t* filter_bit_btns[4] = {};
 static lv_obj_t* filter_bit_labels[4] = {};
 static lv_obj_t* filter_ext_sliders[4] = {};
 static lv_obj_t* filter_ext_value_labels[4] = {};
-static lv_obj_t* filter_scene_btns[4] = {};
-static lv_obj_t* filter_scene_labels[4] = {};
 static lv_obj_t* filter_fun_status = NULL;
 static lv_obj_t* filter_master_tag = NULL;
 static lv_obj_t* filter_target_prev_btn = NULL;
@@ -132,6 +128,7 @@ static lv_obj_t* filter_target_label = NULL;
 static lv_obj_t* filter_preset_label = NULL;  // rotary theme indicator
 static lv_obj_t* filter_df_mode_labels[3] = {};
 static lv_obj_t* filter_df_value_labels[3] = {};
+static lv_obj_t* filter_df_unit_labels[3] = {};
 static lv_obj_t* filter_scene_value_labels[3] = {};
 static lv_obj_t* filter_grid_arcs[3] = {};
 static lv_obj_t* filter_grid_mute_labels[3] = {};
@@ -620,7 +617,7 @@ void ui_create_header(lv_obj_t* parent) {
     lv_obj_set_style_border_color(chip_pattern, RED808_INFO, 0);
     lv_obj_set_style_border_color(chip_play, isPlaying ? RED808_SUCCESS : RED808_ERROR, 0);
 
-    // FOOTER ROW: BPM + FX + scenes (studio bottom strip)
+    // FOOTER ROW: BPM + FX values
     lv_obj_t* footer = lv_obj_create(parent);
     lv_obj_set_size(footer, UI_W - 24, 46);
     lv_obj_set_pos(footer, 12, UI_H - 52);
@@ -645,14 +642,8 @@ void ui_create_header(lv_obj_t* parent) {
     lv_label_set_text_fmt(lbl_fx_values[slot], "FX %d/%d/%d",
                           dfFxParamValue[0], dfFxParamValue[1], dfFxParamValue[2]);
 
-    lv_obj_t* chip_scn = create_info_chip(footer, RED808_ACCENT2, &lbl_fx_scenes[slot]);
-    lv_label_set_text_fmt(lbl_fx_scenes[slot], "SCN %d-%d-%d",
-                          (int)analogFxSceneIndex[0] + 1,
-                          (int)analogFxSceneIndex[1] + 1,
-                          (int)analogFxSceneIndex[2] + 1);
     lv_obj_set_flex_grow(chip_bpm, 1);
     lv_obj_set_flex_grow(chip_fx, 1);
-    lv_obj_set_flex_grow(chip_scn, 1);
 }
 
 void ui_update_header() {
@@ -661,7 +652,6 @@ void ui_update_header() {
     static int prev_playing = -1;
     static int prev_wifi = -1;
     static int prev_fx_values[3] = {-10000, -10000, -10000};
-    static int prev_fx_scenes[3] = {-1, -1, -1};
     static uint8_t prev_slot = 255;
 
     // Only update the active screen's header slot — avoids dirtying hidden screens
@@ -679,9 +669,6 @@ void ui_update_header() {
         prev_fx_values[0] = -10000;
         prev_fx_values[1] = -10000;
         prev_fx_values[2] = -10000;
-        prev_fx_scenes[0] = -1;
-        prev_fx_scenes[1] = -1;
-        prev_fx_scenes[2] = -1;
     }
 
     int bpm10 = (int)lroundf(currentBPMPrecise * 10.0f);
@@ -723,15 +710,10 @@ void ui_update_header() {
     }
 
     bool fxValuesChanged = false;
-    bool fxScenesChanged = false;
     for (int i = 0; i < 3; i++) {
         if (dfFxParamValue[i] != prev_fx_values[i]) {
             prev_fx_values[i] = dfFxParamValue[i];
             fxValuesChanged = true;
-        }
-        if ((int)analogFxSceneIndex[i] != prev_fx_scenes[i]) {
-            prev_fx_scenes[i] = (int)analogFxSceneIndex[i];
-            fxScenesChanged = true;
         }
     }
 
@@ -740,12 +722,6 @@ void ui_update_header() {
                               dfFxParamValue[0], dfFxParamValue[1], dfFxParamValue[2]);
     }
 
-    if (fxScenesChanged && lbl_fx_scenes[slot]) {
-        lv_label_set_text_fmt(lbl_fx_scenes[slot], "SCN %d-%d-%d",
-                              (int)analogFxSceneIndex[0] + 1,
-                              (int)analogFxSceneIndex[1] + 1,
-                              (int)analogFxSceneIndex[2] + 1);
-    }
 }
 
 // ============================================================================
@@ -2299,47 +2275,6 @@ static void filter_ext_slider_cb(lv_event_t* e) {
     filter_set_status_text("Extended FX updated over UDP");
 }
 
-struct FxScenePreset {
-    const char* name;
-    int filterType;
-    int cutoffHz;
-    int resonanceX10;
-    int bitCrush;
-    int distortionPercent;
-    int sampleRateHz;
-    uint8_t delay;
-    uint8_t flanger;
-    uint8_t comp;
-};
-
-static const FxScenePreset kFxScenes[4] = {
-    {"CLEAN",   0, 14000, 18, 16,  0, 44100,  0,  0,  0},
-    {"SPACE",   1,  5200, 32, 14, 10, 36000, 92, 24, 18},
-    {"ACID",    1,  2400, 74, 12, 28, 28000, 34, 52, 26},
-    {"DESTROY", 4,  1100, 88,  4, 76, 12000, 96, 84, 70},
-};
-
-static void filter_scene_cb(lv_event_t* e) {
-    int sceneIndex = (int)(intptr_t)lv_event_get_user_data(e);
-    const FxScenePreset& scene = kFxScenes[sceneIndex];
-    filterSelectedTrack = -1;
-    masterFilter.delayAmount = scene.delay;
-    masterFilter.flangerAmount = scene.flanger;
-    masterFilter.compAmount = scene.comp;
-    filter_sync_enabled(masterFilter);
-    fxFilterType = scene.filterType;
-    fxFilterCutoffHz = scene.cutoffHz;
-    fxFilterResonanceX10 = scene.resonanceX10;
-    fxBitCrushBits = scene.bitCrush;
-    fxDistortionPercent = scene.distortionPercent;
-    fxSampleRateHz = scene.sampleRateHz;
-    sendFilterUDP(-1, FILTER_DELAY);
-    sendFilterUDP(-1, FILTER_FLANGER);
-    sendFilterUDP(-1, FILTER_COMPRESSOR);
-    filter_push_extended_state();
-    filter_set_status_text(scene.name);
-}
-
 void ui_create_filters_screen() {
     static const char* fx_names[] = {"DELAY", "FLANGER", "COMP"};
     static const lv_color_t fx_colors[] = {
@@ -2370,7 +2305,7 @@ void ui_create_filters_screen() {
     lv_obj_set_pos(title, 8, 4);
 
     lv_obj_t* subtitle = lv_label_create(shell);
-    lv_label_set_text(subtitle, "Direct FX mode: 3 DFRobot lanes + 3 analog scene lanes");
+    lv_label_set_text(subtitle, "Direct FX mode: 3 DFRobot lanes + 3 analog FX params");
     lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(subtitle, RED808_TEXT_DIM, 0);
     lv_obj_set_pos(subtitle, 10, 34);
@@ -2410,15 +2345,19 @@ void ui_create_filters_screen() {
        those sizes but LVGL has not laid it out yet.                     */
     const int gridW = panelW;
     const int gridH = panelH;
-    int gap = 10;
-    int cellW = (gridW - gap) / 2;
-    int cellH = (gridH - gap) / 2;
+    const int gap = 10;
+    const int cellW = (gridW - gap) / 2;
+    const int cellH = (gridH - gap) / 2;
+    const int usedW = (cellW * 2) + gap;
+    const int usedH = (cellH * 2) + gap;
+    const int startX = (gridW - usedW) / 2;
+    const int startY = (gridH - usedH) / 2;
 
     for (int cell = 0; cell < 4; cell++) {
         int col = cell % 2;
         int row = cell / 2;
-        int x = col * (cellW + gap);
-        int y = row * (cellH + gap);
+        int x = startX + col * (cellW + gap);
+        int y = startY + row * (cellH + gap);
 
         lv_obj_t* card = create_section_shell(compact_panel, x, y, cellW, cellH);
         lv_obj_set_style_bg_color(card, lv_color_hex(0x17222B), 0);
@@ -2449,7 +2388,7 @@ void ui_create_filters_screen() {
             lv_obj_align(filter_grid_mute_labels[cell], LV_ALIGN_TOP_RIGHT, -8, 10);
 
             const int topBand = 34;
-            const int bottomBand = 34;
+            const int bottomBand = 36;
             int arcSize = min(cellW - 24, cellH - topBand - bottomBand);
             arcSize = constrain(arcSize, 110, 230);
             int arcX = (cellW - arcSize) / 2;
@@ -2485,9 +2424,17 @@ void ui_create_filters_screen() {
             lv_obj_set_width(filter_df_value_labels[cell], cellW);
             lv_obj_set_style_text_align(filter_df_value_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
             lv_obj_set_pos(filter_df_value_labels[cell], 0, arcY + (arcSize / 2) - 14);
+
+            filter_df_unit_labels[cell] = lv_label_create(card);
+            lv_label_set_text(filter_df_unit_labels[cell], "%");
+            lv_obj_set_style_text_font(filter_df_unit_labels[cell], &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(filter_df_unit_labels[cell], RED808_TEXT_DIM, 0);
+            lv_obj_set_width(filter_df_unit_labels[cell], cellW);
+            lv_obj_set_style_text_align(filter_df_unit_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_pos(filter_df_unit_labels[cell], 0, arcY + (arcSize / 2) + 12);
         } else {
             filter_scene_cell_title = lv_label_create(card);
-            lv_label_set_text(filter_scene_cell_title, "SCENAS FX");
+            lv_label_set_text(filter_scene_cell_title, "ANALOG FX");
             lv_obj_set_style_text_font(filter_scene_cell_title, &lv_font_montserrat_16, 0);
             lv_obj_set_style_text_color(filter_scene_cell_title, RED808_ACCENT2, 0);
             lv_obj_set_width(filter_scene_cell_title, cellW - 24);
@@ -2496,7 +2443,7 @@ void ui_create_filters_screen() {
 
             for (int i = 0; i < 3; i++) {
                 filter_scene_value_labels[i] = lv_label_create(card);
-                lv_label_set_text(filter_scene_value_labels[i], "P2 S1/12");
+                lv_label_set_text(filter_scene_value_labels[i], "P2 CUTOFF 2000Hz");
                 lv_obj_set_style_text_font(filter_scene_value_labels[i], &lv_font_montserrat_14, 0);
                 lv_obj_set_style_text_color(filter_scene_value_labels[i], RED808_TEXT, 0);
                 lv_obj_set_width(filter_scene_value_labels[i], cellW - 24);
@@ -2676,44 +2623,6 @@ void ui_create_filters_screen() {
         lv_obj_center(filter_bit_labels[i]);
     }
 
-#if PORTRAIT_MODE
-    lv_obj_t* scene_strip = create_section_shell(shell, 4, 684, UI_W - 56, 100);
-#else
-    lv_obj_t* scene_strip = create_section_shell(shell, 8, 410, 958, 76);
-#endif
-    lv_obj_add_flag(scene_strip, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_t* scene_title = lv_label_create(scene_strip);
-    lv_label_set_text(scene_title, LV_SYMBOL_PLAY "  QUICK SCENES");
-    lv_obj_set_style_text_font(scene_title, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(scene_title, RED808_SUCCESS, 0);
-    lv_obj_set_pos(scene_title, 0, 4);
-
-    for (int i = 0; i < 4; i++) {
-        filter_scene_btns[i] = lv_btn_create(scene_strip);
-#if PORTRAIT_MODE
-        lv_obj_set_size(filter_scene_btns[i], 120, 30);
-        lv_obj_set_pos(filter_scene_btns[i], (i % 4) * 128 + 4, 0);
-#else
-        lv_obj_set_size(filter_scene_btns[i], 150, 34);
-        lv_obj_set_pos(filter_scene_btns[i], 182 + i * 164, 0);
-#endif
-        lv_obj_set_style_radius(filter_scene_btns[i], 17, 0);
-        lv_obj_add_event_cb(filter_scene_btns[i], filter_scene_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
-        filter_scene_labels[i] = lv_label_create(filter_scene_btns[i]);
-        lv_label_set_text(filter_scene_labels[i], kFxScenes[i].name);
-        lv_obj_center(filter_scene_labels[i]);
-    }
-
-    filter_fun_status = lv_label_create(scene_strip);
-    lv_label_set_text(filter_fun_status, "DF1-DF3: giro valor, boton MUTE | DF4/Fader: BPM +/-0.1 | P2-P4: escena 1..12");
-#if PORTRAIT_MODE
-    lv_obj_set_style_text_font(filter_fun_status, &lv_font_montserrat_12, 0);
-#else
-    lv_obj_set_style_text_font(filter_fun_status, &lv_font_montserrat_14, 0);
-#endif
-    lv_obj_set_style_text_color(filter_fun_status, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(filter_fun_status, 0, 42);
-
     // Less parameters, more direct visual mode.
     if (filter_target_label) lv_obj_add_flag(filter_target_label, LV_OBJ_FLAG_HIDDEN);
     if (filter_target_prev_btn) lv_obj_add_flag(filter_target_prev_btn, LV_OBJ_FLAG_HIDDEN);
@@ -2728,7 +2637,6 @@ void ui_create_filters_screen() {
     for (int i = 0; i < 4; i++) {
         if (filter_bit_btns[i]) lv_obj_add_flag(filter_bit_btns[i], LV_OBJ_FLAG_HIDDEN);
         if (filter_ext_sliders[i]) lv_obj_add_flag(filter_ext_sliders[i], LV_OBJ_FLAG_HIDDEN);
-        if (filter_scene_btns[i]) lv_obj_add_flag(filter_scene_btns[i], LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -2851,7 +2759,6 @@ void ui_update_filters() {
         }
     }
 
-    static const char* laneNames[] = {"DELAY", "FLANGER", "COMP"};
     static const lv_color_t laneActiveColors[] = {
         lv_color_hex(0x58A6FF),
         lv_color_hex(0x39D2C0),
@@ -2886,13 +2793,23 @@ void ui_update_filters() {
         if (filter_df_value_labels[i]) {
             lv_label_set_text_fmt(filter_df_value_labels[i], "%03d", value);
         }
+        if (filter_df_unit_labels[i]) {
+            lv_label_set_text(filter_df_unit_labels[i], "%");
+        }
         if (filter_grid_mute_labels[i]) {
             lv_label_set_text(filter_grid_mute_labels[i], dfFxMuted[i] ? "MUTE" : "ON");
             lv_obj_set_style_text_color(filter_grid_mute_labels[i], dfFxMuted[i] ? RED808_ERROR : RED808_SUCCESS, 0);
             lv_obj_set_style_bg_color(filter_grid_mute_labels[i], dfFxMuted[i] ? RED808_ERROR : RED808_SUCCESS, 0);
         }
         if (filter_scene_value_labels[i]) {
-            lv_label_set_text_fmt(filter_scene_value_labels[i], "P%d %s S%d/12", i + 2, laneNames[i], (int)analogFxSceneIndex[i] + 1);
+            if (i == 0) {
+                if (fxFilterCutoffHz >= 1000) lv_label_set_text_fmt(filter_scene_value_labels[i], "P2 CUTOFF %d.%dkHz", fxFilterCutoffHz / 1000, (fxFilterCutoffHz % 1000) / 100);
+                else lv_label_set_text_fmt(filter_scene_value_labels[i], "P2 CUTOFF %dHz", fxFilterCutoffHz);
+            } else if (i == 1) {
+                lv_label_set_text_fmt(filter_scene_value_labels[i], "P3 RES %d.%dQ", fxFilterResonanceX10 / 10, fxFilterResonanceX10 % 10);
+            } else {
+                lv_label_set_text_fmt(filter_scene_value_labels[i], "P4 DRIVE %d%%", fxDistortionPercent);
+            }
         }
     }
 }
@@ -4000,9 +3917,9 @@ static const char* const dfRotaryAssignNames[] = {
 
 static const char* const analogPotAssignNames[] = {
     "P1: Master Volume (coarse)",
-    "P2: Delay Scene (1..12)",
-    "P3: Flanger Scene (1..12)",
-    "P4: Comp Scene (1..12)"
+    "P2: Filter Cutoff (20..20kHz)",
+    "P3: Resonance Q (1.0..10.0)",
+    "P4: Distortion Drive (0..100%)"
 };
 
 static const char* const m5EncoderAssignNames[] = {
