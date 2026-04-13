@@ -97,7 +97,7 @@ EncoderMode encoderMode = ENC_MODE_VOLUME;
 // I2C Hub
 int m5HubChannel[M5_ENCODER_MODULES] = {-1, -1};
 int dfRobotHubChannel[DFROBOT_ENCODER_COUNT] = {-1, -1, -1, -1};
-int byteButtonHubChannel = -1;
+int byteButtonHubChannel[BYTEBUTTON_COUNT] = {-1, -1};
 int dfRobotPotHubChannel = -1;
 bool hubDetected = false;
 
@@ -138,7 +138,7 @@ bool m5encoderConnected[M5_ENCODER_MODULES] = {false, false};
 uint8_t m5FirmwareVersion[M5_ENCODER_MODULES] = {0, 0};  // stored at init for I2C health check
 DFRobot_VisualRotaryEncoder_I2C* dfEncoders[DFROBOT_ENCODER_COUNT] = {};
 bool dfEncoderConnected[DFROBOT_ENCODER_COUNT] = {};
-bool byteButtonConnected = false;
+bool byteButtonConnected[BYTEBUTTON_COUNT] = {false, false};
 bool dfRobotPotConnected = false;
 uint8_t dfRobotPotAddr = DFROBOT_POT_ADC_ADDR;
 esp_lcd_panel_handle_t lcd_panel = NULL;
@@ -176,10 +176,10 @@ unsigned long livePadFlashUntilMs[Config::MAX_SAMPLES];
 unsigned long livePadHoldStartMs[Config::MAX_SAMPLES];
 static uint8_t livePadRemainingRepeats[Config::MAX_SAMPLES] = {};
 static unsigned long livePadNextRepeatMs[Config::MAX_SAMPLES] = {};
-uint8_t prevByteButtonState = 0;
-bool byteButtonLivePressed[BYTEBUTTON_BUTTONS] = {false, false, false, false, false, false, false, false};
-uint32_t byteButtonLedCache[BYTEBUTTON_BUTTONS + 1] = {};
-bool byteButtonLedInitialized = false;
+uint8_t prevByteButtonState[BYTEBUTTON_COUNT] = {0, 0};
+bool byteButtonLivePressed[BYTEBUTTON_TOTAL_BUTTONS] = {};
+uint32_t byteButtonLedCache[BYTEBUTTON_COUNT][BYTEBUTTON_BUTTONS + 1] = {};
+bool byteButtonLedInitialized[BYTEBUTTON_COUNT] = {false, false};
 volatile FxResponseMode fxResponseMode = FX_MODE_LIVE;
 const char* const byteButtonActionNames[] = {
     "Back/Menu",
@@ -198,7 +198,7 @@ const char* const byteButtonActionNames[] = {
     "Pattern ++",
     "Play/Pause"
 };
-uint8_t byteButtonActionMap[BYTEBUTTON_BUTTONS] = {
+uint8_t byteButtonActionMap[BYTEBUTTON_TOTAL_BUTTONS] = {
     BB_ACTION_MENU,
     BB_ACTION_FX_CLEAN,
     BB_ACTION_FX_SPACE,
@@ -206,7 +206,15 @@ uint8_t byteButtonActionMap[BYTEBUTTON_BUTTONS] = {
     BB_ACTION_SCREEN_FILTERS,
     BB_ACTION_PATTERN_PREV,
     BB_ACTION_PATTERN_NEXT,
-    BB_ACTION_PLAY_PAUSE
+    BB_ACTION_PLAY_PAUSE,
+    BB_ACTION_SCREEN_LIVE,
+    BB_ACTION_SCREEN_SEQUENCER,
+    BB_ACTION_SCREEN_VOLUMES,
+    BB_ACTION_SCREEN_FILTERS,
+    BB_ACTION_FX_TARGET_PREV,
+    BB_ACTION_FX_TARGET_NEXT,
+    BB_ACTION_VOL_MODE,
+    BB_ACTION_FX_DESTROY
 };
 uint8_t dfFxParamMode[3] = {0, 0, 0};
 int dfFxParamValue[3] = {55, 40, 40};
@@ -228,6 +236,7 @@ static constexpr uint8_t BYTEBUTTON_LED_RGB888_REG = 0x20;
 static constexpr uint8_t BYTEBUTTON_LED_COUNT = BYTEBUTTON_BUTTONS + 1;
 static constexpr uint8_t BYTEBUTTON_LED_USER_DEFINED = 0;
 static constexpr uint8_t BYTEBUTTON_BRIGHTNESS = 180;
+static constexpr int kByteButtonExpectedChannels[BYTEBUTTON_COUNT] = {BYTEBUTTON1_HUB_CH, BYTEBUTTON2_HUB_CH};
 
 static int fx_df_step() {
     switch (fxResponseMode) {
@@ -640,19 +649,20 @@ static bool byteButtonApplyLedConfigLocked() {
     return true;
 }
 
-static void initByteButtonLeds() {
-    if (!byteButtonConnected) return;
+static void initByteButtonLeds(int moduleIdx) {
+    if (moduleIdx < 0 || moduleIdx >= BYTEBUTTON_COUNT) return;
+    if (!byteButtonConnected[moduleIdx]) return;
     if (!i2c_lock(30)) return;
 
-    if (byteButtonHubChannel >= 0) i2c_hub_select_raw(byteButtonHubChannel);
-    else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
+    if (byteButtonHubChannel[moduleIdx] >= 0) i2c_hub_select_raw(byteButtonHubChannel[moduleIdx]);
+    else if (byteButtonHubChannel[moduleIdx] == -2) i2c_hub_deselect_raw();
     bool ok = byteButtonApplyLedConfigLocked();
-    if (byteButtonHubChannel >= 0) i2c_hub_deselect_raw();
+    if (byteButtonHubChannel[moduleIdx] >= 0) i2c_hub_deselect_raw();
     i2c_unlock();
 
     if (ok) {
-        byteButtonLedInitialized = true;
-        memset(byteButtonLedCache, 0xFF, sizeof(byteButtonLedCache));
+        byteButtonLedInitialized[moduleIdx] = true;
+        memset(byteButtonLedCache[moduleIdx], 0xFF, sizeof(byteButtonLedCache[moduleIdx]));
     }
 }
 
@@ -686,7 +696,7 @@ static bool navigateToScreen(Screen screen) {
         pendingLivePadTriggerMask = 0;
         // Sync ByteButton edge detection: assume all buttons were pressed so
         // no phantom edges fire on the first handleByteButton() after entry.
-        prevByteButtonState = 0xFF;
+        for (int m = 0; m < BYTEBUTTON_COUNT; m++) prevByteButtonState[m] = 0xFF;
         memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
     }
 
@@ -762,11 +772,11 @@ void initState() {
         dfRobotPotCalMin[i] = 65535;
         dfRobotPotCalMax[i] = 0;
     }
-    prevByteButtonState = 0;
+    for (int m = 0; m < BYTEBUTTON_COUNT; m++) prevByteButtonState[m] = 0;
     pendingLivePadTriggerMask = 0;
     memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
     memset(byteButtonLedCache, 0xFF, sizeof(byteButtonLedCache));
-    byteButtonLedInitialized = false;
+    memset(byteButtonLedInitialized, 0, sizeof(byteButtonLedInitialized));
 }
 
 // =============================================================================
@@ -1490,10 +1500,10 @@ void scanI2CHub() {
     RED808_LOG_PRINTLN("[I2C] PCA9548A hub detected");
 
     int m5Found = 0, dfFound = 0;
+    int byteButtonsFound = 0;
     bool potHubFound = false;
-    const int expectedBB1 = BYTEBUTTON1_HUB_CH;
 
-    for (uint8_t ch = 0; ch < 8 && (m5Found < M5_ENCODER_MODULES || dfFound < DFROBOT_ENCODER_COUNT || !byteButtonConnected || !potHubFound); ch++) {
+    for (uint8_t ch = 0; ch < 8 && (m5Found < M5_ENCODER_MODULES || dfFound < DFROBOT_ENCODER_COUNT || byteButtonsFound < BYTEBUTTON_COUNT || !potHubFound); ch++) {
         i2c_hub_select(ch);
         delay(5);
 
@@ -1546,25 +1556,54 @@ void scanI2CHub() {
         // Re-select hub channel before ByteButton probe
         // (M5/DFRobot init blocks above may have deselected the hub,
         //  causing a false detection on the direct bus)
-        if (!byteButtonConnected) {
+        if (byteButtonsFound < BYTEBUTTON_COUNT) {
             i2c_hub_select(ch);
             delay(2);
             if (i2c_device_present(BYTEBUTTON_ADDR)) {
-                if (ch == expectedBB1) {
-                    byteButtonHubChannel = ch;
-                    byteButtonConnected = true;
-                    prevByteButtonState = 0;
-                    RED808_LOG_PRINTF("[I2C] M5 ByteButton #1 found on hub ch %d\n", ch);
-
-                    if (i2c_lock(50)) {
-                        i2c_hub_select_raw(ch);
-                        byteButtonLedInitialized = byteButtonApplyLedConfigLocked();
-                        i2c_hub_deselect_raw();
-                        i2c_unlock();
+                bool alreadyAssigned = false;
+                for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
+                    if (byteButtonConnected[m] && byteButtonHubChannel[m] == ch) {
+                        alreadyAssigned = true;
+                        break;
                     }
-                } else {
-                    RED808_LOG_PRINTF("[I2C] ByteButton found on unexpected ch %d (expected %d), ignored\n",
-                                      ch, expectedBB1);
+                }
+                if (!alreadyAssigned) {
+                    int moduleIdx = -1;
+                    for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
+                        if (!byteButtonConnected[m] && ch == kByteButtonExpectedChannels[m]) {
+                            moduleIdx = m;
+                            break;
+                        }
+                    }
+                    if (moduleIdx < 0) {
+                        for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
+                            if (!byteButtonConnected[m]) {
+                                moduleIdx = m;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (moduleIdx >= 0) {
+                        byteButtonHubChannel[moduleIdx] = ch;
+                        byteButtonConnected[moduleIdx] = true;
+                        prevByteButtonState[moduleIdx] = 0;
+                        byteButtonsFound++;
+
+                        if (ch == kByteButtonExpectedChannels[moduleIdx]) {
+                            RED808_LOG_PRINTF("[I2C] M5 ByteButton #%d found on hub ch %d\n", moduleIdx + 1, ch);
+                        } else {
+                            RED808_LOG_PRINTF("[I2C] WARNING: ByteButton #%d found on ch %d (expected %d), using detected channel\n",
+                                              moduleIdx + 1, ch, kByteButtonExpectedChannels[moduleIdx]);
+                        }
+
+                        if (i2c_lock(50)) {
+                            i2c_hub_select_raw(ch);
+                            byteButtonLedInitialized[moduleIdx] = byteButtonApplyLedConfigLocked();
+                            i2c_hub_deselect_raw();
+                            i2c_unlock();
+                        }
+                    }
                 }
             }
         }
@@ -1585,8 +1624,16 @@ void scanI2CHub() {
         i2c_hub_deselect();
     }
 
-    if (!byteButtonConnected) {
-        RED808_LOG_PRINTF("[I2C] WARNING: ByteButton missing on expected ch%d\n", expectedBB1);
+    int byteButtonFoundCount = byteButtonsFound;
+
+    for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
+        if (!byteButtonConnected[m]) {
+            RED808_LOG_PRINTF("[I2C] WARNING: ByteButton #%d missing on expected ch%d\n", m + 1, kByteButtonExpectedChannels[m]);
+        }
+    }
+    if (byteButtonFoundCount < BYTEBUTTON_COUNT) {
+        RED808_LOG_PRINTLN("[I2C] NOTE: If two ByteButton units are on a passive hub/same bus, both use addr 0x47 and appear as ONE device.");
+        RED808_LOG_PRINTLN("[I2C]       Put each ByteButton on a different PCA9548A channel (or different I2C bus) to detect both independently.");
     }
 
     // Fallback: try 4-pot ADC directly on bus (not behind hub)
@@ -1613,9 +1660,9 @@ void scanI2CHub() {
     diagInfo.dfrobot3Ok = dfEncoderConnected[2];
     diagInfo.dfrobot4Ok = dfEncoderConnected[3];
     diagInfo.dfrobotPotsOk = dfRobotPotConnected;
-    diagInfo.byteButtonOk = byteButtonConnected;
+    diagInfo.byteButton1Ok = byteButtonConnected[0];
+    diagInfo.byteButton2Ok = (BYTEBUTTON_COUNT > 1) ? byteButtonConnected[1] : false;
 
-    int byteButtonFoundCount = (byteButtonConnected ? 1 : 0);
     RED808_LOG_PRINTF("[I2C] Found: %d M5 modules, %d DFRobot rotaries, ByteButtons: %d, Pot ADC: %s\n",
                   m5Found,
                   dfFound,
@@ -1624,14 +1671,6 @@ void scanI2CHub() {
 }
 
 void updateByteButtonLeds() {
-    if (!byteButtonConnected) return;
-    if (!byteButtonLedInitialized) {
-        initByteButtonLeds();
-        if (!byteButtonLedInitialized) return;
-    }
-
-    uint32_t desired[BYTEBUTTON_LED_COUNT] = {};
-
     auto ledColorForAction = [&](uint8_t action) -> uint32_t {
         switch ((ByteButtonAction)action) {
             case BB_ACTION_MENU:
@@ -1668,35 +1707,46 @@ void updateByteButtonLeds() {
         }
     };
 
-    // ── Button LED colors (mirrored: hw bit N = physical btn 7-N) ───────────────
-    for (int btn = 0; btn < BYTEBUTTON_BUTTONS; btn++) {
-        int ledIndex = (BYTEBUTTON_BUTTONS - 1) - btn;
-        desired[ledIndex] = ledColorForAction(byteButtonActionMap[btn]);
-    }
-
-    // LED 8 (status ring): master connection
-    desired[8] = masterConnected ? theme_nav_color(1) : 0x222222;
-
-    bool hasChanges = false;
-    for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
-        if (byteButtonLedCache[i] != desired[i]) { hasChanges = true; break; }
-    }
-    if (!hasChanges) return;
-    if (!i2c_lock(10)) return;
-
-    if (byteButtonHubChannel >= 0) i2c_hub_select_raw(byteButtonHubChannel);
-    else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
-    for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
-        if (byteButtonLedCache[i] == desired[i]) continue;
-        uint32_t color = desired[i];
-        if (!byteButtonWriteBytes(BYTEBUTTON_LED_RGB888_REG + i * 4, (uint8_t*)&color, 4)) {
-            byteButtonLedInitialized = false;
-            break;
+    for (int moduleIdx = 0; moduleIdx < BYTEBUTTON_COUNT; moduleIdx++) {
+        if (!byteButtonConnected[moduleIdx]) continue;
+        if (!byteButtonLedInitialized[moduleIdx]) {
+            initByteButtonLeds(moduleIdx);
+            if (!byteButtonLedInitialized[moduleIdx]) continue;
         }
-        byteButtonLedCache[i] = desired[i];
+
+        uint32_t desired[BYTEBUTTON_LED_COUNT] = {};
+        int actionOffset = moduleIdx * BYTEBUTTON_BUTTONS;
+
+        // Button LED colors (mirrored: hw bit N = physical btn 7-N)
+        for (int btn = 0; btn < BYTEBUTTON_BUTTONS; btn++) {
+            int ledIndex = (BYTEBUTTON_BUTTONS - 1) - btn;
+            desired[ledIndex] = ledColorForAction(byteButtonActionMap[actionOffset + btn]);
+        }
+
+        // LED 8 (status ring): master connection
+        desired[8] = masterConnected ? theme_nav_color(1) : 0x222222;
+
+        bool hasChanges = false;
+        for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
+            if (byteButtonLedCache[moduleIdx][i] != desired[i]) { hasChanges = true; break; }
+        }
+        if (!hasChanges) continue;
+        if (!i2c_lock(10)) continue;
+
+        if (byteButtonHubChannel[moduleIdx] >= 0) i2c_hub_select_raw(byteButtonHubChannel[moduleIdx]);
+        else if (byteButtonHubChannel[moduleIdx] == -2) i2c_hub_deselect_raw();
+        for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
+            if (byteButtonLedCache[moduleIdx][i] == desired[i]) continue;
+            uint32_t color = desired[i];
+            if (!byteButtonWriteBytes(BYTEBUTTON_LED_RGB888_REG + i * 4, (uint8_t*)&color, 4)) {
+                byteButtonLedInitialized[moduleIdx] = false;
+                break;
+            }
+            byteButtonLedCache[moduleIdx][i] = desired[i];
+        }
+        if (byteButtonHubChannel[moduleIdx] >= 0) i2c_hub_deselect_raw();
+        i2c_unlock();
     }
-    if (byteButtonHubChannel >= 0) i2c_hub_deselect_raw();
-    i2c_unlock();
 }
 
 // =============================================================================
@@ -1750,15 +1800,16 @@ static const uint32_t oceanBlues[] = {
     0x00A8FF, 0x00C0FF, 0x00D4FF, 0x33E0FF,
 };
 
-static void setByteButtonLedDirect(int index, uint32_t color) {
-    if (!byteButtonConnected || !byteButtonLedInitialized) return;
+static void setByteButtonLedDirect(int moduleIdx, int index, uint32_t color) {
+    if (moduleIdx < 0 || moduleIdx >= BYTEBUTTON_COUNT) return;
+    if (!byteButtonConnected[moduleIdx] || !byteButtonLedInitialized[moduleIdx]) return;
     if (index < 0 || index >= BYTEBUTTON_LED_COUNT) return;
     if (!i2c_lock(10)) return;
-    if (byteButtonHubChannel >= 0) i2c_hub_select_raw(byteButtonHubChannel);
-    else if (byteButtonHubChannel == -2) i2c_hub_deselect_raw();
+    if (byteButtonHubChannel[moduleIdx] >= 0) i2c_hub_select_raw(byteButtonHubChannel[moduleIdx]);
+    else if (byteButtonHubChannel[moduleIdx] == -2) i2c_hub_deselect_raw();
     byteButtonWriteBytes(BYTEBUTTON_LED_RGB888_REG + index * 4, (uint8_t*)&color, 4);
-    byteButtonLedCache[index] = color;
-    if (byteButtonHubChannel >= 0) i2c_hub_deselect_raw();
+    byteButtonLedCache[moduleIdx][index] = color;
+    if (byteButtonHubChannel[moduleIdx] >= 0) i2c_hub_deselect_raw();
     i2c_unlock();
 }
 
@@ -1795,10 +1846,13 @@ void bootLedAnimation() {
     if (now - bootLedLastMs < 120) return;  // 120ms between LED activations
     bootLedLastMs = now;
 
-    // Total LEDs: M5 module 0 (8) + M5 module 1 (8) + ByteButton (9) = 25
+    const int totalByteButtonLeds = BYTEBUTTON_COUNT * BYTEBUTTON_LED_COUNT;
+    const int totalLeds = 16 + totalByteButtonLeds;
+
+    // Total LEDs: M5 module 0 (8) + M5 module 1 (8) + ByteButtons (9 each)
     // Phase 0-7:   M5 #0 encoders 0-7 (rainbow sweep)
     // Phase 8-15:  M5 #1 encoders 0-7 (rainbow sweep)
-    // Phase 16-24: ByteButton LEDs 0-8 (ocean blue)
+    // Phase 16-..: ByteButton LEDs (ocean blue per module)
 
     if (bootLedPhase < 8) {
         uint8_t r, g, b;
@@ -1809,14 +1863,15 @@ void bootLedAnimation() {
         uint8_t r, g, b;
         hue_to_rgb(enc * 32, r, g, b);
         setM5EncoderLedDirect(1, enc, r, g, b);
-    } else if (bootLedPhase < 25) {
-        // ByteButton — ocean blue tones
-        int idx = bootLedPhase - 16;
-        setByteButtonLedDirect(idx, oceanBlues[idx]);
+    } else if (bootLedPhase < totalLeds) {
+        int bbLed = bootLedPhase - 16;
+        int moduleIdx = bbLed / BYTEBUTTON_LED_COUNT;
+        int idx = bbLed % BYTEBUTTON_LED_COUNT;
+        setByteButtonLedDirect(moduleIdx, idx, oceanBlues[idx]);
     }
 
     bootLedPhase++;
-    if (bootLedPhase >= 25) {
+    if (bootLedPhase >= totalLeds) {
         bootLedDone = true;
         RED808_LOG_PRINTLN("[BOOT] LED test sequence complete");
     }
@@ -1837,9 +1892,11 @@ void setOceanBlueLeds() {
             setM5EncoderLedDirect(mod, enc, r, g, b);
         }
     }
-    // ByteButton — ocean blue palette with high contrast
-    for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
-        setByteButtonLedDirect(i, oceanBlues[i]);
+    // ByteButtons — ocean blue palette with high contrast
+    for (int moduleIdx = 0; moduleIdx < BYTEBUTTON_COUNT; moduleIdx++) {
+        for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
+            setByteButtonLedDirect(moduleIdx, i, oceanBlues[i]);
+        }
     }
     RED808_LOG_PRINTF("[LED] Ocean blue theme applied (M5 #1=%s ch=%d, M5 #2=%s ch=%d)\n",
                   m5encoderConnected[0] ? "OK" : "NO",
@@ -2166,10 +2223,16 @@ void handleUnitFader() {
     if (abs(delta) < Config::UNIT_FADER_DEADBAND) return;
 
     accum += delta;
-    const int countsPerTenth = 18;
+    const int countsPerTenth = Config::UNIT_FADER_COUNTS_PER_TENTH;
     int steps = 0;
-    while (accum >= countsPerTenth) { steps++; accum -= countsPerTenth; }
-    while (accum <= -countsPerTenth) { steps--; accum += countsPerTenth; }
+    // Apply at most one 0.1 step per cycle for predictable fine tuning.
+    if (accum >= countsPerTenth) {
+        steps = 1;
+        accum -= countsPerTenth;
+    } else if (accum <= -countsPerTenth) {
+        steps = -1;
+        accum += countsPerTenth;
+    }
     if (steps == 0) return;
 
     float bpmFine = currentBPMPrecise + (float)steps * 0.1f;
@@ -2188,12 +2251,26 @@ static bool readByteButtonStatus(int hubChannel, uint8_t& status) {
         if (hubChannel >= 0) i2c_hub_select_raw(hubChannel);
         else if (hubChannel == -2) i2c_hub_deselect_raw();
 
+        // Preferred path: register 0x60 returns one byte per button (0x01 pressed, 0x00 released).
+        uint8_t statusBytes[BYTEBUTTON_BUTTONS] = {};
         Wire.beginTransmission(BYTEBUTTON_ADDR);
-        Wire.write(BYTEBUTTON_STATUS_REG);
+        Wire.write(BYTEBUTTON_STATUS_8BYTE_REG);
         if (Wire.endTransmission(false) == 0 &&
-            Wire.requestFrom((uint8_t)BYTEBUTTON_ADDR, (uint8_t)1) == 1) {
-            status = Wire.read();
+            Wire.requestFrom((uint8_t)BYTEBUTTON_ADDR, (uint8_t)BYTEBUTTON_BUTTONS) == BYTEBUTTON_BUTTONS) {
+            for (int i = 0; i < BYTEBUTTON_BUTTONS; i++) {
+                statusBytes[i] = Wire.read();
+                if (statusBytes[i]) status |= (uint8_t)(1U << i);
+            }
             readOk = true;
+        } else {
+            // Fallback for older/alternate firmware exposing only bitmask register.
+            Wire.beginTransmission(BYTEBUTTON_ADDR);
+            Wire.write(BYTEBUTTON_STATUS_REG);
+            if (Wire.endTransmission(false) == 0 &&
+                Wire.requestFrom((uint8_t)BYTEBUTTON_ADDR, (uint8_t)1) == 1) {
+                status = Wire.read();
+                readOk = true;
+            }
         }
 
         if (hubChannel >= 0) i2c_hub_deselect_raw();
@@ -2202,14 +2279,14 @@ static bool readByteButtonStatus(int hubChannel, uint8_t& status) {
     return readOk;
 }
 
-static void runByteButtonAction(uint8_t action) {
+static void runByteButtonAction(uint8_t action, int moduleIdx) {
     switch ((ByteButtonAction)action) {
         case BB_ACTION_MENU:
             navigateToScreen(SCREEN_MENU);
             break;
         case BB_ACTION_VOL_MODE:
             applyUnifiedMasterVolume(masterVolume, true);
-            RED808_LOG_PRINTF("[BB1] Master volume resync: %d\n", masterVolume);
+            RED808_LOG_PRINTF("[BB%d] Master volume resync: %d\n", moduleIdx + 1, masterVolume);
             break;
         case BB_ACTION_SCREEN_LIVE:
             navigateToScreen(SCREEN_LIVE);
@@ -2226,17 +2303,17 @@ static void runByteButtonAction(uint8_t action) {
         case BB_ACTION_FX_CLEAN:
             analogFxMuted[0] = !analogFxMuted[0];
             sendAnalogFxParamNow(0);
-            RED808_LOG_PRINTF("[BB1] P2 CUTOFF mute: %s\n", analogFxMuted[0] ? "ON" : "OFF");
+            RED808_LOG_PRINTF("[BB%d] P2 CUTOFF mute: %s\n", moduleIdx + 1, analogFxMuted[0] ? "ON" : "OFF");
             break;
         case BB_ACTION_FX_SPACE:
             analogFxMuted[1] = !analogFxMuted[1];
             sendAnalogFxParamNow(1);
-            RED808_LOG_PRINTF("[BB1] P3 RESONANCE mute: %s\n", analogFxMuted[1] ? "ON" : "OFF");
+            RED808_LOG_PRINTF("[BB%d] P3 RESONANCE mute: %s\n", moduleIdx + 1, analogFxMuted[1] ? "ON" : "OFF");
             break;
         case BB_ACTION_FX_ACID:
             analogFxMuted[2] = !analogFxMuted[2];
             sendAnalogFxParamNow(2);
-            RED808_LOG_PRINTF("[BB1] P4 DRIVE mute: %s\n", analogFxMuted[2] ? "ON" : "OFF");
+            RED808_LOG_PRINTF("[BB%d] P4 DRIVE mute: %s\n", moduleIdx + 1, analogFxMuted[2] ? "ON" : "OFF");
             break;
         case BB_ACTION_FX_DESTROY:
             {
@@ -2248,18 +2325,18 @@ static void runByteButtonAction(uint8_t action) {
                 sendAnalogFxParamNow(0);
                 sendAnalogFxParamNow(1);
                 sendAnalogFxParamNow(2);
-                RED808_LOG_PRINTF("[BB1] Analog FX mute ALL: %s\n", newState ? "ON" : "OFF");
+                RED808_LOG_PRINTF("[BB%d] Analog FX mute ALL: %s\n", moduleIdx + 1, newState ? "ON" : "OFF");
             }
             break;
         case BB_ACTION_FX_TARGET_PREV:
             if (filterSelectedTrack == -1) filterSelectedTrack = Config::MAX_TRACKS - 1;
             else filterSelectedTrack--;
-            RED808_LOG_PRINTF("[BB1] FX target: %s\n", filterSelectedTrack == -1 ? "MASTER" : trackNames[filterSelectedTrack]);
+            RED808_LOG_PRINTF("[BB%d] FX target: %s\n", moduleIdx + 1, filterSelectedTrack == -1 ? "MASTER" : trackNames[filterSelectedTrack]);
             break;
         case BB_ACTION_FX_TARGET_NEXT:
             if (filterSelectedTrack >= Config::MAX_TRACKS - 1) filterSelectedTrack = -1;
             else filterSelectedTrack++;
-            RED808_LOG_PRINTF("[BB1] FX target: %s\n", filterSelectedTrack == -1 ? "MASTER" : trackNames[filterSelectedTrack]);
+            RED808_LOG_PRINTF("[BB%d] FX target: %s\n", moduleIdx + 1, filterSelectedTrack == -1 ? "MASTER" : trackNames[filterSelectedTrack]);
             break;
         case BB_ACTION_PATTERN_PREV:
             if (currentPattern > 0) selectPatternOnMaster(currentPattern - 1);
@@ -2275,23 +2352,29 @@ static void runByteButtonAction(uint8_t action) {
     }
 }
 
-static void handleByteButtonPrimaryEdges(uint8_t pressedEdges) {
+static void handleByteButtonPrimaryEdges(int moduleIdx, uint8_t pressedEdges) {
     memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
+    int actionOffset = moduleIdx * BYTEBUTTON_BUTTONS;
     for (int button = 0; button < BYTEBUTTON_BUTTONS; button++) {
         if ((pressedEdges & (1U << button)) == 0) continue;
         int btn = (BYTEBUTTON_BUTTONS - 1) - button;
-        runByteButtonAction(byteButtonActionMap[btn]);
+        int globalBtn = actionOffset + btn;
+        if (globalBtn >= 0 && globalBtn < BYTEBUTTON_TOTAL_BUTTONS) {
+            byteButtonLivePressed[globalBtn] = true;
+            runByteButtonAction(byteButtonActionMap[globalBtn], moduleIdx);
+        }
     }
     updateByteButtonLeds();
 }
 
 void handleByteButton() {
-    if (byteButtonConnected) {
+    for (int moduleIdx = 0; moduleIdx < BYTEBUTTON_COUNT; moduleIdx++) {
+        if (!byteButtonConnected[moduleIdx]) continue;
         uint8_t status = 0;
-        if (readByteButtonStatus(byteButtonHubChannel, status)) {
-            uint8_t pressedEdges = status & (uint8_t)~prevByteButtonState;
-            prevByteButtonState = status;
-            if (pressedEdges) handleByteButtonPrimaryEdges(pressedEdges);
+        if (readByteButtonStatus(byteButtonHubChannel[moduleIdx], status)) {
+            uint8_t pressedEdges = status & (uint8_t)~prevByteButtonState[moduleIdx];
+            prevByteButtonState[moduleIdx] = status;
+            if (pressedEdges) handleByteButtonPrimaryEdges(moduleIdx, pressedEdges);
         }
     }
 }
@@ -2678,7 +2761,10 @@ void loop() {
         RED808_LOG_PRINTF("  DFRobot #3:  %s (ch=%d)\n", dfEncoderConnected[2] ? "OK" : "NO", dfRobotHubChannel[2]);
         RED808_LOG_PRINTF("  DFRobot #4:  %s (ch=%d)\n", dfEncoderConnected[3] ? "OK" : "NO", dfRobotHubChannel[3]);
         RED808_LOG_PRINTF("  DFRobot 4P:  %s (ch=%d, addr=0x%02X)\n", dfRobotPotConnected ? "OK" : "NO", dfRobotPotHubChannel, dfRobotPotAddr);
-        RED808_LOG_PRINTF("  ByteButton:  %s (ch=%d)\n", byteButtonConnected ? "OK" : "NO", byteButtonHubChannel);
+        for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
+            RED808_LOG_PRINTF("  ByteButton #%d: %s (ch=%d)\n", m + 1,
+                              byteButtonConnected[m] ? "OK" : "NO", byteButtonHubChannel[m]);
+        }
         RED808_LOG_PRINTF("  LCD panel:   %s\n", lcd_panel ? "OK" : "FAIL");
         RED808_LOG_PRINTF("  Heap: %d  PSRAM: %d\n", ESP.getFreeHeap(), ESP.getFreePsram());
         RED808_LOG_PRINTLN("===========================\n");

@@ -107,7 +107,8 @@ struct DiagnosticInfo {
     bool dfrobot3Ok;
     bool dfrobot4Ok;
     bool dfrobotPotsOk;
-    bool byteButtonOk;
+    bool byteButton1Ok;
+    bool byteButton2Ok;
     String lastError;
 };
 
@@ -141,7 +142,7 @@ extern bool trackSolo[];
 extern bool livePadPressed[];
 extern unsigned long livePadFlashUntilMs[];
 extern bool byteButtonLivePressed[];
-extern uint8_t prevByteButtonState;  // ByteButton bitmask state for edge detection
+extern uint8_t prevByteButtonState[];  // per-module ByteButton bitmask state for edge detection
 extern volatile uint32_t pendingLivePadTriggerMask;
 extern volatile bool livePadsVisualDirty;
 extern VolumeMode volumeMode;
@@ -163,7 +164,7 @@ extern volatile FxResponseMode fxResponseMode;
 // I2C Hub
 extern int m5HubChannel[];
 extern int dfRobotHubChannel[];
-extern int byteButtonHubChannel;
+extern int byteButtonHubChannel[];
 extern int dfRobotPotHubChannel;
 extern uint8_t dfRobotPotAddr;
 extern uint8_t dfRobotPotMidi[];
@@ -172,7 +173,7 @@ extern uint8_t dfFxParamMode[];
 extern int dfFxParamValue[];
 extern bool dfFxMuted[];
 extern bool analogFxMuted[];
-extern bool byteButtonConnected;
+extern bool byteButtonConnected[];
 extern bool hubDetected;
 extern uint8_t byteButtonActionMap[];
 extern const char* const byteButtonActionNames[];

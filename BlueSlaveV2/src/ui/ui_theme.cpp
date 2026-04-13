@@ -2,6 +2,7 @@
 // ui_theme.cpp - RED808 theme system with 5 visual presets
 // =============================================================================
 #include "ui_theme.h"
+#include "../../include/config.h"
 
 VisualTheme currentTheme = THEME_OCEAN;
 
@@ -346,10 +347,19 @@ void ui_theme_apply(VisualTheme theme) {
     ui_volumes_retheme();
 
     // Invalidate ByteButton LED cache
-    extern uint32_t byteButtonLedCache[];
-    extern bool byteButtonLedInitialized;
-    if (byteButtonLedInitialized) {
-        for (int i = 0; i < 9; i++) byteButtonLedCache[i] = 0xDEAD;
+    extern uint32_t byteButtonLedCache[][BYTEBUTTON_BUTTONS + 1];
+    extern bool byteButtonLedInitialized[];
+    bool anyByteButtonLedInit = false;
+    for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
+        if (byteButtonLedInitialized[m]) {
+            anyByteButtonLedInit = true;
+            break;
+        }
+    }
+    if (anyByteButtonLedInit) {
+        for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
+            for (int i = 0; i < 9; i++) byteButtonLedCache[m][i] = 0xDEAD;
+        }
     }
 
     // Signal main.cpp to refresh M5 encoder LEDs

@@ -138,10 +138,12 @@
 // DFRobot #4: Pattern select (button=request pattern sync)
 
 // M5 Unit ByteButton (up to 2x via hub channels)
-#define BYTEBUTTON_COUNT       1
+#define BYTEBUTTON_COUNT       2
 #define BYTEBUTTON_ADDR        0x47
 #define BYTEBUTTON_BUTTONS     8
+#define BYTEBUTTON_TOTAL_BUTTONS (BYTEBUTTON_COUNT * BYTEBUTTON_BUTTONS)
 #define BYTEBUTTON1_HUB_CH     4
+#define BYTEBUTTON2_HUB_CH     5
 
 // DFRobot 4x analog pot hub via I2C ADC converter (ADS1115-compatible)
 #define DFROBOT_POT_COUNT      4
@@ -245,8 +247,9 @@ namespace Config {
 
     // M5 Unit Fader on analog pin (replaces old analog rotary)
     constexpr int UNIT_FADER_PIN = 6;        // GPIO6 signal pin
-    constexpr int UNIT_FADER_DEADBAND = 2;   // MIDI-level deadband
-    constexpr uint32_t UNIT_FADER_READ_MS = 20;
+    constexpr int UNIT_FADER_DEADBAND = 1;   // finer response for 0.1 BPM tuning
+    constexpr uint32_t UNIT_FADER_READ_MS = 12;
+    constexpr int UNIT_FADER_COUNTS_PER_TENTH = 12;
 
     // Menu
     constexpr int MENU_ITEMS = 6;

@@ -66,7 +66,7 @@ static lv_obj_t* diag_runtime_values[12] = {};
 // diag_event_labels removed (EVENT LOG disabled)
 
 static lv_obj_t* perf_runtime_values[8] = {};
-static lv_obj_t* perf_bb_action_labels[BYTEBUTTON_BUTTONS] = {};
+static lv_obj_t* perf_bb_action_labels[BYTEBUTTON_TOTAL_BUTTONS] = {};
 
 // diag_event_log removed (EVENT LOG disabled)
 
@@ -377,7 +377,7 @@ static const char* const kBootLines[] = {
     "[ENC1]  M5STACK ROTATE8 x2  RGB LED............... OK",
     "[ENC2]  DFROBOT VISUAL ROTARY x2  I2C............. OK",
     "[ENC3]  DFROBOT ANALOG ROTARY  GPIO6 ADC.......... OK",
-    "[BTN ]  BYTEBUTTON 8x1 MATRIX  I2C 0x27.......... OK",
+    "[BTN ]  BYTEBUTTON 8x2 MATRIX  I2C 0x47.......... OK",
     "[SDIO]  MMC 1-BIT  CLK:12 CMD:11 D0:13........... OK",
     "[WLAN]  802.11b/g/n STA  AP RED808  CH AUTO....... OK",
     "[UDP ]  PORT 8888  MASTER 192.168.4.1............. OK",
@@ -533,8 +533,8 @@ static void nav_to(Screen screen, lv_obj_t* scr) {
         pendingLivePadTriggerMask = 0;
         // Sync ByteButton edge-detection state: assume all buttons "were pressed"
         // so no phantom edge fires on first handleByteButton() after entering LIVE.
-        prevByteButtonState = 0xFF;
-        memset(byteButtonLivePressed, 0, sizeof(bool) * BYTEBUTTON_BUTTONS);
+        for (int m = 0; m < BYTEBUTTON_COUNT; m++) prevByteButtonState[m] = 0xFF;
+        memset(byteButtonLivePressed, 0, sizeof(bool) * BYTEBUTTON_TOTAL_BUTTONS);
     }
 
     currentScreen = screen;
@@ -3097,7 +3097,7 @@ void ui_create_settings_screen() {
 // ============================================================================
 // DIAGNOSTICS SCREEN
 // ============================================================================
-#define DIAG_ROWS 14
+#define DIAG_ROWS 15
 static lv_obj_t* diag_labels[DIAG_ROWS];
 static lv_obj_t* diag_values[DIAG_ROWS];
 
@@ -3117,7 +3117,7 @@ void ui_create_diagnostics_screen() {
     static const char* row_names[DIAG_ROWS] = {
         "WiFi",  "UDP",  "Touch GT911",  "LCD RGB",  "I2C Hub PCA9548A",
         "M5 Encoder #1", "M5 Encoder #2", "DFRobot Enc #1", "DFRobot Enc #2", "DFRobot Enc #3", "DFRobot Enc #4",
-        "DFRobot Analog Hub", "M5 ByteButton", "SD Card"
+        "DFRobot Analog Hub", "M5 ByteButton #1", "M5 ByteButton #2", "SD Card"
     };
 
 #if PORTRAIT_MODE
@@ -3228,7 +3228,8 @@ void ui_update_diagnostics() {
         { diagInfo.dfrobot3Ok,   "OK",            "Not detected" },
         { diagInfo.dfrobot4Ok,   "OK",            "Not detected" },
         { diagInfo.dfrobotPotsOk, "OK (0x48/0x49)", "Not detected" },
-        { diagInfo.byteButtonOk, "OK",     "Not detected" },
+        { diagInfo.byteButton1Ok, "OK",     "Not detected" },
+        { diagInfo.byteButton2Ok, "OK",     "Not detected" },
         { diagInfo.sdOk || sd_mounted, sd_mounted ? "Mounted (SD_MMC)" : "Not mounted", "No card" },
     };
 
@@ -3236,7 +3237,9 @@ void ui_update_diagnostics() {
         if (!diag_rows_initialized || rows[i].val != prev_vals[i]) {
             prev_vals[i] = rows[i].val;
             if (i == 12) {
-                lv_label_set_text_fmt(diag_values[i], rows[i].val ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel);
+                lv_label_set_text_fmt(diag_values[i], rows[i].val ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[0]);
+            } else if (i == 13) {
+                lv_label_set_text_fmt(diag_values[i], rows[i].val ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[1]);
             } else {
                 lv_label_set_text(diag_values[i], rows[i].val ? rows[i].ok : rows[i].fail);
             }
@@ -3246,7 +3249,10 @@ void ui_update_diagnostics() {
     diag_rows_initialized = true;
 
     if (diag_values[12]) {
-        lv_label_set_text_fmt(diag_values[12], diagInfo.byteButtonOk ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel);
+        lv_label_set_text_fmt(diag_values[12], diagInfo.byteButton1Ok ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[0]);
+    }
+    if (diag_values[13]) {
+        lv_label_set_text_fmt(diag_values[13], diagInfo.byteButton2Ok ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[1]);
     }
 
     if (wifiConnected != prev_wifi_connected) {
@@ -3316,8 +3322,9 @@ void ui_update_diagnostics() {
                       (unsigned)dfRobotPotPos[1],
                       (unsigned)dfRobotPotPos[2],
                       (unsigned)dfRobotPotPos[3]);
-        lv_label_set_text_fmt(diag_runtime_values[11], "BB %s ch%d",
-                      byteButtonConnected ? "OK" : "NO", byteButtonHubChannel);
+        lv_label_set_text_fmt(diag_runtime_values[11], "BB1 %s ch%d | BB2 %s ch%d",
+                  byteButtonConnected[0] ? "OK" : "NO", byteButtonHubChannel[0],
+                  byteButtonConnected[1] ? "OK" : "NO", byteButtonHubChannel[1]);
 
         prev_ui_updates = ui_updates;
         prev_ui_skips = ui_skips;
@@ -3357,7 +3364,8 @@ void ui_update_diagnostics() {
             lv_obj_set_style_text_color(diag_runtime_values[10], diagInfo.dfrobotPotsOk ? RED808_SUCCESS : RED808_WARNING, 0);
         }
         if (diag_runtime_values[11]) {
-            lv_obj_set_style_text_color(diag_runtime_values[11], diagInfo.byteButtonOk ? RED808_SUCCESS : RED808_WARNING, 0);
+            bool allBbOk = diagInfo.byteButton1Ok && diagInfo.byteButton2Ok;
+            lv_obj_set_style_text_color(diag_runtime_values[11], allBbOk ? RED808_SUCCESS : RED808_WARNING, 0);
         }
     }
 }
@@ -4027,7 +4035,7 @@ static const char* const m5EncoderAssignNames[] = {
 };
 
 static void perf_update_bb_assignment_labels() {
-    for (int i = 0; i < BYTEBUTTON_BUTTONS; i++) {
+    for (int i = 0; i < BYTEBUTTON_TOTAL_BUTTONS; i++) {
         if (!perf_bb_action_labels[i]) continue;
         uint8_t action = byteButtonActionMap[i];
         if (action >= BB_ACTION_COUNT) action = BB_ACTION_MENU;
@@ -4037,7 +4045,7 @@ static void perf_update_bb_assignment_labels() {
 
 static void perf_bb_action_next_cb(lv_event_t* e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx < 0 || idx >= BYTEBUTTON_BUTTONS) return;
+    if (idx < 0 || idx >= BYTEBUTTON_TOTAL_BUTTONS) return;
     byteButtonActionMap[idx] = (uint8_t)((byteButtonActionMap[idx] + 1) % BB_ACTION_COUNT);
     perf_update_bb_assignment_labels();
     updateByteButtonLeds();
@@ -4058,19 +4066,24 @@ void ui_create_performance_screen() {
     int col1_x = 24, col2_x = 300;
     int section_gap = 8;
 
-    // ── SECTION: ByteButton (8 buttons) ──
+    // ── SECTION: ByteButton (16 buttons / 2 modules) ──
     lv_obj_t* bb_title = lv_label_create(scr_performance);
-    lv_label_set_text(bb_title, "M5 BYTEBUTTON  (8 Buttons, tap Bx to rotate action)");
+    lv_label_set_text(bb_title, "M5 BYTEBUTTON x2  (16 Buttons, tap Bx to rotate action)");
     lv_obj_set_style_text_font(bb_title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(bb_title, lv_color_hex(0x00D4FF), 0);
     lv_obj_set_pos(bb_title, col1_x, y);
     y += 24;
 
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < BYTEBUTTON_TOTAL_BUTTONS; i++) {
+        int bbCol = (i < 8) ? 0 : 1;
+        int bbRow = i % 8;
+        int baseX = (bbCol == 0) ? col1_x : (col1_x + 330);
+        int rowY = y + bbRow * 30;
+
         // Button number chip
         lv_obj_t* chip = lv_obj_create(scr_performance);
         lv_obj_set_size(chip, 42, 26);
-        lv_obj_set_pos(chip, col1_x, y);
+        lv_obj_set_pos(chip, baseX, rowY);
         lv_obj_set_style_bg_color(chip, lv_color_hex(0x1A3050), 0);
         lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(chip, 4, 0);
@@ -4082,7 +4095,7 @@ void ui_create_performance_screen() {
         lv_obj_add_event_cb(chip, perf_bb_action_next_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
 
         lv_obj_t* num = lv_label_create(chip);
-        lv_label_set_text_fmt(num, "B%d", i + 1);
+        lv_label_set_text_fmt(num, "B%02d", i + 1);
         lv_obj_set_style_text_font(num, &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(num, lv_color_hex(0x00D4FF), 0);
         lv_obj_center(num);
@@ -4092,7 +4105,7 @@ void ui_create_performance_screen() {
         lv_label_set_text(fn, "--");
         lv_obj_set_style_text_font(fn, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(fn, RED808_TEXT, 0);
-        lv_obj_set_pos(fn, col1_x + 52, y + 4);
+        lv_obj_set_pos(fn, baseX + 52, rowY + 4);
         perf_bb_action_labels[i] = fn;
 
         // In LIVE mode label (right side)
@@ -4101,11 +4114,11 @@ void ui_create_performance_screen() {
             lv_label_set_text_fmt(live_fn, "LIVE: Pad %d (%s)", i + 1, trackNames[i]);
             lv_obj_set_style_text_font(live_fn, &lv_font_montserrat_12, 0);
             lv_obj_set_style_text_color(live_fn, RED808_TEXT_DIM, 0);
-            lv_obj_set_pos(live_fn, col2_x, y + 5);
+            lv_obj_set_pos(live_fn, col2_x + 320, rowY + 5);
         }
-
-        y += 30;
     }
+
+    y += 8 * 30 + 4;
 
     perf_update_bb_assignment_labels();
 
