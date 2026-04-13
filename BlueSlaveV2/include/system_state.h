@@ -29,9 +29,9 @@ enum Screen {
 };
 
 enum FilterType {
-    FILTER_DELAY = 0,
-    FILTER_FLANGER,
-    FILTER_COMPRESSOR,
+    FILTER_FLANGER = 0,
+    FILTER_REVERB,
+    FILTER_PHASER,
     FILTER_COUNT = 3
 };
 

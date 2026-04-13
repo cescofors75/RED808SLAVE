@@ -67,7 +67,7 @@ const ThemeColors theme_presets[THEME_COUNT] = {
     // ── THEME_SUNSET — orange/purple ──
     {
         .bg = 0x1A0A14, .panel = 0x26101E, .surface = 0x381828, .border = 0x552244,
-        .text = 0xF5D0E0, .text_dim = 0xBF7B9E,
+        .text = 0xF5D0E0, .text_dim = 0xD099B8,
         .accent = 0xFF6B35, .accent2 = 0xFF8855,
         .success = 0xFFAA33, .warning = 0xFF6B35, .error = 0xFF3366, .info = 0xCC66FF, .cyan = 0xFF66AA,
         .led_uniform = 0xFF6B35,
@@ -102,19 +102,19 @@ const ThemeColors theme_presets[THEME_COUNT] = {
     },
     // ── THEME_GREYSCALE — pure monochrome, zero color ──
     {
-        .bg = 0x0E0E0E, .panel = 0x1A1A1A, .surface = 0x262626, .border = 0x3C3C3C,
-        .text = 0xD5D5D5, .text_dim = 0x777777,
-        .accent = 0xCCCCCC, .accent2 = 0xAAAAAA,
-        .success = 0x999999, .warning = 0x888888, .error = 0x666666, .info = 0xBBBBBB, .cyan = 0xFFFFFF,
+        .bg = 0x0E0E0E, .panel = 0x1A1A1A, .surface = 0x262626, .border = 0x4A4A4A,
+        .text = 0xE0E0E0, .text_dim = 0x999999,
+        .accent = 0xE8E8E8, .accent2 = 0xCCCCCC,
+        .success = 0xAAAAAA, .warning = 0x999999, .error = 0x777777, .info = 0xCCCCCC, .cyan = 0xFFFFFF,
         .led_uniform = 0xCCCCCC,
-        .nav_colors = {0x555555, 0x777777, 0x999999, 0xBBBBBB, 0xDDDDDD, 0x444444, 0x666666},
-        .pad_colors = {0x404040, 0x505050, 0x606060, 0x707070, 0x808080, 0x909090, 0xA0A0A0, 0xB0B0B0},
-        .encoder_rgb = {180, 180, 180},
+        .nav_colors = {0x666666, 0x888888, 0xAAAAAA, 0xCCCCCC, 0xDDDDDD, 0x555555, 0x777777},
+        .pad_colors = {0x505050, 0x606060, 0x707070, 0x808080, 0x909090, 0xA0A0A0, 0xB0B0B0, 0xC0C0C0},
+        .encoder_rgb = {200, 200, 200},
         .track_colors = {
-            0x333333, 0x404040, 0x4D4D4D, 0x5A5A5A,
-            0x666666, 0x737373, 0x808080, 0x8D8D8D,
-            0x999999, 0xA6A6A6, 0xB3B3B3, 0xC0C0C0,
-            0x3D3D3D, 0x575757, 0x717171, 0x8B8B8B
+            0x505050, 0x5C5C5C, 0x686868, 0x747474,
+            0x808080, 0x8C8C8C, 0x989898, 0xA4A4A4,
+            0xB0B0B0, 0xBCBCBC, 0xC8C8C8, 0xD4D4D4,
+            0x585858, 0x707070, 0x888888, 0xA0A0A0
         },
         .name = "GREYSCALE"
     },

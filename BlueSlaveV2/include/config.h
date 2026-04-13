@@ -235,14 +235,14 @@ namespace Config {
     constexpr int DF_FX_STEP = DF_FX_STEP_AGGR;
     constexpr uint32_t DF_BUTTON_GUARD_MS = 250;
     constexpr uint32_t DF_POT_READ_MS = 10;           // 100Hz poll for fast live response
-    constexpr uint8_t DF_POT_MIDI_DEADBAND = 1;       // faster updates, still filters tiny noise
+    constexpr uint8_t DF_POT_MIDI_DEADBAND = 2;       // ignore ±1 MIDI noise, send on ±2 change
     constexpr uint8_t DF_POT_STABLE_READS = 1;        // no extra hold before applying change
-    constexpr uint16_t DF_POT_MIN_SPAN = 16;          // avoid over-amplifying tiny noise windows
-    constexpr uint16_t DF_POT_RAW_IDLE_DB = 24;       // ignore tiny raw movement near rest
+    constexpr uint16_t DF_POT_MIN_SPAN = 8;           // lower threshold so narrow-range pots work sooner
+    constexpr uint16_t DF_POT_RAW_IDLE_DB = 12;       // tighter response, still filters idle noise
     constexpr uint8_t DF_POT_HYST_NUM = 35;           // detent hysteresis numerator (~0.35 step)
     constexpr uint8_t DF_POT_HYST_DEN = 100;          // detent hysteresis denominator
-    constexpr int DF_IDLE_DELTA_DB = 1;               // ignore ±1 encoder noise (passes ≥2)
-    constexpr int DF_NEAR_ZERO_REPEAT = 4;            // require repeat when delta magnitude <= this
+    constexpr int DF_IDLE_DELTA_DB = 0;               // pass all non-zero deltas (gain=10 gives clean steps)
+    constexpr int DF_NEAR_ZERO_REPEAT = 2;            // light jitter filter (require 2 same-direction reads)
 
     // M5 Unit Fader on analog pin (replaces old analog rotary)
     constexpr int UNIT_FADER_PIN = 6;        // GPIO6 signal pin

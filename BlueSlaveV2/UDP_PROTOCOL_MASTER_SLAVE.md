@@ -165,35 +165,280 @@
 
 ### 5. EFECTOS DE AUDIO
 
-#### Tipo de filtro
+#### 5.1 Filtro
+
+##### Tipo de filtro
 ```json
 {"cmd":"setFilter","type":1}
 ```
 - `type`: 0=None, 1=LowPass, 2=HighPass, 3=BandPass, 4=Notch
 
-#### Frecuencia de corte (20-20000 Hz)
+##### Frecuencia de corte (20-20000 Hz)
 ```json
 {"cmd":"setFilterCutoff","value":2000}
 ```
 
-#### Resonancia del filtro (0.1-10.0)
+##### Resonancia del filtro (0.1-10.0)
 ```json
 {"cmd":"setFilterResonance","value":3.0}
 ```
 
-#### Bit Crush (1-16 bits)
-```json
-{"cmd":"setBitCrush","value":8}
-```
+#### 5.2 Distorsión / Bit Crush / Sample Rate
 
-#### Distorsión (0.0-1.0)
+##### Distorsión (0.0-1.0)
 ```json
 {"cmd":"setDistortion","value":0.5}
 ```
 
-#### Reducción de Sample Rate (1000-44100 Hz)
+##### Modo de distorsión
+```json
+{"cmd":"setDistortionMode","value":1}
+```
+
+##### Bit Crush (1-16 bits)
+```json
+{"cmd":"setBitCrush","value":8}
+```
+
+##### Reducción de Sample Rate (1000-44100 Hz)
 ```json
 {"cmd":"setSampleRate","value":11025}
+```
+
+#### 5.3 Delay
+
+##### Activar/desactivar delay
+```json
+{"cmd":"setDelayActive","value":1}
+```
+- `value`: 0=off, 1=on
+
+##### Tiempo de delay
+```json
+{"cmd":"setDelayTime","value":300}
+```
+
+##### Feedback del delay
+```json
+{"cmd":"setDelayFeedback","value":0.4}
+```
+
+##### Mix del delay (0.0-1.0)
+```json
+{"cmd":"setDelayMix","value":0.5}
+```
+
+##### Stereo del delay
+```json
+{"cmd":"setDelayStereo","value":1}
+```
+
+#### 5.4 Reverb
+
+##### Activar/desactivar reverb
+```json
+{"cmd":"setReverbActive","value":1}
+```
+
+##### Feedback del reverb
+```json
+{"cmd":"setReverbFeedback","value":0.6}
+```
+
+##### Frecuencia LP del reverb
+```json
+{"cmd":"setReverbLpFreq","value":4000}
+```
+
+##### Mix del reverb (0.0-1.0)
+```json
+{"cmd":"setReverbMix","value":0.3}
+```
+
+##### Early reflections activo
+```json
+{"cmd":"setEarlyRefActive","value":1}
+```
+
+##### Early reflections mix
+```json
+{"cmd":"setEarlyRefMix","value":0.2}
+```
+
+#### 5.5 Chorus
+
+##### Activar/desactivar chorus
+```json
+{"cmd":"setChorusActive","value":1}
+```
+
+##### Rate del chorus
+```json
+{"cmd":"setChorusRate","value":1.5}
+```
+
+##### Depth del chorus
+```json
+{"cmd":"setChorusDepth","value":0.5}
+```
+
+##### Mix del chorus (0.0-1.0)
+```json
+{"cmd":"setChorusMix","value":0.4}
+```
+
+##### Stereo del chorus
+```json
+{"cmd":"setChorusStereo","value":1}
+```
+
+#### 5.6 Phaser
+
+##### Activar/desactivar phaser
+```json
+{"cmd":"setPhaserActive","value":1}
+```
+
+##### Rate del phaser
+```json
+{"cmd":"setPhaserRate","value":0.8}
+```
+
+##### Depth del phaser
+```json
+{"cmd":"setPhaserDepth","value":0.6}
+```
+
+##### Feedback del phaser
+```json
+{"cmd":"setPhaserFeedback","value":0.5}
+```
+
+#### 5.7 Flanger
+
+##### Activar/desactivar flanger
+```json
+{"cmd":"setFlangerActive","value":1}
+```
+
+##### Rate del flanger
+```json
+{"cmd":"setFlangerRate","value":0.3}
+```
+
+##### Depth del flanger
+```json
+{"cmd":"setFlangerDepth","value":0.7}
+```
+
+##### Feedback del flanger
+```json
+{"cmd":"setFlangerFeedback","value":0.5}
+```
+
+##### Mix del flanger (0.0-1.0)
+```json
+{"cmd":"setFlangerMix","value":0.5}
+```
+
+#### 5.8 Compressor
+
+##### Activar/desactivar compresor
+```json
+{"cmd":"setCompActive","value":1}
+```
+
+##### Threshold del compresor
+```json
+{"cmd":"setCompThreshold","value":-20}
+```
+
+##### Ratio del compresor
+```json
+{"cmd":"setCompRatio","value":4.0}
+```
+
+##### Attack del compresor
+```json
+{"cmd":"setCompAttack","value":10}
+```
+
+##### Release del compresor
+```json
+{"cmd":"setCompRelease","value":100}
+```
+
+##### Makeup gain del compresor
+```json
+{"cmd":"setCompMakeupGain","value":6}
+```
+
+#### 5.9 Tremolo
+
+##### Activar/desactivar tremolo
+```json
+{"cmd":"setTremoloActive","value":1}
+```
+
+##### Rate del tremolo
+```json
+{"cmd":"setTremoloRate","value":4.0}
+```
+
+##### Depth del tremolo
+```json
+{"cmd":"setTremoloDepth","value":0.7}
+```
+
+#### 5.10 Wavefolder / Limiter
+
+##### Wavefolder gain
+```json
+{"cmd":"setWavefolderGain","value":2.0}
+```
+
+##### Activar/desactivar limiter
+```json
+{"cmd":"setLimiterActive","value":1}
+```
+
+#### 5.11 Auto-Wah
+
+##### Activar/desactivar auto-wah
+```json
+{"cmd":"setAutoWahActive","value":1}
+```
+
+##### Nivel del auto-wah
+```json
+{"cmd":"setAutoWahLevel","value":0.6}
+```
+
+##### Mix del auto-wah
+```json
+{"cmd":"setAutoWahMix","value":0.5}
+```
+
+#### 5.12 Otros Efectos
+
+##### Stereo width
+```json
+{"cmd":"setStereoWidth","value":1.5}
+```
+
+##### Tape stop
+```json
+{"cmd":"setTapeStop","value":1}
+```
+
+##### Beat repeat
+```json
+{"cmd":"setBeatRepeat","value":1}
+```
+
+##### Master FX route
+```json
+{"cmd":"setMasterFxRoute","value":1}
 ```
 
 ---

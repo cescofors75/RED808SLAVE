@@ -86,10 +86,10 @@ volatile bool livePadsVisualDirty = false;
 TrackFilter trackFilters[Config::MAX_TRACKS];
 TrackFilter masterFilter = {false, 0, 0, 0};
 int filterSelectedTrack = -1;  // -1 = master
-int filterSelectedFX = FILTER_DELAY;
+int filterSelectedFX = FILTER_FLANGER;
 int fxFilterType = 0;
-int fxFilterCutoffHz = 2000;
-int fxFilterResonanceX10 = 30;
+int fxFilterCutoffHz = 20000;    // max (fully open) — pot at zero = no filtering
+int fxFilterResonanceX10 = 10;   // 1.0 Q — min
 int fxBitCrushBits = 16;
 int fxDistortionPercent = 0;
 int fxSampleRateHz = 44100;
@@ -218,7 +218,7 @@ uint8_t byteButtonActionMap[BYTEBUTTON_TOTAL_BUTTONS] = {
     BB_ACTION_FX_DESTROY
 };
 uint8_t dfFxParamMode[3] = {0, 0, 0};
-int dfFxParamValue[3] = {55, 40, 40};
+int dfFxParamValue[3] = {0, 0, 0};  // boot gate requires zero start
 bool dfFxMuted[3] = {false, false, false};
 bool analogFxMuted[3] = {false, false, false};
 uint16_t dfRobotPotRaw[DFROBOT_POT_COUNT] = {};
@@ -242,8 +242,8 @@ static constexpr int kByteButtonExpectedChannels[BYTEBUTTON_COUNT] = {BYTEBUTTON
 // FX response profile — replaces 6 individual switch-case functions
 struct FxProfile { int df_step; int accel_threshold; int accel_mult; uint32_t pot_read_ms; uint8_t pot_midi_db; uint8_t pot_stable; };
 static constexpr FxProfile kFxProfiles[] = {
-    /* PRECISION */ {2, 99, 1, 18, 2, 2},
-    /* LIVE      */ {6,  3, 2, 10, 1, 1},
+    /* PRECISION */ {1, 99, 1, 16, 2, 2},
+    /* LIVE      */ {2,  8, 2, 8,  1, 1},
 };
 static inline const FxProfile& fxp() { return kFxProfiles[fxResponseMode]; }
 
@@ -472,6 +472,16 @@ static void requestMasterSync(bool requestState) {
     if (requestState) {
         requestPatternFromMaster();
         requestTrackVolumesFromMaster();
+
+        // Reset all encoder FX to OFF on connection (clean slate)
+        { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerActive"; d["value"] = 0; sendUDPCommand(d); }
+        { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbActive";  d["value"] = 0; sendUDPCommand(d); }
+        { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserActive";  d["value"] = 0; sendUDPCommand(d); }
+        { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayActive";   d["value"] = 0; sendUDPCommand(d); }
+        { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusActive";  d["value"] = 0; sendUDPCommand(d); }
+        { JsonDocument d(&sramAllocator); d["cmd"] = "setFilter";        d["value"] = 0; sendUDPCommand(d); }
+        { JsonDocument d(&sramAllocator); d["cmd"] = "setDistortion";    d["value"] = 0.0f; sendUDPCommand(d); }
+        RED808_LOG_PRINTLN("[FX] All effects reset to OFF on connection");
     }
 }
 
@@ -1157,58 +1167,48 @@ void receiveUDPData() {
 // =============================================================================
 
 void sendFilterUDP(int track, int fxType) {
-    TrackFilter& f = (track == -1) ? masterFilter : trackFilters[track];
+    // Per-track FX not supported by master protocol — ignore.
+    if (track != -1) return;
 
-    if (track == -1) {
-        // Master effects
-        JsonDocument doc(&sramAllocator);
-        switch (fxType) {
-            case FILTER_DELAY:
-                doc["cmd"] = "setDelayActive"; doc["value"] = f.enabled ? 1 : 0; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setDelayTime"; doc["value"] = f.delayAmount; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setDelayFeedback"; doc["value"] = f.delayAmount / 2; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setDelayMix"; doc["value"] = f.delayAmount; sendUDPCommand(doc);
-                break;
-            case FILTER_FLANGER:
-                doc["cmd"] = "setFlangerActive"; doc["value"] = f.enabled ? 1 : 0; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setFlangerRate"; doc["value"] = f.flangerAmount; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setFlangerDepth"; doc["value"] = f.flangerAmount; sendUDPCommand(doc);
-                break;
-            case FILTER_COMPRESSOR:
-                doc["cmd"] = "setCompActive"; doc["value"] = f.enabled ? 1 : 0; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setCompThreshold"; doc["value"] = f.compAmount; sendUDPCommand(doc); doc.clear();
-                doc["cmd"] = "setCompRatio"; doc["value"] = f.compAmount / 2; sendUDPCommand(doc);
-                break;
+    TrackFilter& f = masterFilter;
+    float mix;
+    bool activating;
+
+    switch (fxType) {
+        case FILTER_FLANGER: {
+            mix = (float)f.delayAmount / 127.0f;
+            activating = (f.delayAmount > 0);
+            { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
+            if (activating) {
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerRate";     d["value"] = 0.3f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerDepth";    d["value"] = 0.7f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerFeedback"; d["value"] = 0.5f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerMix";      d["value"] = mix;  sendUDPCommand(d); }
+            }
+            break;
         }
-    } else {
-        // Per-track effects
-        JsonDocument doc(&sramAllocator);
-        switch (fxType) {
-            case FILTER_DELAY:
-                doc["cmd"] = "setTrackEcho";
-                doc["track"] = track;
-                doc["active"] = f.enabled;
-                doc["time"] = f.delayAmount;
-                doc["feedback"] = f.delayAmount / 2;
-                doc["mix"] = f.delayAmount;
-                break;
-            case FILTER_FLANGER:
-                doc["cmd"] = "setTrackFlanger";
-                doc["track"] = track;
-                doc["active"] = f.enabled;
-                doc["rate"] = f.flangerAmount;
-                doc["depth"] = f.flangerAmount;
-                doc["feedback"] = f.flangerAmount / 2;
-                break;
-            case FILTER_COMPRESSOR:
-                doc["cmd"] = "setTrackCompressor";
-                doc["track"] = track;
-                doc["active"] = f.enabled;
-                doc["threshold"] = f.compAmount;
-                doc["ratio"] = f.compAmount / 2;
-                break;
+        case FILTER_REVERB: {
+            mix = (float)f.flangerAmount / 127.0f;
+            activating = (f.flangerAmount > 0);
+            { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
+            if (activating) {
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbFeedback"; d["value"] = 0.6f;  sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbLpFreq";   d["value"] = 5000;  sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbMix";      d["value"] = mix;   sendUDPCommand(d); }
+            }
+            break;
         }
-        sendUDPCommand(doc);
+        case FILTER_PHASER: {
+            mix = (float)f.compAmount / 127.0f;
+            activating = (f.compAmount > 0);
+            { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
+            if (activating) {
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserRate";     d["value"] = 0.8f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserDepth";    d["value"] = 0.6f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserFeedback"; d["value"] = 0.5f; sendUDPCommand(d); }
+            }
+            break;
+        }
     }
 }
 
@@ -1291,140 +1291,76 @@ void handleDFRobotPots() {
 
     static bool potInit[DFROBOT_POT_COUNT] = {false, false, false, false};
     static uint16_t potFilteredRaw[DFROBOT_POT_COUNT] = {0, 0, 0, 0};
-    static uint16_t potAnchorRaw[DFROBOT_POT_COUNT] = {0, 0, 0, 0};
-    static uint8_t potCandidatePos[DFROBOT_POT_COUNT] = {0, 0, 0, 0};
-    static uint8_t potCandidateCount[DFROBOT_POT_COUNT] = {0, 0, 0, 0};
+    static uint8_t potLastMidi[DFROBOT_POT_COUNT] = {255, 255, 255, 255};
 
     for (int pot = 0; pot < DFROBOT_POT_COUNT; pot++) {
         uint16_t raw = sampleRaw[pot];
         if (!potInit[pot]) {
             potFilteredRaw[pot] = raw;
-            potAnchorRaw[pot] = raw;
             potInit[pot] = true;
-            // Seed calibration with first valid read so mapping is usable immediately.
-            dfRobotPotCalMin[pot] = (raw > 200) ? raw - 200 : 0;
-            dfRobotPotCalMax[pot] = raw + 200;
+            // First read = physical zero reference. Min is fixed here.
+            // Max starts slightly above so range expands only upward as user turns pot.
+            dfRobotPotCalMin[pot] = raw;
+            dfRobotPotCalMax[pot] = raw;  // no span yet → holds at MIDI 0 until pot moves
         } else {
-            // 1st-order low-pass: smooth random ADC fluctuations at rest.
-            if (fxResponseMode == FX_MODE_PRECISION) {
-                potFilteredRaw[pot] = (uint16_t)((potFilteredRaw[pot] * 7U + raw) / 8U);
-            } else {
-                potFilteredRaw[pot] = (uint16_t)((potFilteredRaw[pot] * 3U + raw) / 4U);
-            }
+            // Light low-pass: 50/50 — tracks pot movement quickly, still smooths single-sample spikes.
+            potFilteredRaw[pot] = (uint16_t)((potFilteredRaw[pot] + (uint32_t)raw) / 2U);
         }
         raw = potFilteredRaw[pot];
-
-        // Hold value around a stable anchor to suppress idle wander.
-        int idleDb = Config::DF_POT_RAW_IDLE_DB;
-        if (fxResponseMode == FX_MODE_LIVE) idleDb = (Config::DF_POT_RAW_IDLE_DB * 2) / 3;
-        if (abs((int)raw - (int)potAnchorRaw[pot]) <= idleDb) {
-            raw = potAnchorRaw[pot];
-        } else {
-            potAnchorRaw[pot] = raw;
-        }
         dfRobotPotRaw[pot] = raw;
 
-        // Adaptive calibration per pot to expand narrow ADC spans (e.g. 77..96)
+        // Adaptive calibration — expands range as pot is moved.
         if (raw < dfRobotPotCalMin[pot]) dfRobotPotCalMin[pot] = raw;
         if (raw > dfRobotPotCalMax[pot]) dfRobotPotCalMax[pot] = raw;
 
         uint16_t minV = dfRobotPotCalMin[pot];
         uint16_t maxV = dfRobotPotCalMax[pot];
-        uint8_t pos = dfRobotPotPos[pot];
-        if (maxV > minV + 8) {
-            long mapped = map((long)raw, (long)minV, (long)maxV, 0L, 11L);
-            pos = (uint8_t)constrain((int)mapped, 0, 11);
 
-            // Hysteresis around detent boundaries to avoid oscillation at rest.
-            uint8_t cur = dfRobotPotPos[pot];
-            int span = (int)(maxV - minV);
-            int hys = (span * Config::DF_POT_HYST_NUM) / (11 * Config::DF_POT_HYST_DEN);
-            if (hys < 1) hys = 1;
-            if (pos > cur && cur < 11) {
-                long boundary = (long)minV + ((long)(2 * cur + 1) * (long)span) / 22L;
-                if ((long)raw < (boundary + hys)) pos = cur;
-            } else if (pos < cur && cur > 0) {
-                long boundary = (long)minV + ((long)(2 * cur - 1) * (long)span) / 22L;
-                if ((long)raw > (boundary - hys)) pos = cur;
-            }
+        // Map directly to MIDI 0..127 using calibrated range.
+        uint8_t midi;
+        if (maxV > minV + Config::DF_POT_MIN_SPAN) {
+            long mapped = map((long)raw, (long)minV, (long)maxV, 0L, 127L);
+            midi = (uint8_t)constrain((int)mapped, 0, 127);
         } else {
-            // Not enough travel captured yet; keep current detent value stable.
-            pos = dfRobotPotPos[pot];
+            // Not enough travel yet — hold previous value.
+            midi = (potLastMidi[pot] != 255) ? potLastMidi[pot] : 0;
         }
 
-        if ((maxV - minV) < Config::DF_POT_MIN_SPAN) {
-            // Tiny window means we're likely seeing idle jitter; skip remap.
-            pos = dfRobotPotPos[pot];
-        }
+        // Also update detent position (12 steps) for diagnostics display.
+        dfRobotPotPos[pot] = (uint8_t)constrain((int)((midi * 11U) / 127U), 0, 11);
+        dfRobotPotMidi[pot] = midi;
 
-        // Require a detent to be observed in consecutive reads before accepting.
-        if (pos != dfRobotPotPos[pot]) {
-            if (potCandidatePos[pot] == pos) {
-                if (potCandidateCount[pot] < 255) potCandidateCount[pot]++;
-            } else {
-                potCandidatePos[pot] = pos;
-                potCandidateCount[pot] = 1;
-            }
-            if (potCandidateCount[pot] >= fxp().pot_stable) {
-                dfRobotPotPos[pot] = pos;
-                potCandidateCount[pot] = 0;
-            } else {
-                pos = dfRobotPotPos[pot];
-            }
-        } else {
-            potCandidateCount[pot] = 0;
+        // Hysteresis: only send when change exceeds deadband.
+        if (potLastMidi[pot] != 255) {
+            int delta = abs((int)midi - (int)potLastMidi[pot]);
+            if (delta < fxp().pot_midi_db) continue;
         }
-
-        uint8_t midi = (uint8_t)((pos * 127U) / 11U);
-        uint8_t midiFast = midi;
-        if (maxV > minV + 8) {
-            long mappedMidi = map((long)raw, (long)minV, (long)maxV, 0L, 127L);
-            midiFast = (uint8_t)constrain((int)mappedMidi, 0, 127);
-        }
-        dfRobotPotMidi[pot] = midiFast;
-
-        bool sendNow = false;
-        if (dfRobotPotPosLastSent[pot] == 255 || dfRobotPotPosLastSent[pot] != pos) {
-            sendNow = true;
-        } else if (dfRobotPotLastSent[pot] == 255) {
-            sendNow = true;
-        } else {
-            int delta = abs((int)midiFast - (int)dfRobotPotLastSent[pot]);
-            sendNow = delta >= fxp().pot_midi_db;
-        }
-        if (!sendNow) continue;
-
-        dfRobotPotPosLastSent[pot] = pos;
-        dfRobotPotLastSent[pot] = midiFast;
+        potLastMidi[pot] = midi;
+        dfRobotPotLastSent[pot] = midi;
+        dfRobotPotPosLastSent[pot] = dfRobotPotPos[pot];
 
         JsonDocument doc(&sramAllocator);
         if (pot == 0) {
-            // P1: Master volume with explicit 12 detents mapped to 0..150.
-            int newVol = (int)lroundf(((float)pos / 11.0f) * (float)Config::MAX_VOLUME);
+            // P1: Master volume — continuous 0..150 from MIDI 0..127.
+            int newVol = (int)lroundf(((float)midi / 127.0f) * (float)Config::MAX_VOLUME);
             applyUnifiedMasterVolume(newVol, true);
         } else {
             // P2/P3/P4: direct analog FX controls (no scene macros).
-            float tFast = (float)midiFast / 127.0f;
+            float t = (float)midi / 127.0f;
             if (pot == 1) {
-                // 20..20000 Hz (log-like curve for useful low-end resolution).
-                float hz = 20.0f * powf(1000.0f, tFast);
-                fxFilterCutoffHz = constrain((int)lroundf(hz), 20, 20000);
-                if (!analogFxMuted[0]) {
-                    doc["cmd"] = "setFilterCutoff";
-                    doc["value"] = fxFilterCutoffHz;
-                    sendUDPCommand(doc);
-                }
+                // P2: disabled (cutoff removed)
+                (void)t;
             } else if (pot == 2) {
                 // 1.0 .. 10.0 Q
-                fxFilterResonanceX10 = constrain((int)lroundf(10.0f + tFast * 90.0f), 10, 100);
+                fxFilterResonanceX10 = constrain((int)lroundf(10.0f + t * 90.0f), 10, 100);
                 if (!analogFxMuted[1]) {
                     doc["cmd"] = "setFilterResonance";
                     doc["value"] = (float)fxFilterResonanceX10 / 10.0f;
                     sendUDPCommand(doc);
                 }
             } else {
-                // 0 .. 100% distortion drive
-                fxDistortionPercent = constrain((int)lroundf(tFast * 100.0f), 0, 100);
+                // P4: Distortion drive (0.0 – 1.0)
+                fxDistortionPercent = constrain((int)lroundf(t * 100.0f), 0, 100);
                 if (!analogFxMuted[2]) {
                     doc["cmd"] = "setDistortion";
                     doc["value"] = (float)fxDistortionPercent / 100.0f;
@@ -1438,8 +1374,8 @@ void handleDFRobotPots() {
 static void sendAnalogFxParamNow(int lane) {
     JsonDocument doc(&sramAllocator);
     if (lane == 0) {
-        doc["cmd"] = "setFilterCutoff";
-        doc["value"] = analogFxMuted[0] ? 20 : fxFilterCutoffHz;
+        // P2: cutoff removed — do nothing
+        return;
     } else if (lane == 1) {
         doc["cmd"] = "setFilterResonance";
         doc["value"] = analogFxMuted[1] ? 1.0f : ((float)fxFilterResonanceX10 / 10.0f);
@@ -1502,7 +1438,7 @@ void scanI2CHub() {
                 i2c_hub_select_raw(ch);
                 if (dfEncoders[dfFound]->begin() == 0) {
                     dfEncoderConnected[dfFound] = true;
-                    dfEncoders[dfFound]->setGainCoefficient(12);
+                    dfEncoders[dfFound]->setGainCoefficient(10);
                     // Stabilize startup: set a known center and baseline to avoid first-read jumps
                     dfEncoders[dfFound]->setEncoderValue(512);
                     prevDFValue[dfFound] = 512;
@@ -2017,7 +1953,7 @@ void handleM5Encoders() {
 
 void handleDFRobotEncoders() {
     static unsigned long lastBtnMs[DFROBOT_ENCODER_COUNT] = {};
-    static int laneStoredValue[3] = {55, 40, 40};
+    static int laneStoredValue[3] = {0, 0, 0};
 
     auto syncMasterEnabled = [&]() {
         masterFilter.enabled = (masterFilter.delayAmount > 0 ||
@@ -2027,20 +1963,36 @@ void handleDFRobotEncoders() {
 
     auto sendFxLane = [&](int lane, int value, bool muted) {
         int effective = muted ? 0 : constrain(value, 0, 127);
-        JsonDocument doc(&sramAllocator);
+        float mix = (float)effective / 127.0f;
+        bool activating = (effective > 0);
 
         if (lane == 0) {
-            doc["cmd"] = "setDelayActive"; doc["value"] = effective > 0 ? 1 : 0; sendUDPCommand(doc); doc.clear();
-            doc["cmd"] = "setDelayMix"; doc["value"] = effective; sendUDPCommand(doc);
+            // Encoder 0 → Flanger
+            { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
+            if (activating) {
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerRate";     d["value"] = 0.3f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerDepth";    d["value"] = 0.7f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerFeedback"; d["value"] = 0.5f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerMix";      d["value"] = mix;  sendUDPCommand(d); }
+            }
             masterFilter.delayAmount = (uint8_t)effective;
         } else if (lane == 1) {
-            doc["cmd"] = "setFlangerActive"; doc["value"] = effective > 0 ? 1 : 0; sendUDPCommand(doc); doc.clear();
-            doc["cmd"] = "setFlangerDepth"; doc["value"] = effective; sendUDPCommand(doc);
+            // Encoder 1 → Reverb
+            { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
+            if (activating) {
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbFeedback"; d["value"] = 0.6f;  sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbLpFreq";   d["value"] = 5000;  sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbMix";      d["value"] = mix;   sendUDPCommand(d); }
+            }
             masterFilter.flangerAmount = (uint8_t)effective;
         } else {
-            doc["cmd"] = "setCompActive"; doc["value"] = effective > 0 ? 1 : 0; sendUDPCommand(doc); doc.clear();
-            doc["cmd"] = "setCompThreshold"; doc["value"] = effective; sendUDPCommand(doc); doc.clear();
-            doc["cmd"] = "setCompRatio"; doc["value"] = constrain(1 + effective / 14, 1, 10); sendUDPCommand(doc);
+            // Encoder 2 → Phaser
+            { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
+            if (activating) {
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserRate";     d["value"] = 0.8f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserDepth";    d["value"] = 0.6f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserFeedback"; d["value"] = 0.5f; sendUDPCommand(d); }
+            }
             masterFilter.compAmount = (uint8_t)effective;
         }
 
@@ -2082,8 +2034,8 @@ void handleDFRobotEncoders() {
 
         // Process results outside of I2C lock
         if (i < 3) {
-            // DFRobot #0/#1/#2: FX lanes (Delay/Flanger/Compressor). Button toggles mute.
-            static const char* laneNames[] = {"Delay", "Flanger", "Comp"};
+            // DFRobot #0/#1/#2: FX lanes (Flanger/Reverb/Phaser). Button toggles mute.
+            static const char* laneNames[] = {"Flanger", "Reverb", "Phaser"};
             int lane = i;
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
@@ -2107,8 +2059,8 @@ void handleDFRobotEncoders() {
             // Unit Fader handles fine 0.1 tuning; rotary uses 1 BPM steps + acceleration.
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                int bpmStep = (abs(logical_delta) >= 3) ? 2 : 1;
-                float newBpm = currentBPMPrecise + (float)(logical_delta > 0 ? bpmStep : -bpmStep);
+                // Each logical step = 1 BPM (gain=10, COUNTS_PER_STEP=2 → ~5 BPM/click).
+                float newBpm = currentBPMPrecise + (float)logical_delta;
                 applyBPMPrecise(newBpm, true);
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {

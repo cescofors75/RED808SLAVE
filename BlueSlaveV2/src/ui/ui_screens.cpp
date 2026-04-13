@@ -903,11 +903,13 @@ static void live_sync_cb(lv_event_t* e) {
     livePadSyncMode = !livePadSyncMode;
     if (live_sync_btn) {
         lv_obj_set_style_bg_color(live_sync_btn,
-            livePadSyncMode ? lv_color_hex(0xFFD700) : RED808_SURFACE, 0);
+            livePadSyncMode ? RED808_ACCENT : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(live_sync_btn,
+            livePadSyncMode ? RED808_ACCENT : RED808_ACCENT, 0);
     }
     if (live_sync_lbl) {
         lv_obj_set_style_text_color(live_sync_lbl,
-            livePadSyncMode ? RED808_BG : RED808_TEXT_DIM, 0);
+            livePadSyncMode ? RED808_BG : RED808_TEXT, 0);
     }
 }
 
@@ -1026,7 +1028,7 @@ void ui_create_live_screen() {
         lv_obj_t* pad = lv_obj_create(scr_live);
         lv_obj_set_size(pad, default_pad_w, h);
         lv_obj_set_pos(pad, x, y);
-        lv_obj_clear_flag(pad, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(pad, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
         // Dark card base with colored left accent bar
         lv_obj_set_style_bg_color(pad, RED808_SURFACE, 0);
@@ -1046,7 +1048,7 @@ void ui_create_live_screen() {
         lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(accent, 3, 0);
         lv_obj_set_style_border_width(accent, 0, 0);
-        lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
         live_pad_accents[i] = accent;
 
         // Track name — large, left-aligned after accent
@@ -1073,7 +1075,7 @@ void ui_create_live_screen() {
         lv_obj_set_style_bg_opa(glow, LV_OPA_40, 0);
         lv_obj_set_style_radius(glow, 1, 0);
         lv_obj_set_style_border_width(glow, 0, 0);
-        lv_obj_clear_flag(glow, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(glow, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
         live_pad_glows[i] = glow;
 
         live_pads[i] = pad;
@@ -1088,15 +1090,15 @@ void ui_create_live_screen() {
     lv_obj_set_size(live_sync_btn, 120, 34);
     lv_obj_set_pos(live_sync_btn, (UI_W - 120) / 2, LIVE_PAD_AREA_TOP - 34);
     lv_obj_clear_flag(live_sync_btn, LV_OBJ_FLAG_SCROLLABLE);
-    apply_stable_button_style(live_sync_btn, RED808_SURFACE, lv_color_hex(0xFFD700));
+    apply_stable_button_style(live_sync_btn, RED808_SURFACE, RED808_ACCENT);
     lv_obj_set_style_radius(live_sync_btn, 8, 0);
-    lv_obj_set_style_border_width(live_sync_btn, 1, 0);
+    lv_obj_set_style_border_width(live_sync_btn, 2, 0);
     lv_obj_add_event_cb(live_sync_btn, live_sync_cb, LV_EVENT_PRESSED, NULL);
 
     live_sync_lbl = lv_label_create(live_sync_btn);
     lv_label_set_text(live_sync_lbl, LV_SYMBOL_REFRESH " SYNC");
     lv_obj_set_style_text_font(live_sync_lbl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(live_sync_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_set_style_text_color(live_sync_lbl, RED808_TEXT, 0);
     lv_obj_center(live_sync_lbl);
 
     // Ratchet controls — right side of pad grid: [ - ] Nx [ + ]
@@ -2169,18 +2171,18 @@ void ui_update_menu_status() {
 // ============================================================================
 static uint8_t filter_get_amount(const TrackFilter& filter, int fxIndex) {
     switch (fxIndex) {
-        case FILTER_DELAY: return filter.delayAmount;
-        case FILTER_FLANGER: return filter.flangerAmount;
-        case FILTER_COMPRESSOR: return filter.compAmount;
+        case FILTER_FLANGER: return filter.delayAmount;
+        case FILTER_REVERB: return filter.flangerAmount;
+        case FILTER_PHASER: return filter.compAmount;
         default: return 0;
     }
 }
 
 static void filter_set_amount(TrackFilter& filter, int fxIndex, uint8_t value) {
     switch (fxIndex) {
-        case FILTER_DELAY: filter.delayAmount = value; break;
-        case FILTER_FLANGER: filter.flangerAmount = value; break;
-        case FILTER_COMPRESSOR: filter.compAmount = value; break;
+        case FILTER_FLANGER: filter.delayAmount = value; break;
+        case FILTER_REVERB: filter.flangerAmount = value; break;
+        case FILTER_PHASER: filter.compAmount = value; break;
         default: break;
     }
 }
@@ -2344,7 +2346,7 @@ static void filter_response_mode_cb(lv_event_t* e) {
 }
 
 void ui_create_filters_screen() {
-    static const char* fx_names[] = {"DELAY", "FLANGER", "COMP"};
+    static const char* fx_names[] = {"FLANGER", "REVERB", "PHASER"};
     static const lv_color_t fx_colors[] = {
         lv_color_hex(0x58A6FF),
         lv_color_hex(0x39D2C0),
@@ -2418,7 +2420,7 @@ void ui_create_filters_screen() {
     lv_obj_set_style_pad_all(compact_panel, 0, 0);
     lv_obj_move_foreground(compact_panel);
 
-    static const char* laneNames[] = {"DELAY", "FLANGER", "COMP", "CUTOFF", "RESONANCE", "DRIVE"};
+    static const char* laneNames[] = {"FLANGER", "REVERB", "PHASER", "---", "RESONANCE", "DRIVE"};
     static const char* laneSources[] = {"DF-1", "DF-2", "DF-3", "P2", "P3", "P4"};
     static const lv_color_t laneColors[] = {
         lv_color_hex(0x58A6FF),
@@ -2489,7 +2491,7 @@ void ui_create_filters_screen() {
 
         int initValue = 0;
         if (cell < 3) initValue = constrain(dfFxParamValue[cell], 0, 127);
-        else if (cell == 3) initValue = analogFxMuted[0] ? 0 : filter_cutoff_to_slider(fxFilterCutoffHz);
+        else if (cell == 3) initValue = 0; // cutoff removed
         else if (cell == 4) initValue = analogFxMuted[1] ? 0 : constrain(((fxFilterResonanceX10 - 10) * 127) / 90, 0, 127);
         else initValue = analogFxMuted[2] ? 0 : constrain((fxDistortionPercent * 127) / 100, 0, 127);
 
@@ -2894,7 +2896,7 @@ void ui_update_filters() {
     }
 
     int analogRaw[3] = {
-        filter_cutoff_to_slider(fxFilterCutoffHz),
+        0,  // cutoff removed
         constrain(((fxFilterResonanceX10 - 10) * 127) / 90, 0, 127),
         constrain((fxDistortionPercent * 127) / 100, 0, 127)
     };
@@ -2926,8 +2928,7 @@ void ui_update_filters() {
 
         if (filter_df_value_labels[i]) {
             if (i == 3) {
-                if (fxFilterCutoffHz >= 1000) lv_label_set_text_fmt(filter_df_value_labels[i], "%d.%dk", fxFilterCutoffHz / 1000, (fxFilterCutoffHz % 1000) / 100);
-                else lv_label_set_text_fmt(filter_df_value_labels[i], "%d", fxFilterCutoffHz);
+                lv_label_set_text(filter_df_value_labels[i], "---");
             } else if (i == 4) {
                 lv_label_set_text_fmt(filter_df_value_labels[i], "%d.%d", fxFilterResonanceX10 / 10, fxFilterResonanceX10 % 10);
             } else {
@@ -2937,7 +2938,7 @@ void ui_update_filters() {
 
         if (filter_df_unit_labels[i]) {
             if (i == 3) {
-                lv_label_set_text(filter_df_unit_labels[i], fxFilterCutoffHz >= 1000 ? "kHz" : "Hz");
+                lv_label_set_text(filter_df_unit_labels[i], "");
             } else if (i == 4) {
                 lv_label_set_text(filter_df_unit_labels[i], "Q");
             } else {
@@ -4414,7 +4415,7 @@ static void boot_timer_cb(lv_timer_t* timer) {
         boot_state++;
 
         if (boot_state == kBootLineCount) {
-            // All lines shown — auto-navigate to menu (no tap needed)
+            // All POST lines shown — go to menu
             lv_timer_del(timer);
             boot_timer = NULL;
             nav_to(SCREEN_MENU, scr_menu);
@@ -4531,6 +4532,7 @@ void ui_create_boot_screen() {
     lv_obj_align(footer_lbl, LV_ALIGN_BOTTOM_MID, 0, -36);
 
     boot_state = 0;
+
     boot_timer = lv_timer_create(boot_timer_cb, 40, NULL);
 }
 
