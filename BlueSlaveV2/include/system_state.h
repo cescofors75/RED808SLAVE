@@ -25,7 +25,7 @@ enum Screen {
     SCREEN_PERFORMANCE,
     SCREEN_SAMPLES,
     SCREEN_SEQ_CIRCLE,
-    SCREEN_ENCODER_TEST
+    SCREEN_COUNT          // keep last — used for array sizing
 };
 
 enum FilterType {

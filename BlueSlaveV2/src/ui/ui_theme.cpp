@@ -358,7 +358,7 @@ void ui_theme_apply(VisualTheme theme) {
     }
     if (anyByteButtonLedInit) {
         for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
-            for (int i = 0; i < 9; i++) byteButtonLedCache[m][i] = 0xDEAD;
+            for (int i = 0; i < (BYTEBUTTON_BUTTONS + 1); i++) byteButtonLedCache[m][i] = 0xDEAD;
         }
     }
 

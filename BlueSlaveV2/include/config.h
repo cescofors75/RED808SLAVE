@@ -227,14 +227,13 @@ namespace Config {
     // DFRobot rotary tuning
     constexpr int DF_DELTA_CLAMP = 16;
     constexpr int DF_GLITCH_THRESHOLD = 64;
-    constexpr int DF_COUNTS_PER_STEP = 4;
+    constexpr int DF_COUNTS_PER_STEP = 2;
     constexpr int DF_VOLUME_STEP = 3;   // Master volume change per encoder step
     constexpr int DF_BPM_STEP = 1;      // BPM change per encoder step
     constexpr int DF_FX_STEP_FINE = 4;  // DF1-DF3 sensitivity (fine)
     constexpr int DF_FX_STEP_AGGR = 8;  // DF1-DF3 sensitivity (aggressive)
     constexpr int DF_FX_STEP = DF_FX_STEP_AGGR;
     constexpr uint32_t DF_BUTTON_GUARD_MS = 250;
-    constexpr uint32_t LIVE_PAD_REPEAT_MS = 50;       // (legacy, kept for reference)
     constexpr uint32_t DF_POT_READ_MS = 10;           // 100Hz poll for fast live response
     constexpr uint8_t DF_POT_MIDI_DEADBAND = 1;       // faster updates, still filters tiny noise
     constexpr uint8_t DF_POT_STABLE_READS = 1;        // no extra hold before applying change
@@ -242,7 +241,7 @@ namespace Config {
     constexpr uint16_t DF_POT_RAW_IDLE_DB = 24;       // ignore tiny raw movement near rest
     constexpr uint8_t DF_POT_HYST_NUM = 35;           // detent hysteresis numerator (~0.35 step)
     constexpr uint8_t DF_POT_HYST_DEN = 100;          // detent hysteresis denominator
-    constexpr int DF_IDLE_DELTA_DB = 2;               // ignore tiny delta chatter on DFRobot rotary
+    constexpr int DF_IDLE_DELTA_DB = 1;               // ignore ±1 encoder noise (passes ≥2)
     constexpr int DF_NEAR_ZERO_REPEAT = 4;            // require repeat when delta magnitude <= this
 
     // M5 Unit Fader on analog pin (replaces old analog rotary)

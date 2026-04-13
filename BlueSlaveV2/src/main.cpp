@@ -46,6 +46,7 @@ struct SramAllocator : ArduinoJson::Allocator {
     }
 };
 static SramAllocator sramAllocator;
+ArduinoJson::Allocator* sramAllocatorPtr = &sramAllocator;
 
 // =============================================================================
 // GLOBAL STATE DEFINITIONS
@@ -210,7 +211,7 @@ uint8_t byteButtonActionMap[BYTEBUTTON_TOTAL_BUTTONS] = {
     BB_ACTION_SCREEN_LIVE,
     BB_ACTION_SCREEN_SEQUENCER,
     BB_ACTION_SCREEN_VOLUMES,
-    BB_ACTION_SCREEN_FILTERS,
+    BB_ACTION_FX_DESTROY,
     BB_ACTION_FX_TARGET_PREV,
     BB_ACTION_FX_TARGET_NEXT,
     BB_ACTION_VOL_MODE,
@@ -238,53 +239,13 @@ static constexpr uint8_t BYTEBUTTON_LED_USER_DEFINED = 0;
 static constexpr uint8_t BYTEBUTTON_BRIGHTNESS = 180;
 static constexpr int kByteButtonExpectedChannels[BYTEBUTTON_COUNT] = {BYTEBUTTON1_HUB_CH, BYTEBUTTON2_HUB_CH};
 
-static int fx_df_step() {
-    switch (fxResponseMode) {
-        case FX_MODE_PRECISION: return 2;
-        case FX_MODE_LIVE:
-        default: return 6;
-    }
-}
-
-static int fx_df_accel_threshold() {
-    switch (fxResponseMode) {
-        case FX_MODE_PRECISION: return 99;
-        case FX_MODE_LIVE:
-        default: return 3;
-    }
-}
-
-static int fx_df_accel_mult() {
-    switch (fxResponseMode) {
-        case FX_MODE_PRECISION: return 1;
-        case FX_MODE_LIVE:
-        default: return 2;
-    }
-}
-
-static uint32_t fx_pot_read_ms() {
-    switch (fxResponseMode) {
-        case FX_MODE_PRECISION: return 18;
-        case FX_MODE_LIVE:
-        default: return 10;
-    }
-}
-
-static uint8_t fx_pot_midi_deadband() {
-    switch (fxResponseMode) {
-        case FX_MODE_PRECISION: return 2;
-        case FX_MODE_LIVE:
-        default: return 1;
-    }
-}
-
-static uint8_t fx_pot_stable_reads() {
-    switch (fxResponseMode) {
-        case FX_MODE_PRECISION: return 2;
-        case FX_MODE_LIVE:
-        default: return 1;
-    }
-}
+// FX response profile — replaces 6 individual switch-case functions
+struct FxProfile { int df_step; int accel_threshold; int accel_mult; uint32_t pot_read_ms; uint8_t pot_midi_db; uint8_t pot_stable; };
+static constexpr FxProfile kFxProfiles[] = {
+    /* PRECISION */ {2, 99, 1, 18, 2, 2},
+    /* LIVE      */ {6,  3, 2, 10, 1, 1},
+};
+static inline const FxProfile& fxp() { return kFxProfiles[fxResponseMode]; }
 
 static uint32_t ui_refresh_interval_ms(Screen screen, bool playing_now) {
     switch (screen) {
@@ -1300,7 +1261,7 @@ void handleDFRobotPots() {
 
     static unsigned long lastReadMs = 0;
     unsigned long now = millis();
-    if ((now - lastReadMs) < fx_pot_read_ms()) return;
+    if ((now - lastReadMs) < fxp().pot_read_ms) return;
     lastReadMs = now;
 
     bool readOk = false;
@@ -1340,6 +1301,9 @@ void handleDFRobotPots() {
             potFilteredRaw[pot] = raw;
             potAnchorRaw[pot] = raw;
             potInit[pot] = true;
+            // Seed calibration with first valid read so mapping is usable immediately.
+            dfRobotPotCalMin[pot] = (raw > 200) ? raw - 200 : 0;
+            dfRobotPotCalMax[pot] = raw + 200;
         } else {
             // 1st-order low-pass: smooth random ADC fluctuations at rest.
             if (fxResponseMode == FX_MODE_PRECISION) {
@@ -1401,7 +1365,7 @@ void handleDFRobotPots() {
                 potCandidatePos[pot] = pos;
                 potCandidateCount[pot] = 1;
             }
-            if (potCandidateCount[pot] >= fx_pot_stable_reads()) {
+            if (potCandidateCount[pot] >= fxp().pot_stable) {
                 dfRobotPotPos[pot] = pos;
                 potCandidateCount[pot] = 0;
             } else {
@@ -1426,7 +1390,7 @@ void handleDFRobotPots() {
             sendNow = true;
         } else {
             int delta = abs((int)midiFast - (int)dfRobotPotLastSent[pot]);
-            sendNow = delta >= fx_pot_midi_deadband();
+            sendNow = delta >= fxp().pot_midi_db;
         }
         if (!sendNow) continue;
 
@@ -2117,71 +2081,35 @@ void handleDFRobotEncoders() {
         i2c_unlock();
 
         // Process results outside of I2C lock
-        if (i == 0) {
-            // DFRobot #0: Delay lane. Button toggles mute for this FX lane.
+        if (i < 3) {
+            // DFRobot #0/#1/#2: FX lanes (Delay/Flanger/Compressor). Button toggles mute.
+            static const char* laneNames[] = {"Delay", "Flanger", "Comp"};
+            int lane = i;
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                int accel = (abs(logical_delta) >= fx_df_accel_threshold()) ? fx_df_accel_mult() : 1;
-                int newVal = constrain(laneStoredValue[0] + logical_delta * fx_df_step() * accel, 0, 127);
-                if (newVal != laneStoredValue[0]) {
-                    laneStoredValue[0] = newVal;
-                    if (!dfFxMuted[0]) sendFxLane(0, laneStoredValue[0], false);
-                    dfFxParamValue[0] = laneStoredValue[0];
+                int accel = (abs(logical_delta) >= fxp().accel_threshold) ? fxp().accel_mult : 1;
+                int newVal = constrain(laneStoredValue[lane] + logical_delta * fxp().df_step * accel, 0, 127);
+                if (newVal != laneStoredValue[lane]) {
+                    laneStoredValue[lane] = newVal;
+                    if (!dfFxMuted[lane]) sendFxLane(lane, laneStoredValue[lane], false);
+                    dfFxParamValue[lane] = laneStoredValue[lane];
                 }
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();
-                dfFxMuted[0] = !dfFxMuted[0];
-                sendFxLane(0, laneStoredValue[0], dfFxMuted[0]);
-                RED808_LOG_PRINTF("[DFRobot] Delay lane %s\n", dfFxMuted[0] ? "MUTED" : "UNMUTED");
-            }
-        }
-        else if (i == 1) {
-            // DFRobot #1: Flanger lane. Button toggles mute for this FX lane.
-            int logical_delta = quantizeDFDelta(i, delta);
-            if (logical_delta != 0) {
-                int accel = (abs(logical_delta) >= fx_df_accel_threshold()) ? fx_df_accel_mult() : 1;
-                int newVal = constrain(laneStoredValue[1] + logical_delta * fx_df_step() * accel, 0, 127);
-                if (newVal != laneStoredValue[1]) {
-                    laneStoredValue[1] = newVal;
-                    if (!dfFxMuted[1]) sendFxLane(1, laneStoredValue[1], false);
-                    dfFxParamValue[1] = laneStoredValue[1];
-                }
-            }
-            if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
-                lastBtnMs[i] = millis();
-                dfFxMuted[1] = !dfFxMuted[1];
-                sendFxLane(1, laneStoredValue[1], dfFxMuted[1]);
-                RED808_LOG_PRINTF("[DFRobot] Flanger lane %s\n", dfFxMuted[1] ? "MUTED" : "UNMUTED");
-            }
-        }
-        else if (i == 2) {
-            // DFRobot #2: Compressor lane. Button toggles mute for this FX lane.
-            int logical_delta = quantizeDFDelta(i, delta);
-            if (logical_delta != 0) {
-                int accel = (abs(logical_delta) >= fx_df_accel_threshold()) ? fx_df_accel_mult() : 1;
-                int newVal = constrain(laneStoredValue[2] + logical_delta * fx_df_step() * accel, 0, 127);
-                if (newVal != laneStoredValue[2]) {
-                    laneStoredValue[2] = newVal;
-                    if (!dfFxMuted[2]) sendFxLane(2, laneStoredValue[2], false);
-                    dfFxParamValue[2] = laneStoredValue[2];
-                }
-            }
-            if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
-                lastBtnMs[i] = millis();
-                dfFxMuted[2] = !dfFxMuted[2];
-                sendFxLane(2, laneStoredValue[2], dfFxMuted[2]);
-                RED808_LOG_PRINTF("[DFRobot] Comp lane %s\n", dfFxMuted[2] ? "MUTED" : "UNMUTED");
+                dfFxMuted[lane] = !dfFxMuted[lane];
+                sendFxLane(lane, laneStoredValue[lane], dfFxMuted[lane]);
+                RED808_LOG_PRINTF("[DFRobot] %s lane %s\n", laneNames[lane], dfFxMuted[lane] ? "MUTED" : "UNMUTED");
             }
         }
         else if (i == 3) {
-            // DFRobot #3: BPM control in tenths. Button resets to default BPM.
+            // DFRobot #3: BPM control (coarse). Button resets to default BPM.
+            // Unit Fader handles fine 0.1 tuning; rotary uses 1 BPM steps + acceleration.
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                float newBpm = currentBPMPrecise + (float)logical_delta * 0.1f;
-                if (fabsf(newBpm - currentBPMPrecise) >= 0.05f) {
-                    applyBPMPrecise(newBpm, true);
-                }
+                int bpmStep = (abs(logical_delta) >= 3) ? 2 : 1;
+                float newBpm = currentBPMPrecise + (float)(logical_delta > 0 ? bpmStep : -bpmStep);
+                applyBPMPrecise(newBpm, true);
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();
@@ -2353,8 +2281,9 @@ static void runByteButtonAction(uint8_t action, int moduleIdx) {
 }
 
 static void handleByteButtonPrimaryEdges(int moduleIdx, uint8_t pressedEdges) {
-    memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
+    // Only clear this module's buttons — preserve other module's state
     int actionOffset = moduleIdx * BYTEBUTTON_BUTTONS;
+    for (int b = 0; b < BYTEBUTTON_BUTTONS; b++) byteButtonLivePressed[actionOffset + b] = false;
     for (int button = 0; button < BYTEBUTTON_BUTTONS; button++) {
         if ((pressedEdges & (1U << button)) == 0) continue;
         int btn = (BYTEBUTTON_BUTTONS - 1) - button;
@@ -2686,7 +2615,7 @@ void loop() {
     }
 
     // Boot LED animation
-    if (currentScreen == SCREEN_BOOT) {
+    if (currentScreen == SCREEN_BOOT && !bootLedDone) {
         bootLedAnimation();
     }
 
