@@ -15,11 +15,11 @@
 static unsigned long lastScreenUpdate = 0;
 
 void setup() {
-    // 1. Debug serial (UART0 / USB)
+    // 1. Debug serial
     Serial.begin(115200);
-    delay(200);
-    P4_LOG_PRINTLN("\n=== RED808 P4 — Visual Beast ===");
-    P4_LOG_PRINTLN("Guition JC1060P470C | ESP32-P4");
+    delay(500);
+    Serial.println("\n=== RED808 P4 — Visual Beast ===");
+    Serial.println("Guition JC1060P470C | ESP32-P4");
 
     // 2. Initialize MIPI-DSI display + backlight
     P4_LOG_PRINTLN("[INIT] Display...");

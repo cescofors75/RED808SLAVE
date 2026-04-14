@@ -21,9 +21,8 @@ static lv_disp_drv_t disp_drv;
 static lv_indev_drv_t touch_drv;
 static lv_indev_t* touch_indev = NULL;
 
-// Buffer size: 1/10 of screen (fits in PSRAM comfortably)
-#define LVGL_BUF_LINES  (LCD_V_RES / 10)
-#define LVGL_BUF_SIZE   (LCD_H_RES * LVGL_BUF_LINES)
+// Full-screen buffer for DPI panel (required for proper DMA2D flush)
+#define LVGL_BUF_SIZE   (LCD_H_RES * LCD_V_RES)
 
 // =============================================================================
 // DISPLAY FLUSH CALLBACK
@@ -138,20 +137,13 @@ void lvgl_port_init(void) {
     }
     lv_disp_draw_buf_init(&draw_buf, buf1, buf2, LVGL_BUF_SIZE);
 
-    // Display driver
+    // Display driver — DPI panels MUST use full_refresh
     lv_disp_drv_init(&disp_drv);
-#if PORTRAIT_MODE
-    disp_drv.hor_res = UI_W;   // 600
-    disp_drv.ver_res = UI_H;   // 1024
-    disp_drv.sw_rotate = 1;
-    disp_drv.rotated = LV_DISP_ROT_90;
-#else
-    disp_drv.hor_res = LCD_H_RES;
-    disp_drv.ver_res = LCD_V_RES;
-#endif
+    disp_drv.hor_res = LCD_H_RES;   // 1024
+    disp_drv.ver_res = LCD_V_RES;   // 600
     disp_drv.flush_cb = disp_flush_cb;
     disp_drv.draw_buf = &draw_buf;
-    disp_drv.full_refresh = 0;
+    disp_drv.full_refresh = 1;      // Required for MIPI-DPI
     lv_disp_drv_register(&disp_drv);
 
     // Touch input
