@@ -114,14 +114,10 @@ static void touch_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     Wire.write((uint8_t)0);
     Wire.endTransmission();
 
-    // GT911 on Guition JC1060P470C: axes swapped vs LCD
-    // raw_x (0..LCD_H_RES-1) = vertical axis (inverted)
-    // raw_y (0..LCD_V_RES-1) = horizontal axis
-    // Full landscape 1024×600 mapping:
-    uint16_t clamped_x = (x < LCD_H_RES) ? x : (LCD_H_RES - 1);
-    uint16_t clamped_y = (y < LCD_V_RES) ? y : (LCD_V_RES - 1);
-    data->point.x = (lv_coord_t)((uint32_t)clamped_y * (LCD_H_RES - 1) / (LCD_V_RES - 1));
-    data->point.y = (lv_coord_t)((uint32_t)((LCD_H_RES - 1) - clamped_x) * (LCD_V_RES - 1) / (LCD_H_RES - 1));
+    // GT911 on Guition JC1060P470C — landscape 1024×600 direct mapping
+    // GT911 raw x = 0..1023 (left→right), raw y = 0..599 (top→bottom)
+    data->point.x = (x < LCD_H_RES) ? (lv_coord_t)x : (lv_coord_t)(LCD_H_RES - 1);
+    data->point.y = (y < LCD_V_RES) ? (lv_coord_t)y : (lv_coord_t)(LCD_V_RES - 1);
     data->state = LV_INDEV_STATE_PR;
 }
 
