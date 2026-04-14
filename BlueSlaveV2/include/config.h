@@ -250,6 +250,10 @@ namespace Config {
     constexpr uint32_t UNIT_FADER_READ_MS = 12;
     constexpr int UNIT_FADER_COUNTS_PER_TENTH = 12;
 
+    // UART bridge to ESP32-P4 Visual Beast
+    constexpr int UART_P4_TX_PIN = 16;       // S3 TX → P4 RX
+    constexpr int UART_P4_RX_PIN = 15;       // S3 RX ← P4 TX
+
     // Menu
     constexpr int MENU_ITEMS = 6;
 }

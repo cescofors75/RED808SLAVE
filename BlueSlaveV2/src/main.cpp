@@ -30,6 +30,10 @@
 #include "ui/ui_theme.h"
 #include "ui/ui_screens.h"
 
+// UART bridge to P4 Visual Beast
+#include "uart_bridge.h"
+#include "../include/uart_protocol.h"
+
 // =============================================================================
 // SRAM ALLOCATOR — forces ArduinoJson to use internal SRAM (not PSRAM)
 // Avoids PSRAM bus contention with LCD bounce-buffer DMA.
@@ -323,6 +327,35 @@ static void touch_task(void* arg);
 static void pad_trigger_task(void* arg);
 
 // =============================================================================
+// P4 TOUCH COMMAND HANDLER (called from uart_bridge_receive)
+// =============================================================================
+static bool navigateToScreen(Screen screen);  // forward decl
+
+void handleP4TouchCommand(uint8_t cmdId, uint8_t value) {
+    switch (cmdId) {
+        case TCMD_PAD_TAP:
+            if (value < Config::MAX_SAMPLES) {
+                sendLivePadTrigger(value, 100);
+            }
+            break;
+        case TCMD_PLAY_TOGGLE:
+            sendPlayStateCommand(!isPlaying);
+            break;
+        case TCMD_PATTERN_SEL:
+            selectPatternOnMaster(value);
+            break;
+        case TCMD_SCREEN_NAV:
+            navigateToScreen((Screen)value);
+            break;
+        case TCMD_THEME_NEXT:
+            pendingThemeIdx = (currentTheme + 1) % THEME_COUNT;
+            break;
+        default:
+            break;
+    }
+}
+
+// =============================================================================
 // NVS PERSISTENCE — save/load user settings across reboots
 // =============================================================================
 #include "nvs.h"
@@ -336,6 +369,9 @@ static void applyBPMPrecise(float bpm, bool sendToMaster) {
     currentBPMPrecise = clamped;
     currentBPM = (int)lroundf(clamped);
     nvs_dirty = true;
+
+    // Forward BPM to P4
+    uart_bridge_send_bpm(clamped);
 
     if (!sendToMaster || !udpConnected) return;
 
@@ -426,6 +462,9 @@ static void applyUnifiedMasterVolume(int value, bool sendToMaster) {
     livePadsVolume = v;
     volumeMode = VOL_SEQUENCER;
     nvs_mark_dirty();
+
+    // Forward volume to P4
+    uart_bridge_send_volume(v, v, v);
 
     if (!sendToMaster || !udpConnected) return;
 
@@ -675,6 +714,10 @@ static bool navigateToScreen(Screen screen) {
     currentScreen = screen;
     lv_scr_load(target);
     lvgl_port_unlock();
+
+    // Forward screen navigation to P4
+    uart_bridge_send_screen((int)screen);
+
     return true;
 }
 
@@ -759,6 +802,7 @@ static void finalizeWiFiConnection() {
     wifiReconnecting = false;
     lastWiFiConnectedMs = millis();
     lastWiFiCheck = lastWiFiConnectedMs;
+    uart_bridge_send_wifi_state(true, masterConnected);
 
     udp.stop();
     udpConnected = udp.begin(WiFiConfig::UDP_PORT);
@@ -882,6 +926,7 @@ void requestPatternFromMaster() {
 
 void sendPlayStateCommand(bool shouldPlay) {
     isPlaying = shouldPlay;
+    uart_bridge_send_play_state(isPlaying);
     JsonDocument doc(&sramAllocator);
     doc["cmd"] = isPlaying ? "start" : "stop";
     sendUDPCommand(doc);
@@ -889,6 +934,9 @@ void sendPlayStateCommand(bool shouldPlay) {
 
 void selectPatternOnMaster(int patternIndex) {
     currentPattern = constrain(patternIndex, 0, Config::MAX_PATTERNS - 1);
+
+    // Forward pattern to P4
+    uart_bridge_send_pattern(currentPattern);
 
     JsonDocument doc(&sramAllocator);
     doc["cmd"] = "selectPattern";
@@ -1013,7 +1061,10 @@ void receiveUDPData() {
     udpRxCount = udpRxCount + 1;
 
     lastMasterPacketMs = millis();
-    masterConnected = true;
+    if (!masterConnected) {
+        masterConnected = true;
+        uart_bridge_send_wifi_state(wifiConnected, true);
+    }
     diagInfo.udpConnected = true;
 
     // Parse JSON using internal SRAM only — no PSRAM access
@@ -1063,6 +1114,8 @@ void receiveUDPData() {
                     t++;
                 }
             }
+            // Forward pattern data to P4
+            uart_bridge_send_pattern_data(pat, patterns[pat].steps, Config::MAX_TRACKS);
         }
     }
     else if (strcmp(cmd, "step_update") == 0 || strcmp(cmd, "step_sync") == 0) {
@@ -1079,6 +1132,7 @@ void receiveUDPData() {
             lastLocalStepUs = micros();
         }
         isPlaying = playing;
+        uart_bridge_send_play_state(isPlaying);
     }
     else if (strcmp(cmd, "start") == 0) {
         if (!isPlaying) {
@@ -1087,10 +1141,12 @@ void receiveUDPData() {
             lastLocalStepUs = micros();
         }
         isPlaying = true;
+        uart_bridge_send_play_state(true);
     }
     else if (strcmp(cmd, "stop") == 0) {
         isPlaying = false;
         currentStep = 0;
+        uart_bridge_send_play_state(false);
     }
     else if (strcmp(cmd, "tempo_sync") == 0 || strcmp(cmd, "tempo") == 0) {
         float bpm = doc["value"].is<float>() ? doc["value"].as<float>() : (float)(doc["value"] | Config::DEFAULT_BPM);
@@ -1156,6 +1212,7 @@ void receiveUDPData() {
         int pat = doc["index"] | (doc["pattern"] | -1);
         if (pat >= 0 && pat < Config::MAX_PATTERNS) {
             currentPattern = pat;
+            uart_bridge_send_pattern(currentPattern);
             requestPatternFromMaster();
         }
     }
@@ -1338,6 +1395,9 @@ void handleDFRobotPots() {
         potLastMidi[pot] = midi;
         dfRobotPotLastSent[pot] = midi;
         dfRobotPotPosLastSent[pot] = dfRobotPotPos[pot];
+
+        // Forward pot MIDI to P4
+        uart_bridge_send_pot(pot, midi);
 
         JsonDocument doc(&sramAllocator);
         if (pot == 0) {
@@ -1945,6 +2005,15 @@ void handleM5Encoders() {
             sendUDPCommand(doc);
         }
     }
+
+    // Forward track changes to P4
+    for (int i = 0; i < pendingCount; i++) {
+        if (pending[i].type == 0) {
+            uart_bridge_send_track_volume(pending[i].track, pending[i].value);
+        } else {
+            uart_bridge_send_track_mute(pending[i].track, (bool)pending[i].value);
+        }
+    }
 }
 
 // =============================================================================
@@ -2045,12 +2114,14 @@ void handleDFRobotEncoders() {
                     laneStoredValue[lane] = newVal;
                     if (!dfFxMuted[lane]) sendFxLane(lane, laneStoredValue[lane], false);
                     dfFxParamValue[lane] = laneStoredValue[lane];
+                    uart_bridge_send_encoder(lane, (uint8_t)laneStoredValue[lane]);
                 }
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();
                 dfFxMuted[lane] = !dfFxMuted[lane];
                 sendFxLane(lane, laneStoredValue[lane], dfFxMuted[lane]);
+                uart_bridge_send_encoder_mute(lane, dfFxMuted[lane]);
                 RED808_LOG_PRINTF("[DFRobot] %s lane %s\n", laneNames[lane], dfFxMuted[lane] ? "MUTED" : "UNMUTED");
             }
         }
@@ -2282,6 +2353,7 @@ void updateUI() {
     if (pt >= 0 && pt < (int)THEME_COUNT) {
         pendingThemeIdx = -1;
         ui_theme_apply((VisualTheme)pt);
+        uart_bridge_send_theme(pt);
     }
 
     ui_update_header();
@@ -2388,6 +2460,9 @@ void setup() {
     setupWiFi();
     RED808_LOG_PRINTF("[HEAP] After WiFi: %d bytes\n", ESP.getFreeHeap());
 
+    // 8b. UART bridge to ESP32-P4 Visual Beast
+    uart_bridge_init();
+
     // 9. Now start LVGL task (safe - I2C scanning is done)
     lvgl_port_task_start();
     RED808_LOG_PRINTLN("[LVGL] Task started");
@@ -2487,6 +2562,7 @@ static void pad_trigger_task(void* arg) {
             for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
                 if ((mask & (1UL << pad)) == 0) continue;
                 sendLivePadTrigger(pad, padVelocity);
+                uart_bridge_send_pad_trigger(pad, (uint8_t)padVelocity);
                 lastLivePadTriggerMs[pad] = now;
                 livePadFlashUntilMs[pad] = now + LIVE_PAD_FLASH_MS;
             }
@@ -2550,9 +2626,20 @@ void loop() {
     // === NETWORK + STATUS ===
     if (masterConnected && (now - lastMasterPacketMs > 3000)) {
         masterConnected = false;
+        uart_bridge_send_wifi_state(wifiConnected, false);
     }
 
     checkWiFiReconnect();
+
+    // === UART BRIDGE (P4 receive + heartbeat) ===
+    uart_bridge_receive();
+    {
+        static unsigned long lastHB = 0;
+        if (now - lastHB >= 500) {
+            lastHB = now;
+            uart_bridge_heartbeat();
+        }
+    }
 
     static unsigned long lastUDPReceiveMs = 0;
     if (now - lastUDPReceiveMs >= WiFiConfig::UDP_RECEIVE_MS) {
@@ -2597,6 +2684,7 @@ void loop() {
             lastLocalStepUs = nowUs;  // snap to now — NEVER accumulate, NEVER catch up
             lastLocalStepMs = now;
             currentStep = (currentStep + 1) % Config::MAX_STEPS;
+            uart_bridge_send_step(currentStep);
         }
     } else if (!isPlaying) {
         lastLocalStepMs = now;

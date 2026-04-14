@@ -1,0 +1,219 @@
+// =============================================================================
+// uart_handler.cpp — UART binary protocol receiver (P4 side)
+// =============================================================================
+
+#include "uart_handler.h"
+#include "../include/config.h"
+#include <Arduino.h>
+
+// P4 local state — single source of truth for UI rendering
+P4State p4 = {};
+
+// UART instance
+static HardwareSerial UartS3(UART_S3_PORT);
+
+// Circular receive buffer
+static uint8_t rxBuf[UART_RX_BUF];
+static int rxHead = 0;
+
+// =============================================================================
+// INIT
+// =============================================================================
+void uart_handler_init(void) {
+    UartS3.begin(UART_BAUD_RATE, SERIAL_8N1, UART_S3_RX_PIN, UART_S3_TX_PIN);
+    UartS3.setRxBufferSize(UART_RX_BUF);
+
+    // Set defaults
+    p4.bpm_int = Config::DEFAULT_BPM;
+    p4.master_volume = 75;
+    p4.seq_volume = 75;
+    p4.live_volume = 75;
+    p4.cutoff_hz = 20000;
+    p4.resonance_x10 = 10;
+    p4.bitcrush_bits = 16;
+    p4.sample_rate_hz = 44100;
+    for (int i = 0; i < 16; i++) p4.track_volume[i] = 75;
+
+    P4_LOG_PRINTF("[UART] Init port %d: TX=%d RX=%d @ %d baud\n",
+                  UART_S3_PORT, UART_S3_TX_PIN, UART_S3_RX_PIN, UART_BAUD_RATE);
+}
+
+// =============================================================================
+// SEND TO S3
+// =============================================================================
+void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value) {
+    UartBasicPacket pkt;
+    uart_build_basic(&pkt, type, id, value);
+    UartS3.write((uint8_t*)&pkt, sizeof(pkt));
+}
+
+bool uart_s3_alive(void) {
+    return p4.s3_connected;
+}
+
+// =============================================================================
+// PROCESS BASIC PACKET
+// =============================================================================
+static void process_basic(const UartBasicPacket* pkt) {
+    uint8_t type = pkt->type;
+    uint8_t id   = pkt->id;
+    uint8_t val  = pkt->value;
+
+    switch (type) {
+        case MSG_ENCODER:
+            if (id < 3) p4.enc_value[id] = val;
+            break;
+
+        case MSG_PAD:
+            if (id < 16) {
+                p4.pad_velocity[id] = val;
+                p4.pad_flash_until[id] = millis() + 120;
+            }
+            break;
+
+        case MSG_POT:
+            if (id < 4) p4.pot_value[id] = val;
+            break;
+
+        case MSG_SYSTEM:
+            switch (id) {
+                case SYS_BPM_INT:     p4.bpm_int = val;                    break;
+                case SYS_BPM_FRAC:    p4.bpm_frac = val;                   break;
+                case SYS_PATTERN:     p4.current_pattern = val;            break;
+                case SYS_PLAY_STATE:  p4.is_playing = (val != 0);          break;
+                case SYS_STEP:        p4.current_step = val;               break;
+                case SYS_WIFI_STATE:  p4.wifi_connected = (val != 0);      break;
+                case SYS_MASTER_CONN: p4.master_connected = (val != 0);    break;
+                case SYS_THEME:       p4.theme = val;                      break;
+                case SYS_VOLUME:      p4.master_volume = val;              break;
+                case SYS_SEQ_VOL:     p4.seq_volume = val;                 break;
+                case SYS_LIVE_VOL:    p4.live_volume = val;                break;
+                case SYS_HEARTBEAT:
+                    p4.last_heartbeat_ms = millis();
+                    p4.s3_connected = true;
+                    break;
+            }
+            break;
+
+        case MSG_FX:
+            switch (id) {
+                case FX_ENC0_MUTE:    p4.enc_muted[0] = (val != 0);       break;
+                case FX_ENC1_MUTE:    p4.enc_muted[1] = (val != 0);       break;
+                case FX_ENC2_MUTE:    p4.enc_muted[2] = (val != 0);       break;
+                case FX_POT0_MUTE:    p4.pot_muted[0] = (val != 0);       break;
+                case FX_POT1_MUTE:    p4.pot_muted[1] = (val != 0);       break;
+                case FX_POT2_MUTE:    p4.pot_muted[2] = (val != 0);       break;
+                case FX_FILTER_TYPE:  p4.filter_type = val;                break;
+                case FX_CUTOFF_H:     p4.cutoff_hz = (p4.cutoff_hz & 0xFF) | (val << 8); break;
+                case FX_CUTOFF_L:     p4.cutoff_hz = (p4.cutoff_hz & 0xFF00) | val;      break;
+                case FX_RESONANCE:    p4.resonance_x10 = val;             break;
+                case FX_DISTORTION:   p4.distortion_pct = val;            break;
+                case FX_BITCRUSH:     p4.bitcrush_bits = val;             break;
+                case FX_SAMPLERATE_H: p4.sample_rate_hz = (p4.sample_rate_hz & 0xFF) | (val << 8); break;
+                case FX_SAMPLERATE_L: p4.sample_rate_hz = (p4.sample_rate_hz & 0xFF00) | val;      break;
+                case FX_RESP_MODE:    p4.fx_resp_mode = val;              break;
+            }
+            break;
+
+        case MSG_TRACK: {
+            uint8_t sub = id & 0xF0;
+            uint8_t trk = id & 0x0F;
+            if (trk < 16) {
+                switch (sub) {
+                    case TRK_MUTE_BIT: p4.track_muted[trk] = (val != 0); break;
+                    case TRK_SOLO_BIT: p4.track_solo[trk] = (val != 0);  break;
+                    case TRK_VOLUME:   p4.track_volume[trk] = val;       break;
+                }
+            }
+            break;
+        }
+
+        case MSG_SCREEN:
+            if (id == SCR_NAVIGATE) p4.current_screen = val;
+            break;
+    }
+}
+
+// =============================================================================
+// PROCESS EXTENDED PACKET (pattern data, etc.)
+// =============================================================================
+static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, int len) {
+    if (type == MSG_PATTERN_DATA && len == 32) {
+        // 32 bytes = 256 bits = 16 tracks × 16 steps
+        for (int track = 0; track < 16; track++) {
+            uint16_t row = (uint16_t)payload[track * 2] | ((uint16_t)payload[track * 2 + 1] << 8);
+            for (int step = 0; step < 16; step++) {
+                p4.steps[track][step] = (row >> step) & 1;
+            }
+        }
+    }
+}
+
+// =============================================================================
+// MAIN PROCESS — call from loop()
+// =============================================================================
+int uart_handler_process(void) {
+    int processed = 0;
+
+    // Check heartbeat timeout
+    if (p4.s3_connected && (millis() - p4.last_heartbeat_ms) > Config::HEARTBEAT_TIMEOUT_MS) {
+        p4.s3_connected = false;
+        P4_LOG_PRINTLN("[UART] S3 heartbeat lost!");
+    }
+
+    // Read all available bytes
+    while (UartS3.available()) {
+        rxBuf[rxHead] = UartS3.read();
+
+        // Look for start byte
+        if (rxHead == 0) {
+            if (rxBuf[0] != UART_START_BASIC && rxBuf[0] != UART_START_EXTENDED) {
+                continue;  // discard, wait for start byte
+            }
+        }
+
+        rxHead++;
+
+        // Basic packet complete?
+        if (rxBuf[0] == UART_START_BASIC && rxHead >= UART_BASIC_LEN) {
+            UartBasicPacket* pkt = (UartBasicPacket*)rxBuf;
+            if (uart_validate_basic(pkt)) {
+                process_basic(pkt);
+                processed++;
+            }
+            rxHead = 0;
+        }
+
+        // Extended packet header complete?
+        if (rxBuf[0] == UART_START_EXTENDED && rxHead >= UART_EXT_HEADER_LEN) {
+            UartExtendedHeader* hdr = (UartExtendedHeader*)rxBuf;
+            int payload_len = ((int)hdr->len_h << 8) | hdr->len_l;
+            int total = UART_EXT_HEADER_LEN + payload_len + 1; // +1 for checksum
+
+            if (total > (int)sizeof(rxBuf)) {
+                // Packet too large — discard
+                rxHead = 0;
+                continue;
+            }
+
+            if (rxHead >= total) {
+                // Validate checksum (sum of all bytes)
+                uint8_t sum = 0;
+                for (int i = 0; i < total - 1; i++) sum += rxBuf[i];
+                if (sum == rxBuf[total - 1]) {
+                    process_extended(hdr->type, hdr->id,
+                                     &rxBuf[UART_EXT_HEADER_LEN], payload_len);
+                    processed++;
+                }
+                rxHead = 0;
+            }
+        }
+
+        // Guard against buffer overflow
+        if (rxHead >= (int)sizeof(rxBuf)) {
+            rxHead = 0;
+        }
+    }
+
+    return processed;
+}
