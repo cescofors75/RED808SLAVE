@@ -1,25 +1,18 @@
 // =============================================================================
 // BlueSlaveP4 — main.cpp
 // RED808 V6 Visual Beast — ESP32-P4 + MIPI-DSI 7" Display
-// Entry point: display init → LVGL → UART → UI
+// Entry point: display init → LVGL → WiFi/UDP → UI
+// P4 connects DIRECTLY to Master via ESP32-C6 WiFi (SDIO ESP-Hosted)
 // =============================================================================
 
 #include <Arduino.h>
-#include <WiFi.h>
-#include <WiFiUdp.h>
 #include "../include/config.h"
 #include "drivers/display_init.h"
 #include "drivers/lvgl_port.h"
 #include "uart_handler.h"
+#include "udp_handler.h"
 #include "ui/ui_screens.h"
 #include "ui/ui_theme.h"
-
-// WiFi/UDP test — Master connection
-static WiFiUDP udp;
-static const char* MASTER_SSID = "RED808";
-static const char* MASTER_PASS = "red808esp32";
-static const IPAddress MASTER_IP(192, 168, 4, 1);
-static const uint16_t MASTER_PORT = 8888;
 
 static unsigned long lastScreenUpdate = 0;
 
@@ -28,7 +21,7 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("\n=== RED808 P4 — Visual Beast ===");
-    Serial.println("Guition JC1060P470C | ESP32-P4");
+    Serial.println("Guition JC1060P470C | ESP32-P4 + C6 WiFi");
 
     // 2. Initialize MIPI-DSI display + backlight
     P4_LOG_PRINTLN("[INIT] Display...");
@@ -48,17 +41,22 @@ void setup() {
     ui_create_all_screens();
     P4_LOG_PRINTLN("[INIT] UI screens OK");
 
-    // 6. Start UART1 (binary protocol to S3)
-    P4_LOG_PRINTLN("[INIT] UART bridge to S3...");
-    uart_handler_init();
-    P4_LOG_PRINTF("[INIT] UART1 on TX=%d RX=%d @ %d baud\n",
-                  UART_S3_TX_PIN, UART_S3_RX_PIN, UART_BAUD_RATE);
+    // 6. Start WiFi/UDP connection to Master (via C6 SDIO)
+    P4_LOG_PRINTLN("[INIT] WiFi/UDP to Master...");
+    udp_handler_init();
 
-    P4_LOG_PRINTLN("=== P4 Ready — Waiting for S3 ===");
+    // 7. Start UART1 (optional S3 connection)
+    P4_LOG_PRINTLN("[INIT] UART bridge to S3 (optional)...");
+    uart_handler_init();
+
+    P4_LOG_PRINTLN("=== P4 Ready — Connecting to Master ===");
 }
 
 void loop() {
-    // Process all pending UART packets from S3
+    // Process WiFi/UDP from Master (primary connection)
+    udp_handler_process();
+
+    // Process UART packets from S3 (optional secondary)
     uart_handler_process();
 
     // Update LVGL screen content at target framerate

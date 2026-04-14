@@ -175,7 +175,7 @@ static void create_boot_screen(void) {
     lv_obj_align(title, LV_ALIGN_CENTER, 0, -40);
 
     lv_obj_t* sub = lv_label_create(scr_boot);
-    lv_label_set_text(sub, "Waiting for S3 connection...");
+    lv_label_set_text(sub, "Connecting to RED808 Master...");
     lv_obj_set_style_text_font(sub, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(sub, RED808_TEXT_DIM, 0);
     lv_obj_align(sub, LV_ALIGN_CENTER, 0, 20);
@@ -531,8 +531,8 @@ void ui_navigate_to(int screen_id) {
 }
 
 void ui_update_current_screen(void) {
-    // Auto-navigate from boot to live when S3 connects
-    if (active_screen == 0 && p4.s3_connected) {
+    // Auto-navigate from boot to live when Master or optional S3 connects
+    if (active_screen == 0 && (p4.master_connected || p4.s3_connected)) {
         ui_navigate_to(2);  // SCREEN_LIVE
     }
 
