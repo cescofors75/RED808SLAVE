@@ -371,11 +371,11 @@ static void create_live_screen(void) {
         lv_obj_set_style_outline_color(live_pad_btns[i], tc, 0);
         lv_obj_set_style_outline_opa(live_pad_btns[i], LV_OPA_40, 0);
         lv_obj_set_style_outline_pad(live_pad_btns[i], 2, 0);
-        // Neon glow shadow
-        lv_obj_set_style_shadow_width(live_pad_btns[i], 24, 0);
+        // Neon glow shadow — OFF by default (too expensive with full_refresh)
+        lv_obj_set_style_shadow_width(live_pad_btns[i], 0, 0);
         lv_obj_set_style_shadow_color(live_pad_btns[i], tc, 0);
-        lv_obj_set_style_shadow_opa(live_pad_btns[i], LV_OPA_50, 0);
-        lv_obj_set_style_shadow_spread(live_pad_btns[i], 3, 0);
+        lv_obj_set_style_shadow_opa(live_pad_btns[i], LV_OPA_0, 0);
+        lv_obj_set_style_shadow_spread(live_pad_btns[i], 0, 0);
         lv_obj_add_event_cb(live_pad_btns[i], pad_touch_cb, LV_EVENT_PRESSED, (void*)(intptr_t)i);
 
         live_pad_labels[i] = lv_label_create(live_pad_btns[i]);
@@ -397,9 +397,7 @@ static void create_live_screen(void) {
     lv_obj_set_style_bg_opa(grid_play_btn, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(grid_play_btn, 3, 0);
     lv_obj_set_style_border_color(grid_play_btn, RED808_ACCENT2, 0);
-    lv_obj_set_style_shadow_width(grid_play_btn, 24, 0);
-    lv_obj_set_style_shadow_color(grid_play_btn, RED808_ACCENT, 0);
-    lv_obj_set_style_shadow_opa(grid_play_btn, LV_OPA_40, 0);
+    lv_obj_set_style_shadow_width(grid_play_btn, 0, 0);
     lv_obj_add_event_cb(grid_play_btn, header_play_cb, LV_EVENT_CLICKED, NULL);
     grid_play_lbl = lv_label_create(grid_play_btn);
     lv_label_set_text(grid_play_lbl, LV_SYMBOL_PLAY "\nPLAY");
@@ -509,35 +507,31 @@ static void create_live_screen(void) {
 static void update_live_screen(void) {
     unsigned long now = millis();
 
-    // Neon tremolo: smooth breathing glow (~1.7Hz)
-    int phase = (int)((now % 600) * 256 / 600);  // 0..255 in 600ms
-    int tri = (phase < 128) ? phase : (255 - phase);  // triangle 0..127
-    lv_opa_t idle_glow = (lv_opa_t)(LV_OPA_30 + tri / 3);   // ~76..118
-    int idle_shadow_w = 18 + tri / 10;                        // 18..30
-    lv_opa_t idle_outline = (lv_opa_t)(LV_OPA_20 + tri / 5); // ~51..76
-
-    // Pad neon effects
+    // Pad flash effects — only update on state transition (no continuous animation)
+    static bool pad_was_flash[16] = {};
     for (int i = 0; i < 16; i++) {
         if (!live_pad_btns[i]) continue;
         bool flashing = (now < p4.pad_flash_until[i]);
+        if (flashing == pad_was_flash[i]) continue;  // no change, skip
+        pad_was_flash[i] = flashing;
         lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[i]);
 
         if (flashing) {
-            // Neon BURST: full interior + massive glow
+            // BURST: full color fill + brief glow
             lv_obj_set_style_bg_color(live_pad_btns[i], tc, 0);
             lv_obj_set_style_bg_opa(live_pad_btns[i], LV_OPA_COVER, 0);
-            lv_obj_set_style_shadow_opa(live_pad_btns[i], LV_OPA_COVER, 0);
-            lv_obj_set_style_shadow_width(live_pad_btns[i], 40, 0);
-            lv_obj_set_style_shadow_spread(live_pad_btns[i], 8, 0);
             lv_obj_set_style_outline_opa(live_pad_btns[i], LV_OPA_COVER, 0);
+            lv_obj_set_style_shadow_width(live_pad_btns[i], 20, 0);
+            lv_obj_set_style_shadow_opa(live_pad_btns[i], LV_OPA_80, 0);
+            lv_obj_set_style_shadow_spread(live_pad_btns[i], 4, 0);
         } else {
-            // Neon IDLE: dark interior + breathing glow
+            // IDLE: dark interior, no shadow (fast render)
             lv_obj_set_style_bg_color(live_pad_btns[i], lv_color_black(), 0);
             lv_obj_set_style_bg_opa(live_pad_btns[i], LV_OPA_80, 0);
-            lv_obj_set_style_shadow_opa(live_pad_btns[i], idle_glow, 0);
-            lv_obj_set_style_shadow_width(live_pad_btns[i], idle_shadow_w, 0);
-            lv_obj_set_style_shadow_spread(live_pad_btns[i], 3, 0);
-            lv_obj_set_style_outline_opa(live_pad_btns[i], idle_outline, 0);
+            lv_obj_set_style_outline_opa(live_pad_btns[i], LV_OPA_40, 0);
+            lv_obj_set_style_shadow_width(live_pad_btns[i], 0, 0);
+            lv_obj_set_style_shadow_opa(live_pad_btns[i], LV_OPA_0, 0);
+            lv_obj_set_style_shadow_spread(live_pad_btns[i], 0, 0);
         }
     }
 
@@ -551,8 +545,6 @@ static void update_live_screen(void) {
             p4.is_playing ? RED808_SUCCESS : RED808_ACCENT, 0);
         lv_obj_set_style_border_color(grid_play_btn,
             p4.is_playing ? RED808_CYAN : RED808_ACCENT2, 0);
-        lv_obj_set_style_shadow_color(grid_play_btn,
-            p4.is_playing ? RED808_SUCCESS : RED808_ACCENT, 0);
     }
 
     // BPM
@@ -577,10 +569,14 @@ static void update_live_screen(void) {
         lv_label_set_text_fmt(grid_step_lbl, "%02d", p4.current_step + 1);
     }
 
-    // Step dot pulse
+    // Step dot pulse — only update on change
+    static bool prev_dot_state = false;
     if (grid_step_dot) {
         bool pulse = p4.is_playing && ((now / 250) % 2 == 0);
-        lv_obj_set_style_bg_opa(grid_step_dot, pulse ? LV_OPA_COVER : LV_OPA_40, 0);
+        if (pulse != prev_dot_state) {
+            prev_dot_state = pulse;
+            lv_obj_set_style_bg_opa(grid_step_dot, pulse ? LV_OPA_COVER : LV_OPA_40, 0);
+        }
     }
 
     // WiFi status
