@@ -5,12 +5,21 @@
 // =============================================================================
 
 #include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
 #include "../include/config.h"
 #include "drivers/display_init.h"
 #include "drivers/lvgl_port.h"
 #include "uart_handler.h"
 #include "ui/ui_screens.h"
 #include "ui/ui_theme.h"
+
+// WiFi/UDP test — Master connection
+static WiFiUDP udp;
+static const char* MASTER_SSID = "RED808";
+static const char* MASTER_PASS = "red808esp32";
+static const IPAddress MASTER_IP(192, 168, 4, 1);
+static const uint16_t MASTER_PORT = 8888;
 
 static unsigned long lastScreenUpdate = 0;
 
