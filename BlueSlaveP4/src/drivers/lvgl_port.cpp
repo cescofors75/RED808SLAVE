@@ -21,6 +21,13 @@ static lv_disp_drv_t disp_drv;
 static lv_indev_drv_t touch_drv;
 static lv_indev_t* touch_indev = NULL;
 
+static uint16_t map_touch_value(int raw, int in_min, int in_max, int out_max) {
+    if (in_max <= in_min) return 0;
+    if (raw < in_min) raw = in_min;
+    if (raw > in_max) raw = in_max;
+    return (uint16_t)(((raw - in_min) * out_max) / (in_max - in_min));
+}
+
 // Full-screen buffer for DPI panel (required for proper DMA2D flush)
 #define LVGL_BUF_SIZE   (LCD_H_RES * LCD_V_RES)
 
@@ -107,16 +114,14 @@ static void touch_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     Wire.write((uint8_t)0);
     Wire.endTransmission();
 
-    // Transform for portrait mode if enabled
-#if PORTRAIT_MODE
-    uint16_t vx = (LCD_V_RES - 1) - y;
-    uint16_t vy = x;
-    data->point.x = vx;
-    data->point.y = vy;
-#else
-    data->point.x = x;
-    data->point.y = y;
-#endif
+    // GT911 on Guition JC1060P470C: axes swapped vs LCD
+    // raw_x (0..LCD_H_RES-1) = vertical axis (inverted)
+    // raw_y (0..LCD_V_RES-1) = horizontal axis
+    // Full landscape 1024×600 mapping:
+    uint16_t clamped_x = (x < LCD_H_RES) ? x : (LCD_H_RES - 1);
+    uint16_t clamped_y = (y < LCD_V_RES) ? y : (LCD_V_RES - 1);
+    data->point.x = (lv_coord_t)((uint32_t)clamped_y * (LCD_H_RES - 1) / (LCD_V_RES - 1));
+    data->point.y = (lv_coord_t)((uint32_t)((LCD_H_RES - 1) - clamped_x) * (LCD_V_RES - 1) / (LCD_H_RES - 1));
     data->state = LV_INDEV_STATE_PR;
 }
 
@@ -139,8 +144,8 @@ void lvgl_port_init(void) {
 
     // Display driver — DPI panels MUST use full_refresh
     lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = LCD_H_RES;   // 1024
-    disp_drv.ver_res = LCD_V_RES;   // 600
+    disp_drv.hor_res = LCD_H_RES;
+    disp_drv.ver_res = LCD_V_RES;
     disp_drv.flush_cb = disp_flush_cb;
     disp_drv.draw_buf = &draw_buf;
     disp_drv.full_refresh = 1;      // Required for MIPI-DPI

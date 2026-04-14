@@ -802,6 +802,7 @@ static void finalizeWiFiConnection() {
     wifiReconnecting = false;
     lastWiFiConnectedMs = millis();
     lastWiFiCheck = lastWiFiConnectedMs;
+    lastUDPCheck = 0;  // force immediate hello on next loop tick
     uart_bridge_send_wifi_state(true, masterConnected);
 
     udp.stop();

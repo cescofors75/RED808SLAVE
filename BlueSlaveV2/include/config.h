@@ -170,10 +170,10 @@ namespace WiFiConfig {
     constexpr const char* MASTER_IP = "192.168.4.1";
     constexpr uint16_t UDP_PORT    = 8888;
     constexpr uint32_t TIMEOUT_MS  = 3000;
-    constexpr uint32_t RECONNECT_INTERVAL_MS       = 5000;
-    constexpr uint32_t RECONNECT_ATTEMPT_TIMEOUT_MS = 8000;
+    constexpr uint32_t RECONNECT_INTERVAL_MS       = 1500;
+    constexpr uint32_t RECONNECT_ATTEMPT_TIMEOUT_MS = 5000;
     constexpr uint32_t DISCONNECT_GRACE_MS = 1500;
-    constexpr uint32_t MASTER_HELLO_RETRY_MS = 8000;
+    constexpr uint32_t MASTER_HELLO_RETRY_MS = 300;
     constexpr uint32_t UDP_RECEIVE_MS = 8;
 }
 

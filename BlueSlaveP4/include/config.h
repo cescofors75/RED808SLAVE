@@ -90,6 +90,19 @@
 #define TOUCH_INT_GPIO  21
 #endif
 
+#ifndef TOUCH_CAL_X_MIN
+#define TOUCH_CAL_X_MIN  0
+#endif
+#ifndef TOUCH_CAL_X_MAX
+#define TOUCH_CAL_X_MAX  (LCD_V_RES - 1)
+#endif
+#ifndef TOUCH_CAL_Y_MIN
+#define TOUCH_CAL_Y_MIN  0
+#endif
+#ifndef TOUCH_CAL_Y_MAX
+#define TOUCH_CAL_Y_MAX  (LCD_H_RES - 1)
+#endif
+
 // =============================================================================
 // UART — Connection to ESP32-S3 (binary protocol)
 // =============================================================================
