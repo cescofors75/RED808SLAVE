@@ -96,17 +96,46 @@ static void process_basic(const UartBasicPacket* pkt) {
 
         case MSG_SYSTEM:
             switch (id) {
-                case SYS_BPM_INT:     p4.bpm_int = val;                    break;
-                case SYS_BPM_FRAC:    p4.bpm_frac = val;                   break;
-                case SYS_PATTERN:     p4.current_pattern = val;            break;
-                case SYS_PLAY_STATE:  p4.is_playing = (val != 0);          break;
+                case SYS_BPM_INT:
+                    p4.bpm_int = val;
+                    break;
+                case SYS_BPM_FRAC:
+                    p4.bpm_frac = val;
+                    // Relay BPM to Master (frac arrives after int)
+                    if (udp_wifi_connected()) {
+                        float bpm = p4.bpm_int + p4.bpm_frac * 0.1f;
+                        udp_send_tempo(bpm);
+                    }
+                    break;
+                case SYS_PATTERN:
+                    p4.current_pattern = val;
+                    // Relay pattern selection to Master
+                    if (udp_wifi_connected()) udp_send_select_pattern(val);
+                    break;
+                case SYS_PLAY_STATE:
+                    p4.is_playing = (val != 0);
+                    // Relay play/stop to Master
+                    if (udp_wifi_connected()) {
+                        if (p4.is_playing) udp_send_start();
+                        else               udp_send_stop();
+                    }
+                    break;
                 case SYS_STEP:        p4.current_step = val;               break;
                 case SYS_WIFI_STATE:  p4.s3_wifi_connected = (val != 0);   break;
                 case SYS_MASTER_CONN: p4.master_connected = (val != 0);    break;
                 case SYS_THEME:       p4.theme = val;                      break;
-                case SYS_VOLUME:      p4.master_volume = val;              break;
-                case SYS_SEQ_VOL:     p4.seq_volume = val;                 break;
-                case SYS_LIVE_VOL:    p4.live_volume = val;                break;
+                case SYS_VOLUME:
+                    p4.master_volume = val;
+                    if (udp_wifi_connected()) udp_send_set_volume(val);
+                    break;
+                case SYS_SEQ_VOL:
+                    p4.seq_volume = val;
+                    if (udp_wifi_connected()) udp_send_set_seq_volume(val);
+                    break;
+                case SYS_LIVE_VOL:
+                    p4.live_volume = val;
+                    if (udp_wifi_connected()) udp_send_set_live_volume(val);
+                    break;
                 case SYS_HEARTBEAT:
                     p4.last_heartbeat_ms = millis();
                     p4.s3_connected = true;
@@ -139,9 +168,17 @@ static void process_basic(const UartBasicPacket* pkt) {
             uint8_t trk = id & 0x0F;
             if (trk < 16) {
                 switch (sub) {
-                    case TRK_MUTE_BIT: p4.track_muted[trk] = (val != 0); break;
-                    case TRK_SOLO_BIT: p4.track_solo[trk] = (val != 0);  break;
-                    case TRK_VOLUME:   p4.track_volume[trk] = val;       break;
+                    case TRK_MUTE_BIT:
+                        p4.track_muted[trk] = (val != 0);
+                        if (udp_wifi_connected()) udp_send_mute(trk, val != 0);
+                        break;
+                    case TRK_SOLO_BIT:
+                        p4.track_solo[trk] = (val != 0);
+                        break;
+                    case TRK_VOLUME:
+                        p4.track_volume[trk] = val;
+                        if (udp_wifi_connected()) udp_send_set_track_volume(trk, val);
+                        break;
                 }
             }
             break;

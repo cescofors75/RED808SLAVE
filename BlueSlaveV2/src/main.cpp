@@ -2697,6 +2697,18 @@ void loop() {
             lastLocalStepMs = now;
             currentStep = (currentStep + 1) % Config::MAX_STEPS;
             uart_bridge_send_step(currentStep);
+
+            // ── Sequencer triggers: send active pads on this step to Master ──
+            if (udpConnected) {
+                const int seqVel = map(constrain(sequencerVolume, 0, Config::MAX_VOLUME),
+                                       0, Config::MAX_VOLUME, 32, 127);
+                for (int t = 0; t < Config::MAX_TRACKS; t++) {
+                    if (patterns[currentPattern].steps[t][currentStep] &&
+                        !patterns[currentPattern].muted[t]) {
+                        sendLivePadTrigger(t, seqVel);
+                    }
+                }
+            }
         }
     } else if (!isPlaying) {
         lastLocalStepMs = now;
