@@ -694,57 +694,10 @@ static void create_fx_screen(void) {
     lv_obj_set_style_text_color(title, RED808_ACCENT, 0);
     lv_obj_set_pos(title, 60, 10);
 
-    // ── Page indicator ──
-    fx_page_lbl = lv_label_create(scr_fx);
-    lv_label_set_text(fx_page_lbl, "1 / 2");
-    lv_obj_set_style_text_font(fx_page_lbl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(fx_page_lbl, RED808_TEXT_DIM, 0);
-    lv_obj_align(fx_page_lbl, LV_ALIGN_TOP_RIGHT, -100, 12);
-
-    for (int p = 0; p < 2; p++) {
-        fx_page_dot[p] = lv_obj_create(scr_fx);
-        lv_obj_set_size(fx_page_dot[p], 10, 10);
-        lv_obj_set_style_radius(fx_page_dot[p], 5, 0);
-        lv_obj_set_style_bg_color(fx_page_dot[p], RED808_ACCENT, 0);
-        lv_obj_set_style_bg_opa(fx_page_dot[p], p == 0 ? LV_OPA_COVER : LV_OPA_30, 0);
-        lv_obj_set_style_border_width(fx_page_dot[p], 0, 0);
-        lv_obj_clear_flag(fx_page_dot[p], LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_pos(fx_page_dot[p], LCD_H_RES / 2 - 12 + p * 18, 14);
-    }
-
-    // ── Nav arrows ──
-    lv_obj_t* nav_prev = lv_btn_create(scr_fx);
-    lv_obj_set_size(nav_prev, 44, 34);
-    lv_obj_set_pos(nav_prev, LCD_H_RES - 104, 8);
-    lv_obj_set_style_radius(nav_prev, 8, 0);
-    lv_obj_set_style_bg_color(nav_prev, RED808_SURFACE, 0);
-    lv_obj_set_style_border_color(nav_prev, RED808_BORDER, 0);
-    lv_obj_set_style_border_width(nav_prev, 1, 0);
-    lv_obj_set_style_shadow_width(nav_prev, 0, 0);
-    lv_obj_t* la = lv_label_create(nav_prev);
-    lv_label_set_text(la, LV_SYMBOL_LEFT);
-    lv_obj_set_style_text_color(la, RED808_TEXT, 0);
-    lv_obj_center(la);
-    lv_obj_add_event_cb(nav_prev, fx_page_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
-
-    lv_obj_t* nav_next = lv_btn_create(scr_fx);
-    lv_obj_set_size(nav_next, 44, 34);
-    lv_obj_set_pos(nav_next, LCD_H_RES - 54, 8);
-    lv_obj_set_style_radius(nav_next, 8, 0);
-    lv_obj_set_style_bg_color(nav_next, RED808_SURFACE, 0);
-    lv_obj_set_style_border_color(nav_next, RED808_BORDER, 0);
-    lv_obj_set_style_border_width(nav_next, 1, 0);
-    lv_obj_set_style_shadow_width(nav_next, 0, 0);
-    lv_obj_t* lr = lv_label_create(nav_next);
-    lv_label_set_text(lr, LV_SYMBOL_RIGHT);
-    lv_obj_set_style_text_color(lr, RED808_TEXT, 0);
-    lv_obj_center(lr);
-    lv_obj_add_event_cb(nav_next, fx_page_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
-
-    // ── 3 large circle cards per page ──
+    // ── 3 FX cards (single page: Flanger, Phaser, Reverb) ──
     // Canvas: 1024×600, title row ~50px
     const int CARD_Y   = 50;
-    const int CARD_H   = LCD_V_RES - CARD_Y - 8;   // ~484px
+    const int CARD_H   = LCD_V_RES - CARD_Y - 8;   // ~542px
     const int MARGIN   = 12;
     const int CARD_GAP = 10;
     const int CARD_W   = (LCD_H_RES - 2 * MARGIN - 2 * CARD_GAP) / 3;  // ~330px
@@ -752,18 +705,17 @@ static void create_fx_screen(void) {
     // Arc size: make it large and centered
     const int ARC_SIZE = constrain(CARD_W - 40, 200, 290);  // ~290px
 
-    for (int cell = 0; cell < 6; cell++) {
-        int slot = cell % 3;
-        int x = MARGIN + slot * (CARD_W + CARD_GAP);
-        bool is_page0 = (cell < 3);
+    for (int cell = 0; cell < 3; cell++) {
+
+        int x = MARGIN + cell * (CARD_W + CARD_GAP);
 
         // Card container
         lv_obj_t* card = lv_obj_create(scr_fx);
         lv_obj_set_size(card, CARD_W, CARD_H);
         lv_obj_set_pos(card, x, CARD_Y);
         lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-        // Dark glass card
-        lv_obj_set_style_bg_color(card, lv_color_hex(0x0C1620), 0);
+        // Themed card background
+        lv_obj_set_style_bg_color(card, RED808_SURFACE, 0);
         lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(card, 20, 0);
         lv_obj_set_style_border_width(card, 2, 0);
@@ -776,8 +728,6 @@ static void create_fx_screen(void) {
         lv_obj_set_style_outline_pad(card, 2, 0);
         lv_obj_set_style_shadow_width(card, 0, 0);
         lv_obj_set_style_pad_all(card, 0, 0);
-        // Hide page 2 cards on start
-        if (!is_page0) lv_obj_add_flag(card, LV_OBJ_FLAG_HIDDEN);
         // Make card clickable for toggle
         lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(card, fx_toggle_cb, LV_EVENT_CLICKED, (void*)(intptr_t)cell);
@@ -810,9 +760,9 @@ static void create_fx_screen(void) {
         lv_arc_set_value(fx_arcs[cell], 0);
         lv_obj_clear_flag(fx_arcs[cell], LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_style(fx_arcs[cell], NULL, LV_PART_KNOB);
-        // Track (background ring) — dim
+        // Track (background ring) — dim, theme-aware
         lv_obj_set_style_arc_width(fx_arcs[cell], 14, LV_PART_MAIN);
-        lv_obj_set_style_arc_color(fx_arcs[cell], lv_color_hex(0x1E2D3A), LV_PART_MAIN);
+        lv_obj_set_style_arc_color(fx_arcs[cell], RED808_BORDER, LV_PART_MAIN);
         lv_obj_set_style_arc_opa(fx_arcs[cell], LV_OPA_COVER, LV_PART_MAIN);
         // Indicator (filled arc) — neon glow
         lv_obj_set_style_arc_width(fx_arcs[cell], 20, LV_PART_INDICATOR);
@@ -857,24 +807,13 @@ static void create_fx_screen(void) {
 }
 
 static void update_fx_screen(void) {
-    // Enc mapping: cell0=Flanger(enc0), cell1=Phaser(enc2), cell2=Reverb(enc1)
+    // cell0=Flanger(enc0), cell1=Phaser(enc2), cell2=Reverb(enc1)
     static const int enc_map[3] = {0, 2, 1};
-    // Pot mapping: cell3=Drive(pot3), cell4=Cutoff(pot1), cell5=Resonance(pot2)
-    static const int pot_map[3] = {3, 1, 2};
-    static const bool pot_muted_init[3] = {false, false, false};
 
-    for (int cell = 0; cell < 6; cell++) {
-        int val;
-        bool muted;
-        if (cell < 3) {
-            int ei = enc_map[cell];
-            val   = p4.enc_value[ei];
-            muted = p4.enc_muted[ei];
-        } else {
-            int pi = pot_map[cell - 3];
-            val   = p4.pot_value[pi];
-            muted = p4.pot_muted[cell - 3];
-        }
+    for (int cell = 0; cell < 3; cell++) {
+        int ei   = enc_map[cell];
+        int val  = p4.enc_value[ei];
+        bool muted = p4.enc_muted[ei];
 
         int display_val = muted ? 0 : val;
         int pct = (int)((float)display_val / 127.0f * 100.0f + 0.5f);
@@ -1424,16 +1363,7 @@ static void create_settings_screen(void) {
 // PERFORMANCE SCREEN (placeholder)
 // =============================================================================
 static void create_performance_screen(void) {
-    scr_performance = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr_performance, RED808_BG, 0);
-    lv_obj_clear_flag(scr_performance, LV_OBJ_FLAG_SCROLLABLE);
-    ui_create_header(scr_performance);
-
-    lv_obj_t* title = lv_label_create(scr_performance);
-    lv_label_set_text(title, LV_SYMBOL_AUDIO "  PERFORMANCE");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(title, RED808_TEXT, 0);
-    lv_obj_set_pos(title, 60, 10);
+    scr_performance = NULL;  // unused screen — stub
 }
 
 // =============================================================================
@@ -1468,7 +1398,7 @@ static void ui_reload_themed_screens(void) {
     if (scr_fx)          { lv_obj_del(scr_fx);          scr_fx          = NULL; }
     if (scr_volumes)     { lv_obj_del(scr_volumes);     scr_volumes     = NULL; }
     if (scr_settings)    { lv_obj_del(scr_settings);    scr_settings    = NULL; }
-    if (scr_performance) { lv_obj_del(scr_performance); scr_performance = NULL; }
+    // scr_performance is NULL (stubbed)
 
     // Clear widget pointers (prevent stale access in update functions)
     header_bar = NULL; hdr_bpm_label = NULL; hdr_pattern_label = NULL;
@@ -1483,7 +1413,7 @@ static void ui_reload_themed_screens(void) {
     grid_pat_lbl = NULL; grid_step_lbl = NULL;
     grid_wifi_lbl = NULL; grid_s3_lbl = NULL;
     grid_step_dot = NULL; grid_vol_lbl = NULL; grid_sync_btn = NULL;
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 3; i++) {
         fx_arcs[i] = NULL; fx_value_labels[i] = NULL;
         fx_name_labels[i] = NULL; fx_toggle_btns[i] = NULL;
         fx_pct_ring[i] = NULL;

@@ -129,8 +129,8 @@ volatile uint32_t udpJsonErrorCount = 0;
 
 // Track names
 const char* trackNames[] = {
-    "BD", "SD", "CH", "OH", "CL", "CP", "CB", "TM",
-    "CY", "MA", "RS", "LC", "MC", "HC", "LT", "HT"
+    "BD", "SD", "CH", "OH", "CP", "CB", "RS", "CL",
+    "MA", "CY", "HT", "LT", "MC", "MT", "HC", "LC"
 };
 const char* instrumentNames[] = {
     "Bass Drum", "Snare", "Closed HH", "Open HH",
@@ -198,39 +198,47 @@ uint32_t byteButtonLedCache[BYTEBUTTON_COUNT][BYTEBUTTON_BUTTONS + 1] = {};
 bool byteButtonLedInitialized[BYTEBUTTON_COUNT] = {false, false};
 volatile FxResponseMode fxResponseMode = FX_MODE_LIVE;
 const char* const byteButtonActionNames[] = {
-    "Back/Menu",
-    "Master Link Sync",
-    "Go Live Pads",
-    "Go Sequencer",
-    "Go FX",
-    "Go Volumes",
-    "FX Mute P2 Cutoff",
-    "FX Mute P3 Resonance",
-    "FX Mute P4 Drive",
-    "FX Mute Analog ALL",
-    "FX Target --",
-    "FX Target ++",
-    "Pattern --",
-    "Pattern ++",
-    "Play/Pause"
+    "Menu",              // BB_ACTION_MENU
+    "Vol Resync",        // BB_ACTION_VOL_MODE
+    "Go Live",           // BB_ACTION_SCREEN_LIVE
+    "Go Sequencer",      // BB_ACTION_SCREEN_SEQUENCER
+    "Go BUTTONS",        // BB_ACTION_SCREEN_PERFORMANCE
+    "Go Volumes",        // BB_ACTION_SCREEN_VOLUMES
+    "FX Mute FLANGER",   // BB_ACTION_FX_CLEAN
+    "FX Mute PHASER",    // BB_ACTION_FX_SPACE
+    "FX Mute REVERB",    // BB_ACTION_FX_ACID
+    "FX Mute ALL",       // BB_ACTION_FX_DESTROY
+    "FX Target --",      // BB_ACTION_FX_TARGET_PREV
+    "FX Target ++",      // BB_ACTION_FX_TARGET_NEXT
+    "Pattern --",        // BB_ACTION_PATTERN_PREV
+    "Pattern ++",        // BB_ACTION_PATTERN_NEXT
+    "Play/Pause",        // BB_ACTION_PLAY_PAUSE
+    "Go Patterns",       // BB_ACTION_SCREEN_PATTERNS
+    "Go Settings",       // BB_ACTION_SCREEN_SETTINGS
+    "BPM +1",            // BB_ACTION_BPM_UP
+    "BPM -1",            // BB_ACTION_BPM_DOWN
 };
+// ─── BB MODULE 1 (I2C Hub CH4): Transport + FX mute controls ───────────────
+// ─── BB MODULE 2 (I2C Hub CH5): Navigation + BPM control ────────────────────
 uint8_t byteButtonActionMap[BYTEBUTTON_TOTAL_BUTTONS] = {
+    // BB1 buttons 1-8 (transport + FX)
     BB_ACTION_MENU,
-    BB_ACTION_FX_CLEAN,
-    BB_ACTION_FX_SPACE,
-    BB_ACTION_FX_ACID,
-    BB_ACTION_SCREEN_FILTERS,
+    BB_ACTION_PLAY_PAUSE,
     BB_ACTION_PATTERN_PREV,
     BB_ACTION_PATTERN_NEXT,
-    BB_ACTION_PLAY_PAUSE,
+    BB_ACTION_FX_CLEAN,       // 1-5: FX Mute FLANGER
+    BB_ACTION_FX_SPACE,       // 1-6: FX Mute PHASER
+    BB_ACTION_FX_ACID,        // 1-7: FX Mute REVERB
+    BB_ACTION_FX_DESTROY,     // 1-8: FX Mute ALL
+    // BB2 buttons 1-8 (navigation + BPM)
     BB_ACTION_SCREEN_LIVE,
     BB_ACTION_SCREEN_SEQUENCER,
     BB_ACTION_SCREEN_VOLUMES,
-    BB_ACTION_FX_DESTROY,
-    BB_ACTION_FX_TARGET_PREV,
-    BB_ACTION_FX_TARGET_NEXT,
-    BB_ACTION_VOL_MODE,
-    BB_ACTION_FX_DESTROY
+    BB_ACTION_SCREEN_PATTERNS,
+    BB_ACTION_SCREEN_SETTINGS,
+    BB_ACTION_BPM_DOWN,
+    BB_ACTION_BPM_UP,
+    BB_ACTION_MENU,            // 2-8: Go MENU PRINCIPAL
 };
 uint8_t dfFxParamMode[3] = {0, 0, 0};
 int dfFxParamValue[3] = {0, 0, 0};  // boot gate requires zero start
@@ -718,7 +726,7 @@ static bool navigateToScreen(Screen screen) {
         case SCREEN_LIVE:        target = scr_live; break;
         case SCREEN_SEQUENCER:   target = scr_sequencer; break;
         case SCREEN_VOLUMES:     target = scr_volumes; break;
-        case SCREEN_FILTERS:     target = scr_filters; break;
+        case SCREEN_FILTERS:     target = scr_menu; break; // FX removed: fallback to menu
         case SCREEN_SETTINGS:    target = scr_settings; break;
         case SCREEN_DIAGNOSTICS: target = scr_diagnostics; break;
         case SCREEN_PATTERNS:    target = scr_patterns; break;
@@ -1684,7 +1692,7 @@ void updateByteButtonLeds() {
                 return 0x22AAFF;
             case BB_ACTION_SCREEN_SEQUENCER:
                 return 0x55CC55;
-            case BB_ACTION_SCREEN_FILTERS:
+            case BB_ACTION_SCREEN_PERFORMANCE:
                 return 0xCC66FF;
             case BB_ACTION_SCREEN_VOLUMES:
                 return 0xFFAA33;
@@ -1705,6 +1713,14 @@ void updateByteButtonLeds() {
                 return (currentPattern < Config::MAX_PATTERNS - 1) ? 0xAA6600 : 0x221100;
             case BB_ACTION_PLAY_PAUSE:
                 return isPlaying ? 0x00AA44 : 0x224422;
+            case BB_ACTION_SCREEN_PATTERNS:
+                return 0x22AAAA;
+            case BB_ACTION_SCREEN_SETTINGS:
+                return 0xFF6600;
+            case BB_ACTION_BPM_UP:
+                return 0x225599;
+            case BB_ACTION_BPM_DOWN:
+                return 0x223366;
             default:
                 return 0x202020;
         }
@@ -2060,6 +2076,44 @@ void handleM5Encoders() {
 }
 
 // =============================================================================
+// FX LANE MUTE TOGGLE (used by ByteButton + can be called from anywhere)
+// lane: 0=Flanger, 1=Reverb, 2=Phaser
+// =============================================================================
+static void toggleDfFxMute(int lane) {
+    if (lane < 0 || lane > 2) return;
+    dfFxMuted[lane] = !dfFxMuted[lane];
+    bool muted = dfFxMuted[lane];
+    int storedVal = dfFxParamValue[lane];
+    int effective = muted ? 0 : constrain(storedVal, 0, 127);
+    float mix = (float)effective / 127.0f;
+    bool activating = (effective > 0);
+
+    JsonDocument d(&sramAllocator);
+    if (lane == 0) {
+        d["cmd"] = "setFlangerActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d);
+        if (activating) {
+            { JsonDocument d2(&sramAllocator); d2["cmd"] = "setFlangerMix"; d2["value"] = mix; sendUDPCommand(d2); }
+        }
+        masterFilter.delayAmount = (uint8_t)effective;
+    } else if (lane == 1) {
+        d["cmd"] = "setReverbActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d);
+        if (activating) {
+            { JsonDocument d2(&sramAllocator); d2["cmd"] = "setReverbMix"; d2["value"] = mix; sendUDPCommand(d2); }
+        }
+        masterFilter.flangerAmount = (uint8_t)effective;
+    } else {
+        d["cmd"] = "setPhaserActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d);
+        masterFilter.compAmount = (uint8_t)effective;
+    }
+    masterFilter.enabled = (masterFilter.delayAmount > 0 ||
+                            masterFilter.flangerAmount > 0 ||
+                            masterFilter.compAmount > 0);
+    uart_bridge_send_encoder_mute(lane, muted);
+    RED808_LOG_PRINTF("[FX] Lane %d (%s) %s\n", lane,
+        lane==0?"Flanger":lane==1?"Reverb":"Phaser", muted?"MUTED":"UNMUTED");
+}
+
+// =============================================================================
 // DFROBOT ROTARY HANDLING
 // =============================================================================
 
@@ -2229,8 +2283,11 @@ void handleUnitFader() {
     }
     if (steps == 0) return;
 
-    float bpmFine = currentBPMPrecise + (float)steps * 0.1f;
-    applyBPMPrecise(bpmFine, true);
+    // Unit Fader controls Master Volume (0..127)
+    int newVol = constrain(masterVolume + steps, 0, 127);
+    if (newVol != masterVolume) {
+        applyUnifiedMasterVolume(newVol, true);
+    }
 }
 
 // =============================================================================
@@ -2288,38 +2345,33 @@ static void runByteButtonAction(uint8_t action, int moduleIdx) {
         case BB_ACTION_SCREEN_SEQUENCER:
             navigateToScreen(SCREEN_SEQUENCER);
             break;
-        case BB_ACTION_SCREEN_FILTERS:
-            navigateToScreen(SCREEN_FILTERS);
+        case BB_ACTION_SCREEN_PERFORMANCE:
+            navigateToScreen(SCREEN_PERFORMANCE);
             break;
         case BB_ACTION_SCREEN_VOLUMES:
             navigateToScreen(SCREEN_VOLUMES);
             break;
         case BB_ACTION_FX_CLEAN:
-            analogFxMuted[0] = !analogFxMuted[0];
-            sendAnalogFxParamNow(0);
-            RED808_LOG_PRINTF("[BB%d] P2 CUTOFF mute: %s\n", moduleIdx + 1, analogFxMuted[0] ? "ON" : "OFF");
+            toggleDfFxMute(0);  // Flanger
             break;
         case BB_ACTION_FX_SPACE:
-            analogFxMuted[1] = !analogFxMuted[1];
-            sendAnalogFxParamNow(1);
-            RED808_LOG_PRINTF("[BB%d] P3 RESONANCE mute: %s\n", moduleIdx + 1, analogFxMuted[1] ? "ON" : "OFF");
+            toggleDfFxMute(2);  // Phaser
             break;
         case BB_ACTION_FX_ACID:
-            analogFxMuted[2] = !analogFxMuted[2];
-            sendAnalogFxParamNow(2);
-            RED808_LOG_PRINTF("[BB%d] P4 DRIVE mute: %s\n", moduleIdx + 1, analogFxMuted[2] ? "ON" : "OFF");
+            toggleDfFxMute(1);  // Reverb
             break;
         case BB_ACTION_FX_DESTROY:
             {
-                bool allMuted = analogFxMuted[0] && analogFxMuted[1] && analogFxMuted[2];
-                bool newState = !allMuted;
-                analogFxMuted[0] = newState;
-                analogFxMuted[1] = newState;
-                analogFxMuted[2] = newState;
-                sendAnalogFxParamNow(0);
-                sendAnalogFxParamNow(1);
-                sendAnalogFxParamNow(2);
-                RED808_LOG_PRINTF("[BB%d] Analog FX mute ALL: %s\n", moduleIdx + 1, newState ? "ON" : "OFF");
+                bool allMuted = dfFxMuted[0] && dfFxMuted[1] && dfFxMuted[2];
+                if (!allMuted) { // mute all
+                    if (!dfFxMuted[0]) toggleDfFxMute(0);
+                    if (!dfFxMuted[1]) toggleDfFxMute(1);
+                    if (!dfFxMuted[2]) toggleDfFxMute(2);
+                } else { // unmute all
+                    toggleDfFxMute(0);
+                    toggleDfFxMute(1);
+                    toggleDfFxMute(2);
+                }
             }
             break;
         case BB_ACTION_FX_TARGET_PREV:
@@ -2340,6 +2392,20 @@ static void runByteButtonAction(uint8_t action, int moduleIdx) {
             break;
         case BB_ACTION_PLAY_PAUSE:
             sendPlayStateCommand(!isPlaying);
+            break;
+        case BB_ACTION_SCREEN_PATTERNS:
+            navigateToScreen(SCREEN_PATTERNS);
+            break;
+        case BB_ACTION_SCREEN_SETTINGS:
+            navigateToScreen(SCREEN_SETTINGS);
+            break;
+        case BB_ACTION_BPM_UP:
+            applyBPMPrecise(currentBPMPrecise + 1.0f, true);
+            RED808_LOG_PRINTF("[BB%d] BPM +1 -> %.1f\n", moduleIdx + 1, currentBPMPrecise);
+            break;
+        case BB_ACTION_BPM_DOWN:
+            applyBPMPrecise(currentBPMPrecise - 1.0f, true);
+            RED808_LOG_PRINTF("[BB%d] BPM -1 -> %.1f\n", moduleIdx + 1, currentBPMPrecise);
             break;
         default:
             break;
@@ -2529,7 +2595,7 @@ void setup() {
         ui_create_live_screen();
         ui_create_sequencer_screen();
         ui_create_volumes_screen();
-        ui_create_filters_screen();
+        // ui_create_filters_screen(); // FX screen removed
         ui_create_settings_screen();
         ui_create_diagnostics_screen();
         ui_create_patterns_screen();

@@ -57,7 +57,7 @@ enum ByteButtonAction {
     BB_ACTION_VOL_MODE,
     BB_ACTION_SCREEN_LIVE,
     BB_ACTION_SCREEN_SEQUENCER,
-    BB_ACTION_SCREEN_FILTERS,
+    BB_ACTION_SCREEN_PERFORMANCE,  // was SCREEN_FILTERS (removed)
     BB_ACTION_SCREEN_VOLUMES,
     BB_ACTION_FX_CLEAN,
     BB_ACTION_FX_SPACE,
@@ -68,6 +68,10 @@ enum ByteButtonAction {
     BB_ACTION_PATTERN_PREV,
     BB_ACTION_PATTERN_NEXT,
     BB_ACTION_PLAY_PAUSE,
+    BB_ACTION_SCREEN_PATTERNS,     // BB2: go to Patterns screen
+    BB_ACTION_SCREEN_SETTINGS,     // BB2: go to Settings screen
+    BB_ACTION_BPM_UP,              // BB2: BPM +1
+    BB_ACTION_BPM_DOWN,            // BB2: BPM -1
     BB_ACTION_COUNT
 };
 

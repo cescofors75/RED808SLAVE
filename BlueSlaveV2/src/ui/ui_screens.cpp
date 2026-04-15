@@ -49,9 +49,13 @@ static lv_obj_t* lbl_bpm[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_pattern[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_play[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_wifi[HEADER_SLOT_COUNT] = {};
-static lv_obj_t* lbl_fx_values[HEADER_SLOT_COUNT] = {};
+static lv_obj_t* lbl_fx_values[HEADER_SLOT_COUNT] = {};  // legacy — unused in footer
 static lv_obj_t* lbl_master_conn[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* chip_master_conn[HEADER_SLOT_COUNT] = {};
+static lv_obj_t* lbl_footer_vol[HEADER_SLOT_COUNT]  = {};  // footer volume chip
+static lv_obj_t* lbl_footer_ptn[HEADER_SLOT_COUNT]  = {};  // footer pattern chip
+static lv_obj_t* lbl_footer_play[HEADER_SLOT_COUNT] = {};  // footer play/pause chip
+static lv_obj_t* chip_footer_play[HEADER_SLOT_COUNT] = {};  // for color update
 
 // Menu status card labels
 static lv_obj_t* lbl_master = NULL;
@@ -563,9 +567,9 @@ void ui_create_header(lv_obj_t* parent) {
 
     lv_obj_t* header = lv_obj_create(parent);
 #if PORTRAIT_MODE
-    lv_obj_set_size(header, UI_W - 16, 52);
+    lv_obj_set_size(header, UI_W - 16, 60);
 #else
-    lv_obj_set_size(header, 1000, 58);
+    lv_obj_set_size(header, 1008, 68);
 #endif
     lv_obj_set_pos(header, 8, 6);
     lv_obj_set_style_bg_color(header, RED808_PANEL, 0);
@@ -629,10 +633,10 @@ void ui_create_header(lv_obj_t* parent) {
     lv_label_set_text(lbl_wifi[slot], wifiConnected ? LV_SYMBOL_WIFI " ON" : LV_SYMBOL_CLOSE " OFF");
 #endif
 
-    // FOOTER ROW: BPM + FX + Master connection
+    // FOOTER ROW: BPM | PLAY | VOL | PTN | LINK P4
     lv_obj_t* footer = lv_obj_create(parent);
-    lv_obj_set_size(footer, UI_W - 16, 42);
-    lv_obj_set_pos(footer, 8, UI_H - 48);
+    lv_obj_set_size(footer, UI_W - 16, 52);
+    lv_obj_set_pos(footer, 8, UI_H - 58);
     lv_obj_set_style_bg_color(footer, RED808_PANEL, 0);
     lv_obj_set_style_bg_opa(footer, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(footer, 0, 0);
@@ -656,15 +660,22 @@ void ui_create_header(lv_obj_t* parent) {
     lv_obj_t* chip_bpm = create_info_chip(footer, RED808_WARNING, &lbl_bpm[slot]);
     set_bpm_label_text(lbl_bpm[slot], LV_SYMBOL_AUDIO " BPM");
 
-    lv_obj_t* chip_fx = create_info_chip(footer, RED808_CYAN, &lbl_fx_values[slot]);
-    lv_label_set_text_fmt(lbl_fx_values[slot], LV_SYMBOL_SETTINGS " FX %d/%d/%d",
-                          dfFxParamValue[0], dfFxParamValue[1], dfFxParamValue[2]);
+    chip_footer_play[slot] = create_info_chip(footer, isPlaying ? RED808_SUCCESS : RED808_SURFACE, &lbl_footer_play[slot]);
+    lv_label_set_text(lbl_footer_play[slot], isPlaying ? LV_SYMBOL_PLAY " PLAY" : LV_SYMBOL_STOP " STOP");
+
+    lv_obj_t* chip_vol = create_info_chip(footer, RED808_ACCENT, &lbl_footer_vol[slot]);
+    lv_label_set_text_fmt(lbl_footer_vol[slot], LV_SYMBOL_VOLUME_MAX " %d", masterVolume);
+
+    lv_obj_t* chip_ptn = create_info_chip(footer, RED808_INFO, &lbl_footer_ptn[slot]);
+    lv_label_set_text_fmt(lbl_footer_ptn[slot], "PTN %d", currentPattern + 1);
 
     chip_master_conn[slot] = create_info_chip(footer, masterConnected ? RED808_SUCCESS : RED808_ERROR, &lbl_master_conn[slot]);
-    lv_label_set_text(lbl_master_conn[slot], masterConnected ? LV_SYMBOL_OK " LINK" : LV_SYMBOL_CLOSE " LINK");
+    lv_label_set_text(lbl_master_conn[slot], masterConnected ? LV_SYMBOL_OK " P4 LINK" : LV_SYMBOL_CLOSE " P4 LINK");
 
     lv_obj_set_flex_grow(chip_bpm, 1);
-    lv_obj_set_flex_grow(chip_fx, 1);
+    lv_obj_set_flex_grow(chip_footer_play[slot], 1);
+    lv_obj_set_flex_grow(chip_vol, 1);
+    lv_obj_set_flex_grow(chip_ptn, 1);
     lv_obj_set_flex_grow(chip_master_conn[slot], 1);
 }
 
@@ -673,7 +684,6 @@ void ui_update_header() {
     static int prev_pattern = -1;
     static int prev_playing = -1;
     static int prev_wifi = -1;
-    static int prev_fx_values[3] = {-10000, -10000, -10000};
     static uint8_t prev_slot = 255;
 
     // Only update the active screen's header slot — avoids dirtying hidden screens
@@ -688,9 +698,6 @@ void ui_update_header() {
         prev_pattern = -1;
         prev_playing = -1;
         prev_wifi = -1;
-        prev_fx_values[0] = -10000;
-        prev_fx_values[1] = -10000;
-        prev_fx_values[2] = -10000;
     }
 
     int bpm10 = (int)lroundf(currentBPMPrecise * 10.0f);
@@ -729,14 +736,23 @@ void ui_update_header() {
     if ((int)masterConnected != prev_master_conn) {
         prev_master_conn = (int)masterConnected;
         if (lbl_master_conn[slot]) {
-            lv_label_set_text(lbl_master_conn[slot], masterConnected ? LV_SYMBOL_OK " LINK" : LV_SYMBOL_CLOSE " LINK");
+            lv_label_set_text(lbl_master_conn[slot], masterConnected ? LV_SYMBOL_OK " P4 LINK" : LV_SYMBOL_CLOSE " P4 LINK");
             lv_obj_set_style_text_color(lbl_master_conn[slot], masterConnected ? RED808_SUCCESS : RED808_ERROR, 0);
+        }
+        if (chip_master_conn[slot]) {
+            lv_obj_set_style_bg_color(chip_master_conn[slot], masterConnected ? RED808_SUCCESS : RED808_ERROR, 0);
         }
     }
 
     static int prev_master_volume = -1;
+    static int prev_footer_vol = -1;
+    static int prev_footer_ptn = -1;
+    static int prev_footer_play = -1;
     if (slotChanged) {
         prev_master_volume = -1;
+        prev_footer_vol = -1;
+        prev_footer_ptn = -1;
+        prev_footer_play = -1;
     }
     if (masterVolume != prev_master_volume) {
         prev_master_volume = masterVolume;
@@ -744,18 +760,26 @@ void ui_update_header() {
             lv_label_set_text_fmt(lbl_seq_volume[slot], "VOL %d", masterVolume);
         }
     }
-
-    bool fxValuesChanged = false;
-    for (int i = 0; i < 3; i++) {
-        if (dfFxParamValue[i] != prev_fx_values[i]) {
-            prev_fx_values[i] = dfFxParamValue[i];
-            fxValuesChanged = true;
+    if (masterVolume != prev_footer_vol) {
+        prev_footer_vol = masterVolume;
+        if (lbl_footer_vol[slot]) {
+            lv_label_set_text_fmt(lbl_footer_vol[slot], LV_SYMBOL_VOLUME_MAX " %d", masterVolume);
         }
     }
-
-    if (fxValuesChanged && lbl_fx_values[slot]) {
-        lv_label_set_text_fmt(lbl_fx_values[slot], LV_SYMBOL_SETTINGS " FX %d/%d/%d",
-                              dfFxParamValue[0], dfFxParamValue[1], dfFxParamValue[2]);
+    if (currentPattern != prev_footer_ptn) {
+        prev_footer_ptn = currentPattern;
+        if (lbl_footer_ptn[slot]) {
+            lv_label_set_text_fmt(lbl_footer_ptn[slot], "PTN %d", currentPattern + 1);
+        }
+    }
+    if ((int)isPlaying != prev_footer_play) {
+        prev_footer_play = (int)isPlaying;
+        if (lbl_footer_play[slot]) {
+            lv_label_set_text(lbl_footer_play[slot], isPlaying ? LV_SYMBOL_PLAY " PLAY" : LV_SYMBOL_STOP " STOP");
+        }
+        if (chip_footer_play[slot]) {
+            lv_obj_set_style_bg_color(chip_footer_play[slot], isPlaying ? RED808_SUCCESS : RED808_SURFACE, 0);
+        }
     }
 
 }
@@ -769,12 +793,11 @@ static void menu_btn_cb(lv_event_t* e) {
         case 0: nav_to(SCREEN_LIVE, scr_live); break;
         case 1: nav_to(SCREEN_SEQUENCER, scr_sequencer); break;
         case 2: nav_to(SCREEN_VOLUMES, scr_volumes); break;
-        case 3: nav_to(SCREEN_FILTERS, scr_filters); break;
-        case 4: nav_to(SCREEN_PATTERNS, scr_patterns); break;
-        case 5: nav_to(SCREEN_SDCARD, scr_sdcard); break;
-        case 6: nav_to(SCREEN_PERFORMANCE, scr_performance); break;
-        case 7: nav_to(SCREEN_SETTINGS, scr_settings); break;
-        case 8: nav_to(SCREEN_DIAGNOSTICS, scr_diagnostics); break;
+        case 3: nav_to(SCREEN_PATTERNS, scr_patterns); break;
+        case 4: nav_to(SCREEN_SDCARD, scr_sdcard); break;
+        case 5: nav_to(SCREEN_PERFORMANCE, scr_performance); break;
+        case 6: nav_to(SCREEN_SETTINGS, scr_settings); break;
+        case 7: nav_to(SCREEN_DIAGNOSTICS, scr_diagnostics); break;
     }
 }
 
@@ -784,56 +807,70 @@ void ui_create_menu_screen() {
 
     ui_create_header(scr_menu);
 
-    // 3x3 grid of menu buttons
+    // 3×3 grid — full height fill, P4-style neon ring buttons (8 items: 3+3+2)
     static const char* menu_names[] = {
-        LV_SYMBOL_AUDIO "  LIVE PADS",
-        LV_SYMBOL_LIST "  SEQUENCER",
-        LV_SYMBOL_VOLUME_MAX "  VOLUMES",
-        LV_SYMBOL_SETTINGS "  FILTERS FX",
-        LV_SYMBOL_DRIVE "  PATTERNS",
-        LV_SYMBOL_DRIVE "  SD BROWSER",
-        LV_SYMBOL_SETTINGS "  BUTTONS",
-        LV_SYMBOL_HOME "  SETTINGS",
-        LV_SYMBOL_EYE_OPEN "  STATUS"
+        LV_SYMBOL_AUDIO "\nLIVE PADS",
+        LV_SYMBOL_LIST "\nSEQUENCER",
+        LV_SYMBOL_VOLUME_MAX "\nVOLUMES",
+        LV_SYMBOL_DRIVE "\nPATTERNS",
+        LV_SYMBOL_DRIVE "\nSD BROWSER",
+        LV_SYMBOL_SETTINGS "\nBUTTONS",
+        LV_SYMBOL_HOME "\nSETTINGS",
+        LV_SYMBOL_EYE_OPEN "\nSTATUS"
     };
     const lv_color_t menu_colors[] = {
-        RED808_ACCENT, RED808_INFO, RED808_SUCCESS,
-        RED808_WARNING, RED808_CYAN, RED808_ACCENT2,
-        RED808_ERROR, RED808_BORDER, RED808_TEXT_DIM
+        RED808_ACCENT,   RED808_INFO,     RED808_SUCCESS,
+        RED808_CYAN,     RED808_ACCENT2,  RED808_ERROR,
+        lv_color_hex(0xFF8C00), RED808_TEXT_DIM  // SETTINGS: naranja ámbar vistoso
     };
+    static const int menu_count = 8;
 
 #if PORTRAIT_MODE
-    int x_start = 16, y_start = 68;
-    int btn_w = 272, btn_h = 150, gap = 16;
-    int cols = 2;
+    // Portrait: 2 cols, fill height
+    static const int cols    = 2;
+    static const int x_start = 10;
+    static const int y_start = 68;
+    static const int gap     = 10;
+    static const int btn_w   = (UI_W - 2 * x_start - gap) / cols;
+    static const int btn_h   = (UI_H - y_start - 6 - 4 * gap) / 5;
 #else
-    int x_start = 28, y_start = 80;
-    int btn_w = 300, btn_h = 152, gap = 24;
-    int cols = 3;
+    // Landscape 1024×600: 3 cols, fill height
+    static const int cols    = 3;
+    static const int x_start = 12;
+    static const int y_start = 68;
+    static const int gap     = 12;
+    static const int btn_w   = (1024 - 2 * x_start - 2 * gap) / cols;  // 325px
+    static const int btn_h   = (600 - y_start - 4 - 2 * gap) / 3;      // 168px
 #endif
 
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < menu_count; i++) {
         int col = i % cols;
         int row = i / cols;
 
         lv_obj_t* btn = lv_btn_create(scr_menu);
         lv_obj_set_size(btn, btn_w, btn_h);
         lv_obj_set_pos(btn, x_start + col * (btn_w + gap), y_start + row * (btn_h + gap));
-        apply_stable_button_style(btn, RED808_SURFACE, menu_colors[i]);
-        lv_obj_set_style_border_width(btn, 2, 0);
+
+        // P4-style: dark surface + neon colored border + outer glow outline
         lv_obj_set_style_radius(btn, 18, 0);
-        lv_obj_set_style_pad_left(btn, 18, 0);
-        lv_obj_set_style_pad_right(btn, 18, 0);
-        lv_obj_set_style_pad_top(btn, 16, 0);
-        lv_obj_set_style_pad_bottom(btn, 16, 0);
+        lv_obj_set_style_bg_color(btn, RED808_SURFACE, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(btn, 3, 0);
+        lv_obj_set_style_border_color(btn, menu_colors[i], 0);
+        lv_obj_set_style_border_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_outline_width(btn, 3, 0);
+        lv_obj_set_style_outline_color(btn, menu_colors[i], 0);
+        lv_obj_set_style_outline_opa(btn, LV_OPA_30, 0);
+        lv_obj_set_style_outline_pad(btn, 2, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, menu_btn_cb, LV_EVENT_PRESSED, (void*)(intptr_t)i);
 
         lv_obj_t* lbl = lv_label_create(btn);
         lv_label_set_text(lbl, menu_names[i]);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
-        lv_obj_set_style_text_color(lbl, RED808_TEXT, 0);
-        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_LEFT, 0);
-        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(lbl, menu_colors[i], 0);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(lbl);
     }
 }
 
@@ -1038,53 +1075,33 @@ void ui_create_live_screen() {
         lv_obj_set_pos(pad, x, y);
         lv_obj_clear_flag(pad, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
-        // Dark card base with colored left accent bar
-        lv_obj_set_style_bg_color(pad, RED808_SURFACE, 0);
-        lv_obj_set_style_bg_opa(pad, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(pad, 12, 0);
-        lv_obj_set_style_border_width(pad, 1, 0);
-        lv_obj_set_style_border_color(pad, RED808_BORDER, 0);
+        // Neon ring style — identical look to P4 pads
+        lv_obj_set_style_bg_color(pad, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(pad, LV_OPA_80, 0);
+        lv_obj_set_style_radius(pad, 14, 0);
+        lv_obj_set_style_border_width(pad, 3, 0);
+        lv_obj_set_style_border_color(pad, inst_colors[i], 0);
+        lv_obj_set_style_border_opa(pad, LV_OPA_70, 0);
+        lv_obj_set_style_outline_width(pad, 3, 0);
+        lv_obj_set_style_outline_color(pad, inst_colors[i], 0);
+        lv_obj_set_style_outline_opa(pad, LV_OPA_40, 0);
+        lv_obj_set_style_outline_pad(pad, 2, 0);
         lv_obj_set_style_shadow_width(pad, 0, 0);
         lv_obj_set_style_shadow_opa(pad, LV_OPA_TRANSP, 0);
         lv_obj_set_style_pad_all(pad, 0, 0);
 
-        // Colored accent bar on left edge
-        lv_obj_t* accent = lv_obj_create(pad);
-        lv_obj_set_size(accent, 6, h - 16);
-        lv_obj_set_pos(accent, 8, 8);
-        lv_obj_set_style_bg_color(accent, inst_colors[i], 0);
-        lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(accent, 3, 0);
-        lv_obj_set_style_border_width(accent, 0, 0);
-        lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-        live_pad_accents[i] = accent;
+        live_pad_accents[i] = NULL; // no accent bar in neon ring style
 
-        // Track name — large, left-aligned after accent
+        // Track name — centered, neon color
         lv_obj_t* lbl = lv_label_create(pad);
         lv_label_set_text(lbl, trackNames[i]);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, 0);
         lv_obj_set_style_text_color(lbl, inst_colors[i], 0);
-        lv_obj_set_pos(lbl, 22, 10);
+        lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
         live_pad_names[i] = lbl;
 
-        // Instrument description — smaller, below name
-        lv_obj_t* desc = lv_label_create(pad);
-        lv_label_set_text(desc, instrumentNames[i]);
-        lv_obj_set_style_text_font(desc, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(desc, RED808_TEXT_DIM, 0);
-        lv_obj_set_pos(desc, 22, h - 28);
-        live_pad_desc[i] = desc;
-
-        // Bottom colored glow line
-        lv_obj_t* glow = lv_obj_create(pad);
-        lv_obj_set_size(glow, default_pad_w - 24, 3);
-        lv_obj_set_pos(glow, 12, h - 8);
-        lv_obj_set_style_bg_color(glow, inst_colors[i], 0);
-        lv_obj_set_style_bg_opa(glow, LV_OPA_40, 0);
-        lv_obj_set_style_radius(glow, 1, 0);
-        lv_obj_set_style_border_width(glow, 0, 0);
-        lv_obj_clear_flag(glow, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-        live_pad_glows[i] = glow;
+        live_pad_desc[i] = NULL;  // no desc in neon ring style
+        live_pad_glows[i] = NULL; // no glow in neon ring style
 
         live_pads[i] = pad;
         live_pad_x[i] = x;
@@ -1233,17 +1250,19 @@ void ui_update_live_pads() {
         bool active = (state_mask & (1UL << pad)) != 0;
 
         if (active) {
-            // === CORONA ONLY — border lights up, bg stays dark (faster LVGL render) ===
+            // === NEON RING HIT — border lights up full, text white ===
             lv_obj_set_style_border_color(live_pads[pad], inst_colors[pad], 0);
             lv_obj_set_style_border_width(live_pads[pad], 4, 0);
             lv_obj_set_style_border_opa(live_pads[pad], LV_OPA_COVER, 0);
+            lv_obj_set_style_outline_opa(live_pads[pad], LV_OPA_70, 0);
             if (live_pad_names[pad])
                 lv_obj_set_style_text_color(live_pad_names[pad], lv_color_white(), 0);
         } else {
-            // === CORONA OFF ===
-            lv_obj_set_style_border_width(live_pads[pad], 1, 0);
-            lv_obj_set_style_border_color(live_pads[pad], RED808_BORDER, 0);
+            // === NEON RING IDLE — dim border, track color text ===
+            lv_obj_set_style_border_width(live_pads[pad], 3, 0);
+            lv_obj_set_style_border_color(live_pads[pad], inst_colors[pad], 0);
             lv_obj_set_style_border_opa(live_pads[pad], LV_OPA_70, 0);
+            lv_obj_set_style_outline_opa(live_pads[pad], LV_OPA_40, 0);
             if (live_pad_names[pad])
                 lv_obj_set_style_text_color(live_pad_names[pad], inst_colors[pad], 0);
         }
@@ -2181,8 +2200,12 @@ void ui_update_menu_status() {
 }
 
 // ============================================================================
-// FILTERS FX SCREEN - FX LAB touch control
+// FILTERS FX SCREEN - REMOVED (stubs only)
 // ============================================================================
+void ui_create_filters_screen() { scr_filters = NULL; }
+void ui_update_filters() {}
+
+#if 0  // FX_SCREEN_REMOVED
 static uint8_t filter_get_amount(const TrackFilter& filter, int fxIndex) {
     switch (fxIndex) {
         case FILTER_FLANGER: return filter.delayAmount;
@@ -2961,6 +2984,8 @@ void ui_update_filters() {
         }
     }
 }
+
+#endif // FX_SCREEN_REMOVED
 
 // ============================================================================
 // SETTINGS SCREEN
@@ -4163,13 +4188,20 @@ void ui_create_performance_screen() {
     int col1_x = 24, col2_x = 300;
     int section_gap = 8;
 
-    // ── SECTION: ByteButton (16 buttons / 2 modules) ──
-    lv_obj_t* bb_title = lv_label_create(scr_performance);
-    lv_label_set_text(bb_title, "M5 BYTEBUTTON x2  (16 Buttons, tap Bx to rotate action)");
-    lv_obj_set_style_text_font(bb_title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(bb_title, lv_color_hex(0x00D4FF), 0);
-    lv_obj_set_pos(bb_title, col1_x, y);
+    // ── SECTION: ByteButton Module 1 (I2C Hub CH4) ──
+    lv_obj_t* bb1_title = lv_label_create(scr_performance);
+    lv_label_set_text(bb1_title, LV_SYMBOL_UP "  BB MODULE 1  (Hub CH4)  — Transport + FX mute");
+    lv_obj_set_style_text_font(bb1_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(bb1_title, lv_color_hex(0x00D4FF), 0);
+    lv_obj_set_pos(bb1_title, col1_x, y);
     y += 24;
+
+    // ── SECTION: ByteButton Module 2 (I2C Hub CH5) ──
+    lv_obj_t* bb2_title = lv_label_create(scr_performance);
+    lv_label_set_text(bb2_title, LV_SYMBOL_UP "  BB MODULE 2  (Hub CH5)  — Navigation + BPM");
+    lv_obj_set_style_text_font(bb2_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(bb2_title, lv_color_hex(0xFF8C00), 0);
+    lv_obj_set_pos(bb2_title, col1_x + 330, y - 24);  // same row as BB1 header, right column
 
     for (int i = 0; i < BYTEBUTTON_TOTAL_BUTTONS; i++) {
         int bbCol = (i < 8) ? 0 : 1;
@@ -4185,16 +4217,17 @@ void ui_create_performance_screen() {
         lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(chip, 4, 0);
         lv_obj_set_style_border_width(chip, 1, 0);
-        lv_obj_set_style_border_color(chip, lv_color_hex(0x00D4FF), 0);
+        lv_color_t chipColor = (i < BYTEBUTTON_BUTTONS) ? lv_color_hex(0x00D4FF) : lv_color_hex(0xFF8C00);
+        lv_obj_set_style_border_color(chip, chipColor, 0);
         lv_obj_set_style_pad_all(chip, 0, 0);
         lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(chip, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(chip, perf_bb_action_next_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
 
         lv_obj_t* num = lv_label_create(chip);
-        lv_label_set_text_fmt(num, "B%02d", i + 1);
+        lv_label_set_text_fmt(num, "%d-%d", (i / BYTEBUTTON_BUTTONS) + 1, (i % BYTEBUTTON_BUTTONS) + 1);
         lv_obj_set_style_text_font(num, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(num, lv_color_hex(0x00D4FF), 0);
+        lv_obj_set_style_text_color(num, (i < BYTEBUTTON_BUTTONS) ? lv_color_hex(0x00D4FF) : lv_color_hex(0xFF8C00), 0);
         lv_obj_center(num);
 
         // Function label
