@@ -796,7 +796,14 @@ void ui_create_menu_screen() {
         RED808_CYAN,     RED808_ACCENT2,  RED808_ERROR,
         lv_color_hex(0xFF8C00), RED808_TEXT_DIM  // SETTINGS: naranja ámbar vistoso
     };
-    static const int menu_count = 8;
+    static const int menu_count = 8;   // botones activos
+    static const int menu_total = 10;  // incluye 2 placeholders
+
+    // Placeholder labels (índices 8 y 9)
+    static const char* placeholder_labels[] = {
+        LV_SYMBOL_BULLET " " LV_SYMBOL_BULLET " " LV_SYMBOL_BULLET "\nPRÓXIMAMENTE",
+        LV_SYMBOL_BULLET " " LV_SYMBOL_BULLET " " LV_SYMBOL_BULLET "\nPRÓXIMAMENTE"
+    };
 
 #if PORTRAIT_MODE
     // Portrait: 2 cols, fill height
@@ -807,45 +814,67 @@ void ui_create_menu_screen() {
     static const int btn_w   = (UI_W - 2 * x_start - gap) / cols;
     static const int btn_h   = (UI_H - y_start - 6 - 4 * gap) / 5;
 #else
-    // Landscape 1024×600: 3 cols, fill height
-    // Header: y=6, h=80 → bottom=86. y_start=102 → 16px gap.
-    // Available: 600-102-6=492. btn_h=(492-24)/3=156px.
+    // Landscape 1024×600: 3 cols, 4 rows, 10 botones (8 activos + 2 placeholder)
+    // Header bottom=86, y_start=102 → 16px gap.
+    // Available: 600-102-6=492. 4 filas: btn_h=(492-3×12)/4=114px
     static const int cols    = 3;
     static const int x_start = 12;
     static const int y_start = 102;
     static const int gap     = 12;
     static const int btn_w   = (UI_W - 2 * x_start - 2 * gap) / cols;  // 325px
-    static const int btn_h   = (UI_H - y_start - 6 - 2 * gap) / 3;     // 156px
+    static const int btn_h   = (UI_H - y_start - 6 - 3 * gap) / 4;     // 114px
 #endif
 
-    for (int i = 0; i < menu_count; i++) {
+    for (int i = 0; i < menu_total; i++) {
         int col = i % cols;
         int row = i / cols;
+        bool is_placeholder = (i >= menu_count);
 
         lv_obj_t* btn = lv_btn_create(scr_menu);
         lv_obj_set_size(btn, btn_w, btn_h);
         lv_obj_set_pos(btn, x_start + col * (btn_w + gap), y_start + row * (btn_h + gap));
-
-        // P4-style: dark surface + neon colored border + outer glow outline
         lv_obj_set_style_radius(btn, 18, 0);
-        lv_obj_set_style_bg_color(btn, RED808_SURFACE, 0);
-        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(btn, 3, 0);
-        lv_obj_set_style_border_color(btn, menu_colors[i], 0);
-        lv_obj_set_style_border_opa(btn, LV_OPA_COVER, 0);
-        lv_obj_set_style_outline_width(btn, 3, 0);
-        lv_obj_set_style_outline_color(btn, menu_colors[i], 0);
-        lv_obj_set_style_outline_opa(btn, LV_OPA_30, 0);
-        lv_obj_set_style_outline_pad(btn, 2, 0);
-        lv_obj_set_style_shadow_width(btn, 0, 0);
-        lv_obj_add_event_cb(btn, menu_btn_cb, LV_EVENT_PRESSED, (void*)(intptr_t)i);
 
-        lv_obj_t* lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, menu_names[i]);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, 0);
-        lv_obj_set_style_text_color(lbl, menu_colors[i], 0);
-        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_center(lbl);
+        if (is_placeholder) {
+            // Estilo placeholder: fondo muy tenue, borde punteado simulado con outline + baja opa
+            lv_obj_set_style_bg_color(btn, RED808_SURFACE, 0);
+            lv_obj_set_style_bg_opa(btn, LV_OPA_20, 0);
+            lv_obj_set_style_border_width(btn, 1, 0);
+            lv_obj_set_style_border_color(btn, RED808_TEXT_DIM, 0);
+            lv_obj_set_style_border_opa(btn, LV_OPA_40, 0);
+            lv_obj_set_style_outline_width(btn, 2, 0);
+            lv_obj_set_style_outline_color(btn, RED808_TEXT_DIM, 0);
+            lv_obj_set_style_outline_opa(btn, LV_OPA_20, 0);
+            lv_obj_set_style_outline_pad(btn, 4, 0);
+            lv_obj_set_style_shadow_width(btn, 0, 0);
+            // Sin callback — no hace nada al pulsar
+            lv_obj_t* lbl = lv_label_create(btn);
+            lv_label_set_text(lbl, placeholder_labels[i - menu_count]);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_color(lbl, RED808_TEXT_DIM, 0);
+            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_style_text_opa(lbl, LV_OPA_50, 0);
+            lv_obj_center(lbl);
+        } else {
+            // P4-style: dark surface + neon colored border + outer glow outline
+            lv_obj_set_style_bg_color(btn, RED808_SURFACE, 0);
+            lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(btn, 3, 0);
+            lv_obj_set_style_border_color(btn, menu_colors[i], 0);
+            lv_obj_set_style_border_opa(btn, LV_OPA_COVER, 0);
+            lv_obj_set_style_outline_width(btn, 3, 0);
+            lv_obj_set_style_outline_color(btn, menu_colors[i], 0);
+            lv_obj_set_style_outline_opa(btn, LV_OPA_30, 0);
+            lv_obj_set_style_outline_pad(btn, 2, 0);
+            lv_obj_set_style_shadow_width(btn, 0, 0);
+            lv_obj_add_event_cb(btn, menu_btn_cb, LV_EVENT_PRESSED, (void*)(intptr_t)i);
+            lv_obj_t* lbl = lv_label_create(btn);
+            lv_label_set_text(lbl, menu_names[i]);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_20, 0);
+            lv_obj_set_style_text_color(lbl, menu_colors[i], 0);
+            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_center(lbl);
+        }
     }
 }
 
@@ -3183,6 +3212,8 @@ void ui_create_settings_screen() {
         lv_obj_add_event_cb(btn, [](lv_event_t* e) {
             int idx = (int)(intptr_t)lv_event_get_user_data(e);
             ui_theme_apply((VisualTheme)idx);
+            extern volatile bool themeJustChanged;
+            themeJustChanged = true;
         }, LV_EVENT_CLICKED, (void*)(intptr_t)i);
     }
 }

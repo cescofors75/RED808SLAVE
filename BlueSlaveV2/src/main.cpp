@@ -1683,46 +1683,45 @@ void scanI2CHub() {
 
 void updateByteButtonLeds() {
     auto ledColorForAction = [&](uint8_t action) -> uint32_t {
+        // Helper: dim a raw 0xRRGGBB color to ~30% brightness
+        auto dim = [](uint32_t c, int shift) -> uint32_t {
+            return (((c >> 16) & 0xFF) >> shift) << 16 |
+                   (((c >>  8) & 0xFF) >> shift) <<  8 |
+                   (((c      ) & 0xFF) >> shift);
+        };
+        uint32_t c0 = theme_nav_color(0), c1 = theme_nav_color(1);
+        uint32_t c2 = theme_nav_color(2), c3 = theme_nav_color(3);
+        uint32_t c4 = theme_nav_color(4), c5 = theme_nav_color(5);
+        uint32_t c6 = theme_nav_color(6);
         switch ((ByteButtonAction)action) {
-            case BB_ACTION_MENU:
-                return theme_nav_color(6);
-            case BB_ACTION_VOL_MODE:
-                return 0x0055CC;
-            case BB_ACTION_SCREEN_LIVE:
-                return 0x22AAFF;
-            case BB_ACTION_SCREEN_SEQUENCER:
-                return 0x55CC55;
-            case BB_ACTION_SCREEN_PERFORMANCE:
-                return 0xCC66FF;
-            case BB_ACTION_SCREEN_VOLUMES:
-                return 0xFFAA33;
+            case BB_ACTION_MENU:           return c6;
+            case BB_ACTION_VOL_MODE:       return dim(c0, 1);
+            case BB_ACTION_SCREEN_LIVE:    return c2;
+            case BB_ACTION_SCREEN_SEQUENCER: return c3;
+            case BB_ACTION_SCREEN_PERFORMANCE: return c4;
+            case BB_ACTION_SCREEN_VOLUMES: return c5;
             case BB_ACTION_FX_CLEAN:
-                return analogFxMuted[0] ? 0xAA2222 : 0x225522;
+                return analogFxMuted[0] ? dim(0xFF0000, 2) : c1;
             case BB_ACTION_FX_SPACE:
-                return analogFxMuted[1] ? 0xAA2222 : 0x336655;
+                return analogFxMuted[1] ? dim(0xFF0000, 2) : c2;
             case BB_ACTION_FX_ACID:
-                return analogFxMuted[2] ? 0xAA2222 : 0x557733;
+                return analogFxMuted[2] ? dim(0xFF0000, 2) : c3;
             case BB_ACTION_FX_DESTROY:
-                return (analogFxMuted[0] && analogFxMuted[1] && analogFxMuted[2]) ? 0xCC2222 : 0x553333;
+                return (analogFxMuted[0] && analogFxMuted[1] && analogFxMuted[2]) ? dim(0xFF0000, 1) : dim(c0, 1);
             case BB_ACTION_FX_TARGET_PREV:
             case BB_ACTION_FX_TARGET_NEXT:
-                return (filterSelectedTrack == -1) ? 0x7711AA : 0xAA11AA;
+                return (filterSelectedTrack == -1) ? dim(c4, 2) : c4;
             case BB_ACTION_PATTERN_PREV:
-                return (currentPattern > 0) ? 0xAA6600 : 0x221100;
+                return (currentPattern > 0) ? c0 : dim(c0, 3);
             case BB_ACTION_PATTERN_NEXT:
-                return (currentPattern < Config::MAX_PATTERNS - 1) ? 0xAA6600 : 0x221100;
+                return (currentPattern < Config::MAX_PATTERNS - 1) ? c0 : dim(c0, 3);
             case BB_ACTION_PLAY_PAUSE:
-                return isPlaying ? 0x00AA44 : 0x224422;
-            case BB_ACTION_SCREEN_PATTERNS:
-                return 0x22AAAA;
-            case BB_ACTION_SCREEN_SETTINGS:
-                return 0xFF6600;
-            case BB_ACTION_BPM_UP:
-                return 0x225599;
-            case BB_ACTION_BPM_DOWN:
-                return 0x223366;
-            default:
-                return 0x202020;
+                return isPlaying ? c1 : dim(c1, 2);
+            case BB_ACTION_SCREEN_PATTERNS: return c1;
+            case BB_ACTION_SCREEN_SETTINGS: return c5;
+            case BB_ACTION_BPM_UP:          return dim(c0, 1);
+            case BB_ACTION_BPM_DOWN:        return dim(c0, 2);
+            default:                        return 0x202020;
         }
     };
 
@@ -2248,7 +2247,7 @@ void handleUnitFader() {
     // Absolute positional mapping: ADC position → Master Volume 0..150
     // Uses heavy oversampling + EMA filter for smooth, jitter-free response.
     static unsigned long lastReadMs = 0;
-    static float filtered = -1.0f;
+    static float filtered = -1.0f;  // -1 = uninitialized
     static int lastMappedVol = -1;
 
     unsigned long now = millis();
@@ -2260,9 +2259,13 @@ void handleUnitFader() {
     for (int i = 0; i < 16; i++) sum += analogRead(Config::UNIT_FADER_PIN);
     float raw = (float)(sum / 16);
 
-    // EMA filter (alpha=0.1 → very smooth, lag ~10 samples)
+    // First call: initialize filter to real position and apply immediately
     if (filtered < 0.0f) {
         filtered = raw;
+        int initVol = (int)((filtered / 4095.0f) * (float)Config::MAX_VOLUME + 0.5f);
+        initVol = constrain(initVol, 0, Config::MAX_VOLUME);
+        lastMappedVol = initVol;
+        applyUnifiedMasterVolume(initVol, true);
         return;
     }
     filtered = filtered * 0.9f + raw * 0.1f;
@@ -2441,6 +2444,9 @@ void updateUI() {
         for (int t = 0; t < Config::MAX_TRACKS; t++) {
             updateTrackEncoderLED(t);
         }
+        // Invalidate ByteButton LED cache and immediately push new colors
+        memset(byteButtonLedCache, 0xFF, sizeof(byteButtonLedCache));
+        updateByteButtonLeds();
     }
 
     if (!lvgl_port_lock(15)) return;  // 15ms: give LVGL task time to finish
@@ -2451,6 +2457,7 @@ void updateUI() {
         pendingThemeIdx = -1;
         ui_theme_apply((VisualTheme)pt);
         uart_bridge_send_theme(pt);
+        themeJustChanged = true;  // trigger BB LED cache flush on next updateUI()
     }
 
     ui_update_header();
