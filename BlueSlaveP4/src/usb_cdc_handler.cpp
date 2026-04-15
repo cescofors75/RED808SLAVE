@@ -196,10 +196,11 @@ static void finalize_connection(const char* method) {
              s_connect_count, method, millis());
     P4_LOG_PRINT(buf);
 
-    // CRITICAL: Assert DTR+RTS so ESP32-S3 HWCDC starts sending data
-    esp_err_t err = cdc_acm_host_set_control_line_state(s_cdc_dev, true, true);
+    // DO NOT assert DTR — CH343 auto-reset circuit pulses ESP32-S3 EN on DTR=true
+    // With DTR=false the CDC data channel still works normally
+    esp_err_t err = cdc_acm_host_set_control_line_state(s_cdc_dev, false, false);
     s_last_dtr_err = err;
-    snprintf(buf, sizeof(buf), "[USB-CDC] DTR/RTS: 0x%x (%s)\n", err, esp_err_to_name(err));
+    snprintf(buf, sizeof(buf), "[USB-CDC] DTR/RTS (no-reset): 0x%x (%s)\n", err, esp_err_to_name(err));
     P4_LOG_PRINT(buf);
 
     // Set line coding (informational for USB CDC)

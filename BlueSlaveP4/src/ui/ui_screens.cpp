@@ -144,8 +144,8 @@ void ui_create_header(lv_obj_t* parent) {
     lv_obj_set_style_shadow_width(back_btn, 0, 0);
     lv_obj_add_event_cb(back_btn, [](lv_event_t* e) {
         LV_UNUSED(e);
-        if (prev_active_screen != active_screen) {
-            ui_navigate_to(prev_active_screen);
+        if (active_screen != 2) {  // 2 = SCREEN_LIVE (main menu)
+            ui_navigate_to(2);
         }
     }, LV_EVENT_CLICKED, NULL);
     lv_obj_t* back_lbl = lv_label_create(back_btn);
@@ -642,12 +642,70 @@ static void update_live_screen(void) {
 }
 
 // =============================================================================
-// FX LAB SCREEN — 6 arc widgets (3 encoders + 3 pots)
+// FX LAB SCREEN — 2 pages × 3 circles
+//   Page 0: FLANGER (enc0) | PHASER (enc2) | REVERB (enc1)
+//   Page 1: DRIVE (pot3)   | CUTOFF (pot1) | RESONANCE (pot2)
 // =============================================================================
-static lv_obj_t* fx_arcs[6] = {};
-static lv_obj_t* fx_value_labels[6] = {};
+static int fx_page = 0;   // 0 or 1
+
+// 6 widgets, indices 0-5 (3 per page, page*3 + slot)
+static lv_obj_t* fx_arcs[6]        = {};
+static lv_obj_t* fx_value_labels[6]= {};
 static lv_obj_t* fx_name_labels[6] = {};
-static lv_obj_t* fx_mute_labels[6] = {};
+static lv_obj_t* fx_toggle_btns[6] = {};  // ON/OFF toggle per FX
+static lv_obj_t* fx_pct_ring[6]    = {};  // outer glow ring (decorative)
+static lv_obj_t* fx_page_dot[2]    = {};  // page indicator dots
+static lv_obj_t* fx_page_lbl       = NULL;
+
+// FX metadata (page × 3)
+static const char*    fx_names[6]  = {"FLANGER","PHASER","REVERB","DRIVE","CUTOFF","RESONANCE"};
+static const uint32_t fx_colors[6] = {0x58A6FF, 0xB58BFF, 0x39D2C0,
+                                       0xFF6B35, 0xFFD700, 0xFF8F5A};
+static const char*    fx_src[6]    = {"ENC 1","ENC 3","ENC 2","POT","POT","POT"};
+
+// Callback: toggle FX mute on card click
+static void fx_toggle_cb(lv_event_t* e) {
+    int cell = (int)(intptr_t)lv_event_get_user_data(e);
+    if (cell < 0 || cell > 5) return;
+    if (cell < 3) {
+        // Encoder FX (0=Flanger, 1=Phaser→enc2, 2=Reverb→enc1)
+        // enc mapping: cell0=enc0, cell1=enc2, cell2=enc1
+        int enc_id = (cell == 0) ? 0 : (cell == 1) ? 2 : 1;
+        p4.enc_muted[enc_id] = !p4.enc_muted[enc_id];
+        bool m = p4.enc_muted[enc_id];
+        if (udp_wifi_connected())
+            udp_send_fx_enc(enc_id, p4.enc_value[enc_id], m);
+    } else {
+        // Pot FX (cell3=pot1, cell4=pot2, cell5=pot3)
+        int pot_idx = cell - 3;  // 0,1,2 → pot_muted[0,1,2]
+        p4.pot_muted[pot_idx] = !p4.pot_muted[pot_idx];
+    }
+}
+
+// Callback: page navigation
+static void fx_page_cb(lv_event_t* e) {
+    int dir = (int)(intptr_t)lv_event_get_user_data(e);
+    fx_page = (fx_page + dir + 2) % 2;
+    // Update page indicator
+    if (fx_page_lbl)
+        lv_label_set_text_fmt(fx_page_lbl, "%d / 2", fx_page + 1);
+    for (int p = 0; p < 2; p++) {
+        if (fx_page_dot[p])
+            lv_obj_set_style_bg_opa(fx_page_dot[p], p == fx_page ? LV_OPA_COVER : LV_OPA_30, 0);
+    }
+    // Show/hide appropriate cells
+    int base = fx_page * 3;
+    for (int c = 0; c < 6; c++) {
+        bool vis = (c >= base && c < base + 3);
+        if (fx_arcs[c]) {
+            lv_obj_t* card = lv_obj_get_parent(fx_arcs[c]);
+            if (card) {
+                if (vis) lv_obj_clear_flag(card, LV_OBJ_FLAG_HIDDEN);
+                else     lv_obj_add_flag(card, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
+}
 
 static void create_fx_screen(void) {
     scr_fx = lv_obj_create(NULL);
@@ -655,115 +713,227 @@ static void create_fx_screen(void) {
     lv_obj_clear_flag(scr_fx, LV_OBJ_FLAG_SCROLLABLE);
     ui_create_header(scr_fx);
 
+    // ── Title row ──
     lv_obj_t* title = lv_label_create(scr_fx);
     lv_label_set_text(title, LV_SYMBOL_AUDIO "  FX LAB");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(title, RED808_TEXT, 0);
-    lv_obj_set_pos(title, 20, 64);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_color(title, RED808_ACCENT, 0);
+    lv_obj_set_pos(title, 16, 68);
 
-    static const char* names[] = {"FLANGER", "REVERB", "PHASER", "CUTOFF", "RESONANCE", "DRIVE"};
-    static const char* sources[] = {"DF-1", "DF-2", "DF-3", "P2", "P3", "P4"};
-    static const uint32_t colors[] = {0x58A6FF, 0x39D2C0, 0xD29922, 0xB58BFF, 0xFF8F5A, 0x7DD36F};
+    // ── Page indicator ──
+    fx_page_lbl = lv_label_create(scr_fx);
+    lv_label_set_text(fx_page_lbl, "1 / 2");
+    lv_obj_set_style_text_font(fx_page_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(fx_page_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_align(fx_page_lbl, LV_ALIGN_TOP_RIGHT, -100, 72);
 
-    int panelW = UI_W - 24;
-    int panelH = UI_H - 200;
-    int gap = 10, cols = 2, rows = 3;
-    int cellW = (panelW - gap) / cols;
-    int cellH = (panelH - gap * 2) / rows;
+    for (int p = 0; p < 2; p++) {
+        fx_page_dot[p] = lv_obj_create(scr_fx);
+        lv_obj_set_size(fx_page_dot[p], 10, 10);
+        lv_obj_set_style_radius(fx_page_dot[p], 5, 0);
+        lv_obj_set_style_bg_color(fx_page_dot[p], RED808_ACCENT, 0);
+        lv_obj_set_style_bg_opa(fx_page_dot[p], p == 0 ? LV_OPA_COVER : LV_OPA_30, 0);
+        lv_obj_set_style_border_width(fx_page_dot[p], 0, 0);
+        lv_obj_clear_flag(fx_page_dot[p], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(fx_page_dot[p], LCD_H_RES / 2 - 12 + p * 18, 74);
+    }
+
+    // ── Nav arrows ──
+    lv_obj_t* nav_prev = lv_btn_create(scr_fx);
+    lv_obj_set_size(nav_prev, 44, 36);
+    lv_obj_set_pos(nav_prev, LCD_H_RES - 104, 66);
+    lv_obj_set_style_radius(nav_prev, 8, 0);
+    lv_obj_set_style_bg_color(nav_prev, RED808_SURFACE, 0);
+    lv_obj_set_style_border_color(nav_prev, RED808_BORDER, 0);
+    lv_obj_set_style_border_width(nav_prev, 1, 0);
+    lv_obj_set_style_shadow_width(nav_prev, 0, 0);
+    lv_obj_t* la = lv_label_create(nav_prev);
+    lv_label_set_text(la, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(la, RED808_TEXT, 0);
+    lv_obj_center(la);
+    lv_obj_add_event_cb(nav_prev, fx_page_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+
+    lv_obj_t* nav_next = lv_btn_create(scr_fx);
+    lv_obj_set_size(nav_next, 44, 36);
+    lv_obj_set_pos(nav_next, LCD_H_RES - 54, 66);
+    lv_obj_set_style_radius(nav_next, 8, 0);
+    lv_obj_set_style_bg_color(nav_next, RED808_SURFACE, 0);
+    lv_obj_set_style_border_color(nav_next, RED808_BORDER, 0);
+    lv_obj_set_style_border_width(nav_next, 1, 0);
+    lv_obj_set_style_shadow_width(nav_next, 0, 0);
+    lv_obj_t* lr = lv_label_create(nav_next);
+    lv_label_set_text(lr, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(lr, RED808_TEXT, 0);
+    lv_obj_center(lr);
+    lv_obj_add_event_cb(nav_next, fx_page_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
+
+    // ── 3 large circle cards per page ──
+    // Canvas: 1024×600, header≈68, title row to y≈108
+    const int CARD_Y   = 108;
+    const int CARD_H   = LCD_V_RES - CARD_Y - 8;   // ~484px
+    const int MARGIN   = 12;
+    const int CARD_GAP = 10;
+    const int CARD_W   = (LCD_H_RES - 2 * MARGIN - 2 * CARD_GAP) / 3;  // ~330px
+
+    // Arc size: make it large and centered
+    const int ARC_SIZE = constrain(CARD_W - 40, 200, 290);  // ~290px
 
     for (int cell = 0; cell < 6; cell++) {
-        int col = cell % 2, row = cell / 2;
-        int x = 12 + col * (cellW + gap);
-        int y = 100 + row * (cellH + gap);
+        int slot = cell % 3;
+        int x = MARGIN + slot * (CARD_W + CARD_GAP);
+        bool is_page0 = (cell < 3);
 
-        lv_obj_t* card = create_section_shell(scr_fx, x, y, cellW, cellH);
-        lv_obj_set_style_bg_color(card, lv_color_hex(0x17222B), 0);
-        lv_obj_set_style_bg_opa(card, LV_OPA_80, 0);
+        // Card container
+        lv_obj_t* card = lv_obj_create(scr_fx);
+        lv_obj_set_size(card, CARD_W, CARD_H);
+        lv_obj_set_pos(card, x, CARD_Y);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        // Dark glass card
+        lv_obj_set_style_bg_color(card, lv_color_hex(0x0C1620), 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(card, 20, 0);
         lv_obj_set_style_border_width(card, 2, 0);
-        lv_obj_set_style_border_color(card, RED808_BORDER, 0);
+        lv_obj_set_style_border_color(card, lv_color_hex(fx_colors[cell]), 0);
+        lv_obj_set_style_border_opa(card, LV_OPA_40, 0);
+        // Outer neon glow
+        lv_obj_set_style_outline_width(card, 4, 0);
+        lv_obj_set_style_outline_color(card, lv_color_hex(fx_colors[cell]), 0);
+        lv_obj_set_style_outline_opa(card, LV_OPA_20, 0);
+        lv_obj_set_style_outline_pad(card, 2, 0);
+        lv_obj_set_style_shadow_width(card, 0, 0);
+        lv_obj_set_style_pad_all(card, 0, 0);
+        // Hide page 2 cards on start
+        if (!is_page0) lv_obj_add_flag(card, LV_OBJ_FLAG_HIDDEN);
+        // Make card clickable for toggle
+        lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(card, fx_toggle_cb, LV_EVENT_CLICKED, (void*)(intptr_t)cell);
 
+        // FX Name — top center, neon style
         fx_name_labels[cell] = lv_label_create(card);
-        lv_label_set_text(fx_name_labels[cell], names[cell]);
-        lv_obj_set_style_text_font(fx_name_labels[cell], &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(fx_name_labels[cell], lv_color_hex(colors[cell]), 0);
-        lv_obj_set_width(fx_name_labels[cell], cellW - 24);
+        lv_label_set_text(fx_name_labels[cell], fx_names[cell]);
+        lv_obj_set_style_text_font(fx_name_labels[cell], &lv_font_montserrat_22, 0);
+        lv_obj_set_style_text_color(fx_name_labels[cell], lv_color_hex(fx_colors[cell]), 0);
+        lv_obj_set_width(fx_name_labels[cell], CARD_W);
         lv_obj_set_style_text_align(fx_name_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_pos(fx_name_labels[cell], 12, 8);
+        lv_obj_align(fx_name_labels[cell], LV_ALIGN_TOP_MID, 0, 14);
 
-        // Badge-style mute label (S3 style)
-        fx_mute_labels[cell] = lv_label_create(card);
-        const char* init_txt = (cell < 3) ? "ON" : (cell == 3 ? "OFF" : "ANLG");
-        lv_label_set_text(fx_mute_labels[cell], init_txt);
-        lv_obj_set_style_text_font(fx_mute_labels[cell], &lv_font_montserrat_12, 0);
-        lv_color_t badge_col = (cell < 3) ? RED808_SUCCESS : (cell == 3 ? RED808_TEXT_DIM : RED808_ACCENT2);
-        lv_obj_set_style_text_color(fx_mute_labels[cell], badge_col, 0);
-        lv_obj_set_style_bg_opa(fx_mute_labels[cell], LV_OPA_30, 0);
-        lv_obj_set_style_bg_color(fx_mute_labels[cell], badge_col, 0);
-        lv_obj_set_style_radius(fx_mute_labels[cell], 8, 0);
-        lv_obj_set_style_pad_left(fx_mute_labels[cell], 6, 0);
-        lv_obj_set_style_pad_right(fx_mute_labels[cell], 6, 0);
-        lv_obj_set_style_pad_top(fx_mute_labels[cell], 2, 0);
-        lv_obj_set_style_pad_bottom(fx_mute_labels[cell], 2, 0);
-        lv_obj_align(fx_mute_labels[cell], LV_ALIGN_TOP_RIGHT, -8, 10);
+        // Source tag — subtle under name
+        lv_obj_t* src_lbl = lv_label_create(card);
+        lv_label_set_text(src_lbl, fx_src[cell]);
+        lv_obj_set_style_text_font(src_lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(src_lbl, lv_color_hex(fx_colors[cell] & 0x7F7F7F), 0);
+        lv_obj_set_width(src_lbl, CARD_W);
+        lv_obj_set_style_text_align(src_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(src_lbl, LV_ALIGN_TOP_MID, 0, 42);
 
-        int arcSize = min(cellW - 24, cellH - 68);
-        arcSize = constrain(arcSize, 84, 180);
+        // ── BIG ARC (neon circle indicator) ──
         fx_arcs[cell] = lv_arc_create(card);
-        lv_obj_set_size(fx_arcs[cell], arcSize, arcSize);
-        lv_obj_align(fx_arcs[cell], LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_size(fx_arcs[cell], ARC_SIZE, ARC_SIZE);
+        lv_obj_align(fx_arcs[cell], LV_ALIGN_CENTER, 0, -18);
         lv_arc_set_rotation(fx_arcs[cell], 135);
         lv_arc_set_bg_angles(fx_arcs[cell], 0, 270);
         lv_arc_set_range(fx_arcs[cell], 0, 127);
         lv_arc_set_value(fx_arcs[cell], 0);
         lv_obj_clear_flag(fx_arcs[cell], LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_style(fx_arcs[cell], NULL, LV_PART_KNOB);
-        lv_obj_set_style_arc_width(fx_arcs[cell], 10, LV_PART_MAIN);
-        lv_obj_set_style_arc_color(fx_arcs[cell], lv_color_hex(0x3A4B58), LV_PART_MAIN);
-        lv_obj_set_style_arc_width(fx_arcs[cell], 16, LV_PART_INDICATOR);
-        lv_obj_set_style_arc_color(fx_arcs[cell], lv_color_hex(colors[cell]), LV_PART_INDICATOR);
+        // Track (background ring) — dim
+        lv_obj_set_style_arc_width(fx_arcs[cell], 14, LV_PART_MAIN);
+        lv_obj_set_style_arc_color(fx_arcs[cell], lv_color_hex(0x1E2D3A), LV_PART_MAIN);
+        lv_obj_set_style_arc_opa(fx_arcs[cell], LV_OPA_COVER, LV_PART_MAIN);
+        // Indicator (filled arc) — neon glow
+        lv_obj_set_style_arc_width(fx_arcs[cell], 20, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(fx_arcs[cell], lv_color_hex(fx_colors[cell]), LV_PART_INDICATOR);
 
+        // Value label — center of arc (big neon number)
         fx_value_labels[cell] = lv_label_create(card);
         lv_label_set_text(fx_value_labels[cell], "000");
-        lv_obj_set_style_text_font(fx_value_labels[cell], &lv_font_montserrat_22, 0);
-        lv_obj_set_style_text_color(fx_value_labels[cell], RED808_TEXT, 0);
-        lv_obj_align(fx_value_labels[cell], LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_style_text_font(fx_value_labels[cell], &lv_font_montserrat_40, 0);
+        lv_obj_set_style_text_color(fx_value_labels[cell], lv_color_hex(fx_colors[cell]), 0);
+        lv_obj_set_width(fx_value_labels[cell], CARD_W);
+        lv_obj_set_style_text_align(fx_value_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(fx_value_labels[cell], LV_ALIGN_CENTER, 0, -18);
 
-        lv_obj_t* src = lv_label_create(card);
-        lv_label_set_text(src, sources[cell]);
-        lv_obj_set_style_text_font(src, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(src, RED808_TEXT_DIM, 0);
-        lv_obj_align(src, LV_ALIGN_BOTTOM_MID, 0, -4);
+        // Percentage sub-label
+        lv_obj_t* pct = lv_label_create(card);
+        lv_label_set_text(pct, "%");
+        lv_obj_set_style_text_font(pct, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(pct, lv_color_hex(fx_colors[cell] & 0x9F9F9F), 0);
+        lv_obj_align(pct, LV_ALIGN_CENTER, ARC_SIZE / 4, -2);
+
+        // ── ON/OFF Toggle Button ──
+        fx_toggle_btns[cell] = lv_btn_create(card);
+        lv_obj_set_size(fx_toggle_btns[cell], 100, 38);
+        lv_obj_align(fx_toggle_btns[cell], LV_ALIGN_BOTTOM_MID, 0, -14);
+        lv_obj_set_style_radius(fx_toggle_btns[cell], 19, 0);
+        lv_obj_set_style_bg_color(fx_toggle_btns[cell], lv_color_hex(fx_colors[cell]), 0);
+        lv_obj_set_style_bg_opa(fx_toggle_btns[cell], LV_OPA_20, 0);
+        lv_obj_set_style_border_width(fx_toggle_btns[cell], 2, 0);
+        lv_obj_set_style_border_color(fx_toggle_btns[cell], lv_color_hex(fx_colors[cell]), 0);
+        lv_obj_set_style_border_opa(fx_toggle_btns[cell], LV_OPA_80, 0);
+        lv_obj_set_style_shadow_width(fx_toggle_btns[cell], 12, 0);
+        lv_obj_set_style_shadow_color(fx_toggle_btns[cell], lv_color_hex(fx_colors[cell]), 0);
+        lv_obj_set_style_shadow_opa(fx_toggle_btns[cell], LV_OPA_40, 0);
+        lv_obj_clear_flag(fx_toggle_btns[cell], LV_OBJ_FLAG_CLICKABLE);  // card handles click
+        lv_obj_t* tog_lbl = lv_label_create(fx_toggle_btns[cell]);
+        lv_label_set_text(tog_lbl, "ON");
+        lv_obj_set_style_text_font(tog_lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(tog_lbl, lv_color_hex(fx_colors[cell]), 0);
+        lv_obj_center(tog_lbl);
     }
 }
 
 static void update_fx_screen(void) {
-    // Encoders: Flanger(0), Reverb(1), Phaser(2)
-    for (int i = 0; i < 3; i++) {
-        int val = p4.enc_value[i];
-        bool muted = p4.enc_muted[i];
-        if (fx_arcs[i]) lv_arc_set_value(fx_arcs[i], muted ? 0 : val);
-        if (fx_value_labels[i]) lv_label_set_text_fmt(fx_value_labels[i], "%03d", val);
-        if (fx_mute_labels[i]) {
-            lv_label_set_text(fx_mute_labels[i], muted ? "MUTE" : "ON");
-            lv_color_t c = muted ? RED808_ERROR : RED808_SUCCESS;
-            lv_obj_set_style_text_color(fx_mute_labels[i], c, 0);
-            lv_obj_set_style_bg_color(fx_mute_labels[i], c, 0);
+    // Enc mapping: cell0=Flanger(enc0), cell1=Phaser(enc2), cell2=Reverb(enc1)
+    static const int enc_map[3] = {0, 2, 1};
+    // Pot mapping: cell3=Drive(pot3), cell4=Cutoff(pot1), cell5=Resonance(pot2)
+    static const int pot_map[3] = {3, 1, 2};
+    static const bool pot_muted_init[3] = {false, false, false};
+
+    for (int cell = 0; cell < 6; cell++) {
+        int val;
+        bool muted;
+        if (cell < 3) {
+            int ei = enc_map[cell];
+            val   = p4.enc_value[ei];
+            muted = p4.enc_muted[ei];
+        } else {
+            int pi = pot_map[cell - 3];
+            val   = p4.pot_value[pi];
+            muted = p4.pot_muted[cell - 3];
         }
-    }
-    // Pots: Cutoff OFF (cell 3), Resonance (cell 4), Drive (cell 5)
-    int pot_vals[3] = {0, p4.pot_value[2], p4.pot_value[3]};
-    bool pot_muted[3] = {true, p4.pot_muted[1], p4.pot_muted[2]};
-    for (int i = 3; i < 6; i++) {
-        int idx = i - 3;
-        bool m = pot_muted[idx];
-        if (fx_arcs[i]) lv_arc_set_value(fx_arcs[i], m ? 0 : pot_vals[idx]);
-        if (fx_value_labels[i]) lv_label_set_text_fmt(fx_value_labels[i], "%03d", pot_vals[idx]);
-        if (fx_mute_labels[i]) {
-            const char* txt = (i == 3) ? "OFF" : (m ? "MUTE" : "ANLG");
-            lv_label_set_text(fx_mute_labels[i], txt);
-            lv_color_t c = (i == 3) ? RED808_TEXT_DIM : (m ? RED808_ERROR : RED808_ACCENT2);
-            lv_obj_set_style_text_color(fx_mute_labels[i], c, 0);
-            lv_obj_set_style_bg_color(fx_mute_labels[i], c, 0);
+
+        int display_val = muted ? 0 : val;
+        int pct = (int)((float)display_val / 127.0f * 100.0f + 0.5f);
+
+        if (fx_arcs[cell])
+            lv_arc_set_value(fx_arcs[cell], display_val);
+
+        if (fx_value_labels[cell])
+            lv_label_set_text_fmt(fx_value_labels[cell], "%d", pct);
+
+        // Update card border glow intensity based on value
+        lv_obj_t* card = fx_arcs[cell] ? lv_obj_get_parent(fx_arcs[cell]) : NULL;
+        if (card && !muted && val > 0) {
+            lv_obj_set_style_border_opa(card, LV_OPA_90, 0);
+            lv_obj_set_style_outline_opa(card, LV_OPA_50, 0);
+        } else if (card) {
+            lv_obj_set_style_border_opa(card, muted ? LV_OPA_20 : LV_OPA_40, 0);
+            lv_obj_set_style_outline_opa(card, LV_OPA_10, 0);
+        }
+
+        // Update toggle button
+        if (fx_toggle_btns[cell]) {
+            lv_obj_t* lbl = lv_obj_get_child(fx_toggle_btns[cell], 0);
+            if (lbl) lv_label_set_text(lbl, muted ? "OFF" : "ON");
+            lv_color_t tc = lv_color_hex(fx_colors[cell]);
+            lv_obj_set_style_bg_opa(fx_toggle_btns[cell], muted ? LV_OPA_10 : LV_OPA_20, 0);
+            lv_obj_set_style_shadow_opa(fx_toggle_btns[cell], muted ? LV_OPA_0 : LV_OPA_40, 0);
+            if (lbl) lv_obj_set_style_text_color(lbl, muted ? RED808_TEXT_DIM : tc, 0);
+        }
+
+        // Update arc indicator color (dim if muted)
+        if (fx_arcs[cell]) {
+            lv_obj_set_style_arc_opa(fx_arcs[cell], muted ? LV_OPA_20 : LV_OPA_COVER, LV_PART_INDICATOR);
         }
     }
 }
@@ -992,24 +1162,28 @@ static void create_volumes_screen(void) {
     lv_obj_clear_flag(scr_volumes, LV_OBJ_FLAG_SCROLLABLE);
     ui_create_header(scr_volumes);
 
+    // Layout in actual LVGL canvas coordinates (landscape 1024×600)
+    const int LW = LCD_H_RES;   // 1024 — full display width
+    const int LH = LCD_V_RES;   // 600  — full display height
+
     lv_obj_t* title = lv_label_create(scr_volumes);
     lv_label_set_text(title, LV_SYMBOL_VOLUME_MAX "  MIXER");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
-    lv_obj_set_pos(title, 20, 64);
+    lv_obj_set_pos(title, LW - 120, 24);  // right-aligned in header area
 
-    // Single row of 16 strips
-    int margin = 8;
-    int total_w = UI_W - 2 * margin;
-    int gap = 2;
-    int strip_w = (total_w - 15 * gap) / 16;
-    int y_top = 90;
-    int y_bottom = UI_H - 10;
-    int strip_h = y_bottom - y_top;
-    int name_h  = 16;
-    int value_h = 16;
-    int mute_h  = 12;
-    int slider_h = strip_h - name_h - value_h - mute_h - 20;
+    // Single row of 16 strips filling the full display width
+    int margin = 10;
+    int gap    = 4;
+    int total_w = LW - 2 * margin;
+    int strip_w = (total_w - 15 * gap) / 16;   // ~56px each
+    int y_top   = 84;
+    int y_bottom = LH - 8;
+    int strip_h  = y_bottom - y_top;            // ~508px
+    int name_h   = 14;
+    int value_h  = 14;
+    int mute_h   = 10;
+    int slider_h = strip_h - name_h - value_h - mute_h - 18;
 
     for (int i = 0; i < 16; i++) {
         int x = margin + i * (strip_w + gap);
@@ -1134,7 +1308,7 @@ static void create_settings_screen(void) {
 
     // ── DEVICE INFO Card ──
     lv_obj_t* info_card = lv_obj_create(scr_settings);
-    lv_obj_set_size(info_card, UI_W - 24, 110);
+    lv_obj_set_size(info_card, LCD_H_RES - 24, 110);
     lv_obj_set_pos(info_card, 12, 80);
     lv_obj_clear_flag(info_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(info_card, RED808_PANEL, 0);
@@ -1165,12 +1339,12 @@ static void create_settings_screen(void) {
         "WiFi via ESP32-C6 SDIO");
     lv_obj_set_style_text_font(info_right, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(info_right, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(info_right, UI_W / 2 - 12, 32);
+    lv_obj_set_pos(info_right, LCD_H_RES / 2 - 12, 32);
     lv_obj_set_style_text_line_space(info_right, 6, 0);
 
     // ── VISUAL THEME SELECTOR ──
     lv_obj_t* theme_card = lv_obj_create(scr_settings);
-    lv_obj_set_size(theme_card, UI_W - 24, UI_H - 210);
+    lv_obj_set_size(theme_card, LCD_H_RES - 24, LCD_V_RES - 210);
     lv_obj_set_pos(theme_card, 12, 200);
     lv_obj_clear_flag(theme_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(theme_card, RED808_PANEL, 0);
@@ -1190,8 +1364,8 @@ static void create_settings_screen(void) {
     static const uint32_t btn_colors[THEME_COUNT] = {
         0xFF4444, 0x4A9EFF, 0x39FF14, 0xFF6B35, 0xFF00AA, 0x999999
     };
-    int card_inner_w = UI_W - 24 - 28;
-    int card_inner_h = UI_H - 210 - 28;
+    int card_inner_w = LCD_H_RES - 24 - 28;
+    int card_inner_h = LCD_V_RES - 210 - 28;
     int btn_gap = 10;
     int btn_w = (card_inner_w - (THEME_COUNT - 1) * btn_gap) / THEME_COUNT;
     int btn_h = card_inner_h - 40;
@@ -1298,6 +1472,71 @@ void ui_create_all_screens(void) {
     active_screen = 0;
 }
 
+// =============================================================================
+// THEME RELOAD — delete and recreate all themed screens with new colors
+// =============================================================================
+static void ui_reload_themed_screens(void) {
+    int saved_screen = active_screen;
+
+    // Navigate to boot temporarily so we can safely delete active screens
+    lv_scr_load(scr_boot);
+
+    // Delete all themed screens (nullify pointers before delete to avoid stale refs)
+    if (scr_live)        { lv_obj_del(scr_live);        scr_live        = NULL; }
+    if (scr_sequencer)   { lv_obj_del(scr_sequencer);   scr_sequencer   = NULL; }
+    if (scr_fx)          { lv_obj_del(scr_fx);          scr_fx          = NULL; }
+    if (scr_volumes)     { lv_obj_del(scr_volumes);     scr_volumes     = NULL; }
+    if (scr_settings)    { lv_obj_del(scr_settings);    scr_settings    = NULL; }
+    if (scr_performance) { lv_obj_del(scr_performance); scr_performance = NULL; }
+
+    // Clear widget pointers (prevent stale access in update functions)
+    header_bar = NULL; hdr_bpm_label = NULL; hdr_pattern_label = NULL;
+    hdr_play_btn = NULL; hdr_play_label = NULL;
+    hdr_pattern_minus_btn = NULL; hdr_pattern_plus_btn = NULL;
+    hdr_wifi_label = NULL; hdr_s3_label = NULL;
+    for (int i = 0; i < 16; i++) hdr_step_dots[i] = NULL;
+    for (int i = 0; i < 16; i++) {
+        live_pad_btns[i] = NULL; live_pad_labels[i] = NULL;
+    }
+    grid_play_btn = NULL; grid_play_lbl = NULL; grid_bpm_lbl = NULL;
+    grid_pat_lbl = NULL; grid_step_lbl = NULL;
+    grid_wifi_lbl = NULL; grid_s3_lbl = NULL;
+    grid_step_dot = NULL; grid_vol_lbl = NULL; grid_sync_btn = NULL;
+    for (int i = 0; i < 6; i++) {
+        fx_arcs[i] = NULL; fx_value_labels[i] = NULL;
+        fx_name_labels[i] = NULL; fx_toggle_btns[i] = NULL;
+        fx_pct_ring[i] = NULL;
+    }
+    fx_page_dot[0] = NULL; fx_page_dot[1] = NULL; fx_page_lbl = NULL;
+    fx_page = 0;
+    for (int i = 0; i < 16; i++) {
+        for (int j = 0; j < 16; j++) seq_step_btns[i][j] = NULL;
+        seq_track_labels[i] = NULL; seq_mute_btns[i] = NULL;
+        seq_solo_btns[i] = NULL; seq_mute_labels[i] = NULL;
+        seq_solo_labels[i] = NULL; seq_playhead[i] = NULL;
+    }
+    for (int i = 0; i < 16; i++) {
+        vol_sliders[i] = NULL; vol_labels[i] = NULL;
+        vol_name_labels[i] = NULL; vol_mute_dots[i] = NULL;
+        vol_strip_panels[i] = NULL;
+    }
+
+    // Recreate with new theme colors
+    create_live_screen();
+    create_sequencer_screen();
+    create_fx_screen();
+    create_volumes_screen();
+    create_settings_screen();
+    create_performance_screen();
+
+    // Restore navigation to the screen we were on (go to live if it was settings/boot)
+    int nav_to = (saved_screen == 4) ? 4 : 2;  // stay in settings if we were there
+    if (saved_screen == 3) nav_to = 3;
+    if (saved_screen == 7) nav_to = 7;
+    if (saved_screen == 8) nav_to = 8;
+    ui_navigate_to(nav_to);
+}
+
 void ui_navigate_to(int screen_id) {
     lv_obj_t* targets[] = {
         scr_boot, NULL, scr_live, scr_sequencer, scr_settings,
@@ -1317,12 +1556,15 @@ void ui_update_current_screen(void) {
         ui_navigate_to(2);  // SCREEN_LIVE
     }
 
-    // Apply theme if changed
+    // Theme change — recreate all screens with new palette
     static int prev_theme = -1;
-    if (p4.theme != prev_theme) {
+    if (p4.theme != prev_theme && prev_theme != -1) {
         prev_theme = p4.theme;
         ui_theme_apply((VisualTheme)p4.theme);
+        ui_reload_themed_screens();
+        return;  // screens recreated; update functions have fresh state
     }
+    if (prev_theme == -1) prev_theme = p4.theme;
 
     // Navigate if S3 sends screen command
     static int prev_screen = -1;

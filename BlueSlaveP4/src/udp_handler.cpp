@@ -152,6 +152,48 @@ void udp_send_set_distortion(float val) {
 }
 
 // =============================================================================
+// FX LIVE COMMANDS — enc/pot values → Master FX engine
+// =============================================================================
+void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
+    if (!udpStarted) return;
+    if (enc_id < 0 || enc_id > 2) return;
+    static const char* fx_names[] = {"Flanger", "Reverb", "Phaser"};
+    char buf[96];
+    int active = (!muted && value > 0) ? 1 : 0;
+    float norm = (float)value / 127.0f;
+    // Send active state
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"set%sActive\",\"value\":%d}",
+             fx_names[enc_id], active);
+    sendJson(buf);
+    // Send amount
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"set%sAmount\",\"value\":%.3f}",
+             fx_names[enc_id], norm);
+    sendJson(buf);
+}
+
+void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
+    if (!udpStarted || muted) return;
+    char buf[96];
+    float norm = (float)value / 127.0f;
+    switch (pot_id) {
+        case 0: {  // Distortion/Drive
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setDistortion\",\"value\":%.3f}", norm);
+            sendJson(buf); break;
+        }
+        case 1: {  // Cutoff (20-20000 Hz, log)
+            int hz = (int)(20.0f * powf(1000.0f, norm));
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterCutoff\",\"value\":%d}", hz);
+            sendJson(buf); break;
+        }
+        case 2: {  // Resonance (1.0-10.0 Q)
+            float q = 1.0f + norm * 9.0f;
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterResonance\",\"value\":%.2f}", q);
+            sendJson(buf); break;
+        }
+    }
+}
+
+// =============================================================================
 // SYNC REQUEST — handshake + request initial data
 // =============================================================================
 void udp_request_master_sync(void) {

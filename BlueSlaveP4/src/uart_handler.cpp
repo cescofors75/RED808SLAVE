@@ -76,7 +76,13 @@ static void process_basic(const UartBasicPacket* pkt) {
 
     switch (type) {
         case MSG_ENCODER:
-            if (id < 3) p4.enc_value[id] = val;
+            if (id < 3) {
+                p4.enc_value[id] = val;
+                // Relay encoder FX values to Master (P4 is the WiFi gateway)
+                if (udp_wifi_connected()) {
+                    udp_send_fx_enc(id, val, p4.enc_muted[id]);
+                }
+            }
             break;
 
         case MSG_PAD:
@@ -91,7 +97,16 @@ static void process_basic(const UartBasicPacket* pkt) {
             break;
 
         case MSG_POT:
-            if (id < 4) p4.pot_value[id] = val;
+            if (id < 4) {
+                p4.pot_value[id] = val;
+                // Relay pot FX values to Master
+                if (udp_wifi_connected()) {
+                    // Pot 0 → Distortion, Pot 1 → Cutoff, Pot 2 → Resonance
+                    if (id >= 1 && id <= 3) {
+                        udp_send_fx_pot(id - 1, val, p4.pot_muted[id - 1]);
+                    }
+                }
+            }
             break;
 
         case MSG_SYSTEM:
@@ -145,9 +160,18 @@ static void process_basic(const UartBasicPacket* pkt) {
 
         case MSG_FX:
             switch (id) {
-                case FX_ENC0_MUTE:    p4.enc_muted[0] = (val != 0);       break;
-                case FX_ENC1_MUTE:    p4.enc_muted[1] = (val != 0);       break;
-                case FX_ENC2_MUTE:    p4.enc_muted[2] = (val != 0);       break;
+                case FX_ENC0_MUTE:
+                    p4.enc_muted[0] = (val != 0);
+                    if (udp_wifi_connected()) udp_send_fx_enc(0, p4.enc_value[0], p4.enc_muted[0]);
+                    break;
+                case FX_ENC1_MUTE:
+                    p4.enc_muted[1] = (val != 0);
+                    if (udp_wifi_connected()) udp_send_fx_enc(1, p4.enc_value[1], p4.enc_muted[1]);
+                    break;
+                case FX_ENC2_MUTE:
+                    p4.enc_muted[2] = (val != 0);
+                    if (udp_wifi_connected()) udp_send_fx_enc(2, p4.enc_value[2], p4.enc_muted[2]);
+                    break;
                 case FX_POT0_MUTE:    p4.pot_muted[0] = (val != 0);       break;
                 case FX_POT1_MUTE:    p4.pot_muted[1] = (val != 0);       break;
                 case FX_POT2_MUTE:    p4.pot_muted[2] = (val != 0);       break;
