@@ -2245,49 +2245,37 @@ void handleDFRobotEncoders() {
 // =============================================================================
 
 void handleUnitFader() {
+    // Absolute positional mapping: ADC position → Master Volume 0..150
+    // Uses heavy oversampling + EMA filter for smooth, jitter-free response.
     static unsigned long lastReadMs = 0;
-    static int filtered = -1;
-    static int lastRaw = -1;
-    static int accum = 0;
+    static float filtered = -1.0f;
+    static int lastMappedVol = -1;
 
     unsigned long now = millis();
     if ((now - lastReadMs) < Config::UNIT_FADER_READ_MS) return;
     lastReadMs = now;
 
+    // 16-sample oversampling for noise reduction
     long sum = 0;
-    for (int i = 0; i < 8; i++) sum += analogRead(Config::UNIT_FADER_PIN);
-    int raw = (int)(sum / 8);
+    for (int i = 0; i < 16; i++) sum += analogRead(Config::UNIT_FADER_PIN);
+    float raw = (float)(sum / 16);
 
-    if (filtered < 0) filtered = raw;
-    filtered = (filtered * 3 + raw) / 4;
-
-    if (lastRaw < 0) {
-        lastRaw = filtered;
+    // EMA filter (alpha=0.1 → very smooth, lag ~10 samples)
+    if (filtered < 0.0f) {
+        filtered = raw;
         return;
     }
+    filtered = filtered * 0.9f + raw * 0.1f;
 
-    int delta = filtered - lastRaw;
-    lastRaw = filtered;
-    if (abs(delta) < Config::UNIT_FADER_DEADBAND) return;
+    // Map ADC 0..4095 → Volume 0..150
+    int newVol = (int)((filtered / 4095.0f) * (float)Config::MAX_VOLUME + 0.5f);
+    newVol = constrain(newVol, 0, Config::MAX_VOLUME);
 
-    accum += delta;
-    const int countsPerTenth = Config::UNIT_FADER_COUNTS_PER_TENTH;
-    int steps = 0;
-    // Apply at most one 0.1 step per cycle for predictable fine tuning.
-    if (accum >= countsPerTenth) {
-        steps = 1;
-        accum -= countsPerTenth;
-    } else if (accum <= -countsPerTenth) {
-        steps = -1;
-        accum += countsPerTenth;
-    }
-    if (steps == 0) return;
+    // Deadband: only apply if value changed by ≥1 unit
+    if (newVol == lastMappedVol) return;
+    lastMappedVol = newVol;
 
-    // Unit Fader controls Master Volume (0..127)
-    int newVol = constrain(masterVolume + steps, 0, 127);
-    if (newVol != masterVolume) {
-        applyUnifiedMasterVolume(newVol, true);
-    }
+    applyUnifiedMasterVolume(newVol, true);
 }
 
 // =============================================================================

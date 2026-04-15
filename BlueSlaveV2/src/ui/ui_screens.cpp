@@ -52,10 +52,6 @@ static lv_obj_t* lbl_wifi[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_fx_values[HEADER_SLOT_COUNT] = {};  // legacy — unused in footer
 static lv_obj_t* lbl_master_conn[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* chip_master_conn[HEADER_SLOT_COUNT] = {};
-static lv_obj_t* lbl_footer_vol[HEADER_SLOT_COUNT]  = {};  // footer volume chip
-static lv_obj_t* lbl_footer_ptn[HEADER_SLOT_COUNT]  = {};  // footer pattern chip
-static lv_obj_t* lbl_footer_play[HEADER_SLOT_COUNT] = {};  // footer play/pause chip
-static lv_obj_t* chip_footer_play[HEADER_SLOT_COUNT] = {};  // for color update
 
 // Menu status card labels
 static lv_obj_t* lbl_master = NULL;
@@ -464,6 +460,42 @@ static lv_obj_t* create_info_chip(lv_obj_t* parent, const lv_color_t accent_colo
     return chip;
 }
 
+// P4-style status tile: title (top, dim) + value (bottom, colored), border-bottom colored
+static lv_obj_t* create_status_tile(lv_obj_t* parent, const char* title, lv_color_t color, lv_obj_t** out_val) {
+    lv_obj_t* tile = lv_obj_create(parent);
+    lv_obj_set_size(tile, LV_SIZE_CONTENT, 56);
+    lv_obj_set_style_min_width(tile, 80, 0);
+    lv_obj_set_style_radius(tile, 8, 0);
+    lv_obj_set_style_bg_color(tile, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(tile, 0, 0);
+    lv_obj_set_style_border_side(tile, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(tile, 3, 0);
+    lv_obj_set_style_border_color(tile, color, 0);
+    lv_obj_set_style_pad_hor(tile, 8, 0);
+    lv_obj_set_style_pad_top(tile, 3, 0);
+    lv_obj_set_style_pad_bottom(tile, 3, 0);
+    lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* t = lv_label_create(tile);
+    lv_label_set_text(t, title);
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(t, RED808_TEXT_DIM, 0);
+    lv_obj_set_width(t, LV_PCT(100));
+    lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 2);
+
+    lv_obj_t* v = lv_label_create(tile);
+    lv_obj_set_style_text_font(v, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(v, color, 0);
+    lv_obj_set_width(v, LV_PCT(100));
+    lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(v, LV_ALIGN_BOTTOM_MID, 0, -2);
+
+    if (out_val) *out_val = v;
+    return tile;
+}
+
 static lv_obj_t* create_section_shell(lv_obj_t* parent, lv_coord_t x, lv_coord_t y, lv_coord_t w, lv_coord_t h) {
     lv_obj_t* shell = lv_obj_create(parent);
     lv_obj_set_pos(shell, x, y);
@@ -569,7 +601,7 @@ void ui_create_header(lv_obj_t* parent) {
 #if PORTRAIT_MODE
     lv_obj_set_size(header, UI_W - 16, 60);
 #else
-    lv_obj_set_size(header, 1008, 68);
+    lv_obj_set_size(header, UI_W - 16, 80);
 #endif
     lv_obj_set_pos(header, 8, 6);
     lv_obj_set_style_bg_color(header, RED808_PANEL, 0);
@@ -595,7 +627,7 @@ void ui_create_header(lv_obj_t* parent) {
     // Back button (shown on all screens except menu)
     if (parent != scr_menu) {
         lv_obj_t* btn_back = lv_btn_create(header);
-        lv_obj_set_size(btn_back, 80, 36);
+        lv_obj_set_size(btn_back, 90, 50);
         apply_stable_button_style(btn_back, RED808_SURFACE, RED808_ACCENT);
         lv_obj_set_style_radius(btn_back, 8, 0);
         lv_obj_add_event_cb(btn_back, back_btn_cb, LV_EVENT_PRESSED, NULL);
@@ -606,76 +638,41 @@ void ui_create_header(lv_obj_t* parent) {
         lv_obj_center(bl);
     }
 
-    // HEADER ROW: transport and master controls (studio top strip)
+    // HEADER ROW: 5 status tiles (P4-style — title + value, border-bottom colored)
     lv_obj_t* status_top = lv_obj_create(header);
-    lv_obj_set_height(status_top, 36);
+    lv_obj_set_height(status_top, 56);
     lv_obj_set_style_bg_opa(status_top, LV_OPA_0, 0);
     lv_obj_set_style_border_width(status_top, 0, 0);
     lv_obj_set_style_pad_all(status_top, 0, 0);
     lv_obj_set_style_pad_gap(status_top, 6, 0);
     lv_obj_clear_flag(status_top, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(status_top, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(status_top, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(status_top, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_flex_grow(status_top, 1);
 
-    chip_seq_volume[slot] = create_info_chip(status_top, RED808_ACCENT, &lbl_seq_volume[slot]);
-    lv_label_set_text_fmt(lbl_seq_volume[slot], "VOL %d", masterVolume);
+    // BPM tile
+    lv_obj_t* tile_bpm = create_status_tile(status_top, "BPM", RED808_WARNING, &lbl_bpm[slot]);
+    { int b10 = (int)lroundf(currentBPMPrecise * 10.0f); lv_label_set_text_fmt(lbl_bpm[slot], "%d.%d", b10/10, abs(b10%10)); }
+    lv_obj_set_flex_grow(tile_bpm, 1);
 
-    lv_obj_t* chip_pattern = create_info_chip(status_top, RED808_INFO, &lbl_pattern[slot]);
-    lv_label_set_text_fmt(lbl_pattern[slot], "PTN %d", currentPattern + 1);
+    // PLAY tile — reuse chip_seq_volume slot for tile ref (to update border color)
+    chip_seq_volume[slot] = create_status_tile(status_top, "PLAY", isPlaying ? RED808_SUCCESS : RED808_ERROR, &lbl_play[slot]);
+    lv_label_set_text(lbl_play[slot], isPlaying ? LV_SYMBOL_PLAY : LV_SYMBOL_STOP);
+    lv_obj_set_flex_grow(chip_seq_volume[slot], 1);
 
-    lv_obj_t* chip_play = create_info_chip(status_top, isPlaying ? RED808_SUCCESS : RED808_ERROR, &lbl_play[slot]);
-    lv_label_set_text(lbl_play[slot], get_play_state_text(isPlaying));
+    // VOL tile
+    lv_obj_t* tile_vol = create_status_tile(status_top, "VOL", RED808_ACCENT, &lbl_seq_volume[slot]);
+    lv_label_set_text_fmt(lbl_seq_volume[slot], "%d", masterVolume);
+    lv_obj_set_flex_grow(tile_vol, 1);
 
-    // WiFi indicator chip
-#if S3_WIFI_ENABLED
-    lv_obj_t* chip_wifi = create_info_chip(status_top, wifiConnected ? RED808_SUCCESS : RED808_ERROR, &lbl_wifi[slot]);
-    lv_label_set_text(lbl_wifi[slot], wifiConnected ? LV_SYMBOL_WIFI " ON" : LV_SYMBOL_CLOSE " OFF");
-#endif
+    // PTN tile
+    lv_obj_t* tile_ptn = create_status_tile(status_top, "PTN", RED808_INFO, &lbl_pattern[slot]);
+    lv_label_set_text_fmt(lbl_pattern[slot], "%d", currentPattern + 1);
+    lv_obj_set_flex_grow(tile_ptn, 1);
 
-    // FOOTER ROW: BPM | PLAY | VOL | PTN | LINK P4
-    lv_obj_t* footer = lv_obj_create(parent);
-    lv_obj_set_size(footer, UI_W - 16, 52);
-    lv_obj_set_pos(footer, 8, UI_H - 58);
-    lv_obj_set_style_bg_color(footer, RED808_PANEL, 0);
-    lv_obj_set_style_bg_opa(footer, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(footer, 0, 0);
-    lv_obj_set_style_border_side(footer, LV_BORDER_SIDE_TOP, 0);
-    lv_obj_set_style_border_width(footer, 2, 0);
-    lv_obj_set_style_border_color(footer, RED808_ACCENT, 0);
-    lv_obj_set_style_radius(footer, 12, 0);
-    lv_obj_set_style_pad_left(footer, 8, 0);
-    lv_obj_set_style_pad_right(footer, 8, 0);
-    lv_obj_set_style_pad_top(footer, 3, 0);
-    lv_obj_set_style_pad_bottom(footer, 3, 0);
-    lv_obj_set_style_shadow_width(footer, 8, 0);
-    lv_obj_set_style_shadow_color(footer, lv_color_black(), 0);
-    lv_obj_set_style_shadow_opa(footer, LV_OPA_30, 0);
-    lv_obj_set_style_shadow_ofs_y(footer, -2, 0);
-    lv_obj_clear_flag(footer, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_pad_gap(footer, 6, 0);
-    lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-    lv_obj_t* chip_bpm = create_info_chip(footer, RED808_WARNING, &lbl_bpm[slot]);
-    set_bpm_label_text(lbl_bpm[slot], LV_SYMBOL_AUDIO " BPM");
-
-    chip_footer_play[slot] = create_info_chip(footer, isPlaying ? RED808_SUCCESS : RED808_SURFACE, &lbl_footer_play[slot]);
-    lv_label_set_text(lbl_footer_play[slot], isPlaying ? LV_SYMBOL_PLAY " PLAY" : LV_SYMBOL_STOP " STOP");
-
-    lv_obj_t* chip_vol = create_info_chip(footer, RED808_ACCENT, &lbl_footer_vol[slot]);
-    lv_label_set_text_fmt(lbl_footer_vol[slot], LV_SYMBOL_VOLUME_MAX " %d", masterVolume);
-
-    lv_obj_t* chip_ptn = create_info_chip(footer, RED808_INFO, &lbl_footer_ptn[slot]);
-    lv_label_set_text_fmt(lbl_footer_ptn[slot], "PTN %d", currentPattern + 1);
-
-    chip_master_conn[slot] = create_info_chip(footer, masterConnected ? RED808_SUCCESS : RED808_ERROR, &lbl_master_conn[slot]);
-    lv_label_set_text(lbl_master_conn[slot], masterConnected ? LV_SYMBOL_OK " P4 LINK" : LV_SYMBOL_CLOSE " P4 LINK");
-
-    lv_obj_set_flex_grow(chip_bpm, 1);
-    lv_obj_set_flex_grow(chip_footer_play[slot], 1);
-    lv_obj_set_flex_grow(chip_vol, 1);
-    lv_obj_set_flex_grow(chip_ptn, 1);
+    // LINK P4 tile
+    chip_master_conn[slot] = create_status_tile(status_top, "LINK P4", masterConnected ? RED808_SUCCESS : RED808_ERROR, &lbl_master_conn[slot]);
+    lv_label_set_text(lbl_master_conn[slot], masterConnected ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE);
     lv_obj_set_flex_grow(chip_master_conn[slot], 1);
 }
 
@@ -704,20 +701,23 @@ void ui_update_header() {
     if (bpm10 != prev_bpm10) {
         prev_bpm10 = bpm10;
         if (lbl_bpm[slot]) {
-            set_bpm_label_text(lbl_bpm[slot], LV_SYMBOL_AUDIO " BPM");
+            lv_label_set_text_fmt(lbl_bpm[slot], "%d.%d", bpm10/10, abs(bpm10%10));
         }
     }
     if (currentPattern != prev_pattern) {
         prev_pattern = currentPattern;
         if (lbl_pattern[slot]) {
-            lv_label_set_text_fmt(lbl_pattern[slot], "PTN: %d", currentPattern + 1);
+            lv_label_set_text_fmt(lbl_pattern[slot], "%d", currentPattern + 1);
         }
     }
     if ((int)isPlaying != prev_playing) {
         prev_playing = (int)isPlaying;
         if (lbl_play[slot]) {
-            lv_label_set_text(lbl_play[slot], get_play_state_text(isPlaying));
-            lv_obj_set_style_text_color(lbl_play[slot], RED808_TEXT, 0);
+            lv_label_set_text(lbl_play[slot], isPlaying ? LV_SYMBOL_PLAY : LV_SYMBOL_STOP);
+            lv_obj_set_style_text_color(lbl_play[slot], isPlaying ? RED808_SUCCESS : RED808_ERROR, 0);
+        }
+        if (chip_seq_volume[slot]) {
+            lv_obj_set_style_border_color(chip_seq_volume[slot], isPlaying ? RED808_SUCCESS : RED808_ERROR, 0);
         }
     }
 #if S3_WIFI_ENABLED
@@ -736,49 +736,22 @@ void ui_update_header() {
     if ((int)masterConnected != prev_master_conn) {
         prev_master_conn = (int)masterConnected;
         if (lbl_master_conn[slot]) {
-            lv_label_set_text(lbl_master_conn[slot], masterConnected ? LV_SYMBOL_OK " P4 LINK" : LV_SYMBOL_CLOSE " P4 LINK");
+            lv_label_set_text(lbl_master_conn[slot], masterConnected ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE);
             lv_obj_set_style_text_color(lbl_master_conn[slot], masterConnected ? RED808_SUCCESS : RED808_ERROR, 0);
         }
         if (chip_master_conn[slot]) {
-            lv_obj_set_style_bg_color(chip_master_conn[slot], masterConnected ? RED808_SUCCESS : RED808_ERROR, 0);
+            lv_obj_set_style_border_color(chip_master_conn[slot], masterConnected ? RED808_SUCCESS : RED808_ERROR, 0);
         }
     }
 
     static int prev_master_volume = -1;
-    static int prev_footer_vol = -1;
-    static int prev_footer_ptn = -1;
-    static int prev_footer_play = -1;
     if (slotChanged) {
         prev_master_volume = -1;
-        prev_footer_vol = -1;
-        prev_footer_ptn = -1;
-        prev_footer_play = -1;
     }
     if (masterVolume != prev_master_volume) {
         prev_master_volume = masterVolume;
         if (lbl_seq_volume[slot]) {
-            lv_label_set_text_fmt(lbl_seq_volume[slot], "VOL %d", masterVolume);
-        }
-    }
-    if (masterVolume != prev_footer_vol) {
-        prev_footer_vol = masterVolume;
-        if (lbl_footer_vol[slot]) {
-            lv_label_set_text_fmt(lbl_footer_vol[slot], LV_SYMBOL_VOLUME_MAX " %d", masterVolume);
-        }
-    }
-    if (currentPattern != prev_footer_ptn) {
-        prev_footer_ptn = currentPattern;
-        if (lbl_footer_ptn[slot]) {
-            lv_label_set_text_fmt(lbl_footer_ptn[slot], "PTN %d", currentPattern + 1);
-        }
-    }
-    if ((int)isPlaying != prev_footer_play) {
-        prev_footer_play = (int)isPlaying;
-        if (lbl_footer_play[slot]) {
-            lv_label_set_text(lbl_footer_play[slot], isPlaying ? LV_SYMBOL_PLAY " PLAY" : LV_SYMBOL_STOP " STOP");
-        }
-        if (chip_footer_play[slot]) {
-            lv_obj_set_style_bg_color(chip_footer_play[slot], isPlaying ? RED808_SUCCESS : RED808_SURFACE, 0);
+            lv_label_set_text_fmt(lbl_seq_volume[slot], "%d", masterVolume);
         }
     }
 
@@ -835,12 +808,14 @@ void ui_create_menu_screen() {
     static const int btn_h   = (UI_H - y_start - 6 - 4 * gap) / 5;
 #else
     // Landscape 1024×600: 3 cols, fill height
+    // Header: y=6, h=80 → bottom=86. y_start=102 → 16px gap.
+    // Available: 600-102-6=492. btn_h=(492-24)/3=156px.
     static const int cols    = 3;
     static const int x_start = 12;
-    static const int y_start = 68;
+    static const int y_start = 102;
     static const int gap     = 12;
-    static const int btn_w   = (1024 - 2 * x_start - 2 * gap) / cols;  // 325px
-    static const int btn_h   = (600 - y_start - 4 - 2 * gap) / 3;      // 168px
+    static const int btn_w   = (UI_W - 2 * x_start - 2 * gap) / cols;  // 325px
+    static const int btn_h   = (UI_H - y_start - 6 - 2 * gap) / 3;     // 156px
 #endif
 
     for (int i = 0; i < menu_count; i++) {
@@ -3215,7 +3190,7 @@ void ui_create_settings_screen() {
 // ============================================================================
 // DIAGNOSTICS SCREEN
 // ============================================================================
-#define DIAG_ROWS 15
+#define DIAG_ROWS 9
 static lv_obj_t* diag_labels[DIAG_ROWS];
 static lv_obj_t* diag_values[DIAG_ROWS];
 
@@ -3233,16 +3208,16 @@ void ui_create_diagnostics_screen() {
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 72);
 
     static const char* row_names[DIAG_ROWS] = {
-        "WiFi",  "UDP",  "Touch GT911",  "LCD RGB",  "I2C Hub PCA9548A",
-        "M5 Encoder #1", "M5 Encoder #2", "DFRobot Enc #1", "DFRobot Enc #2", "DFRobot Enc #3", "DFRobot Enc #4",
-        "DFRobot Analog Hub", "M5 ByteButton #1", "M5 ByteButton #2", "SD Card"
+        "WiFi", "UDP", "Touch GT911", "LCD RGB",
+        "M5 Encoder #1", "M5 Encoder #2",
+        "M5 ByteButton #1", "M5 ByteButton #2", "SD Card"
     };
 
 #if PORTRAIT_MODE
     int card_w = UI_W - 32;
     lv_obj_t* health_card = create_section_shell(scr_diagnostics, 16, 100, card_w, 390);
 #else
-    lv_obj_t* health_card = create_section_shell(scr_diagnostics, 24, 104, 300, 452);
+    lv_obj_t* health_card = create_section_shell(scr_diagnostics, 24, 104, 300, 348);
 #endif
     lv_obj_t* health_title = lv_label_create(health_card);
     lv_label_set_text(health_title, LV_SYMBOL_OK "  HARDWARE LINKS");
@@ -3334,29 +3309,23 @@ void ui_update_diagnostics() {
     static uint32_t prev_json_err = 0;
 
     struct { bool val; const char* ok; const char* fail; } rows[] = {
-        { diagInfo.wifiOk,       "Connected",     "Disconnected" },
-        { diagInfo.udpConnected, "Port 8888 OK",  "Inactive" },
-        { diagInfo.touchOk,      "OK (0x5D)",     "NOT FOUND" },
-        { diagInfo.lcdOk,        "1024x600 OK",   "ERROR" },
-        { diagInfo.i2cHubOk,     "OK (0x70)",     "NOT FOUND" },
-        { diagInfo.m5encoder1Ok, "OK",            "Not detected" },
-        { diagInfo.m5encoder2Ok, "OK",            "Not detected" },
-        { diagInfo.dfrobot1Ok,   "OK",            "Not detected" },
-        { diagInfo.dfrobot2Ok,   "OK",            "Not detected" },
-        { diagInfo.dfrobot3Ok,   "OK",            "Not detected" },
-        { diagInfo.dfrobot4Ok,   "OK",            "Not detected" },
-        { diagInfo.dfrobotPotsOk, "OK (0x48/0x49)", "Not detected" },
-        { diagInfo.byteButton1Ok, "OK",     "Not detected" },
-        { diagInfo.byteButton2Ok, "OK",     "Not detected" },
+        { diagInfo.wifiOk,        "Connected",          "Disconnected" },
+        { diagInfo.udpConnected,  "Port 8888 OK",       "Inactive" },
+        { diagInfo.touchOk,       "OK (0x5D)",          "NOT FOUND" },
+        { diagInfo.lcdOk,         "1024x600 OK",        "ERROR" },
+        { diagInfo.m5encoder1Ok,  "OK",                 "Not detected" },
+        { diagInfo.m5encoder2Ok,  "OK",                 "Not detected" },
+        { diagInfo.byteButton1Ok, "OK",                 "Not detected" },
+        { diagInfo.byteButton2Ok, "OK",                 "Not detected" },
         { diagInfo.sdOk || sd_mounted, sd_mounted ? "Mounted (SD_MMC)" : "Not mounted", "No card" },
     };
 
     for (int i = 0; i < DIAG_ROWS; i++) {
         if (!diag_rows_initialized || rows[i].val != prev_vals[i]) {
             prev_vals[i] = rows[i].val;
-            if (i == 12) {
+            if (i == 6) {
                 lv_label_set_text_fmt(diag_values[i], rows[i].val ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[0]);
-            } else if (i == 13) {
+            } else if (i == 7) {
                 lv_label_set_text_fmt(diag_values[i], rows[i].val ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[1]);
             } else {
                 lv_label_set_text(diag_values[i], rows[i].val ? rows[i].ok : rows[i].fail);
@@ -3366,11 +3335,11 @@ void ui_update_diagnostics() {
     }
     diag_rows_initialized = true;
 
-    if (diag_values[12]) {
-        lv_label_set_text_fmt(diag_values[12], diagInfo.byteButton1Ok ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[0]);
+    if (diag_values[6]) {
+        lv_label_set_text_fmt(diag_values[6], diagInfo.byteButton1Ok ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[0]);
     }
-    if (diag_values[13]) {
-        lv_label_set_text_fmt(diag_values[13], diagInfo.byteButton2Ok ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[1]);
+    if (diag_values[7]) {
+        lv_label_set_text_fmt(diag_values[7], diagInfo.byteButton2Ok ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[1]);
     }
 
     if (wifiConnected != prev_wifi_connected) {
