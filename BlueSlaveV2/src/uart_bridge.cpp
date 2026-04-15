@@ -70,27 +70,58 @@ void uart_bridge_send_extended(uint8_t type, uint8_t id, const uint8_t* data, ui
 }
 
 // =============================================================================
-// RECEIVE (P4→S3 touch commands)
+// RECEIVE (P4→S3 basic touch commands + extended pattern data)
 // =============================================================================
 int uart_bridge_receive(void) {
     int count = 0;
-    while (P4Serial.available() >= UART_BASIC_LEN) {
-        uint8_t peek = P4Serial.peek();
-        if (peek != UART_START_BASIC) {
-            P4Serial.read(); // discard
-            continue;
-        }
-        uint8_t buf[UART_BASIC_LEN];
-        P4Serial.readBytes(buf, UART_BASIC_LEN);
-        UartBasicPacket* pkt = (UartBasicPacket*)buf;
-        if (!uart_validate_basic(pkt)) continue;
+    while (P4Serial.available() > 0) {
+        uint8_t peek = (uint8_t)P4Serial.peek();
 
-        // Dispatch P4→S3 touch commands
-        if (pkt->type == MSG_TOUCH_CMD) {
-            // Forward to external handler (defined in main.cpp)
-            extern void handleP4TouchCommand(uint8_t cmdId, uint8_t value);
-            handleP4TouchCommand(pkt->id, pkt->value);
-            count++;
+        if (peek == UART_START_BASIC) {
+            if (P4Serial.available() < UART_BASIC_LEN) break;
+            uint8_t buf[UART_BASIC_LEN];
+            P4Serial.readBytes(buf, UART_BASIC_LEN);
+            UartBasicPacket* pkt = (UartBasicPacket*)buf;
+            if (!uart_validate_basic(pkt)) continue;
+            if (pkt->type == MSG_TOUCH_CMD) {
+                extern void handleP4TouchCommand(uint8_t cmdId, uint8_t value);
+                handleP4TouchCommand(pkt->id, pkt->value);
+                count++;
+            }
+
+        } else if (peek == UART_START_EXTENDED) {
+            // Need at least header (5 bytes)
+            if (P4Serial.available() < UART_EXT_HEADER_LEN) break;
+            uint8_t hdr[UART_EXT_HEADER_LEN];
+            P4Serial.readBytes(hdr, UART_EXT_HEADER_LEN);
+            uint16_t payloadLen = ((uint16_t)hdr[3] << 8) | hdr[4];
+            if (payloadLen > 64) continue;  // sanity check
+            // Wait briefly for payload + checksum to arrive (~0.4ms at 921600)
+            unsigned long t0 = millis();
+            while (P4Serial.available() < (int)(payloadLen + 1) && (millis() - t0) < 5) {}
+            if (P4Serial.available() < (int)(payloadLen + 1)) continue;
+            uint8_t payload[64];
+            P4Serial.readBytes(payload, (int)payloadLen);
+            uint8_t cs_rx = (uint8_t)P4Serial.read();
+            // Validate checksum
+            uint8_t cs = 0;
+            for (int i = 0; i < UART_EXT_HEADER_LEN; i++) cs += hdr[i];
+            for (int i = 0; i < (int)payloadLen; i++) cs += payload[i];
+            if (cs != cs_rx) continue;
+            // Dispatch
+            uint8_t type = hdr[1];
+            uint8_t id   = hdr[2];
+            if (type == MSG_PATTERN_DATA && payloadLen == 32) {
+                bool steps[16][16];
+                for (int t = 0; t < 16; t++) {
+                    uint16_t bits = ((uint16_t)payload[t * 2] << 8) | payload[t * 2 + 1];
+                    for (int s = 0; s < 16; s++) steps[t][s] = (bits >> s) & 1;
+                }
+                handleP4PatternData((int)id, steps);
+                count++;
+            }
+        } else {
+            P4Serial.read();  // discard unrecognized byte
         }
     }
     return count;

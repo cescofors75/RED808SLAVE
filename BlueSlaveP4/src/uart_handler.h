@@ -17,6 +17,9 @@ int uart_handler_process(void);
 // Send a basic command to S3 (P4→S3 touch commands)
 void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value);
 
+// Send full pattern step data to S3 as MSG_PATTERN_DATA extended packet
+void uart_send_pattern_to_s3(int pattern, const bool steps[16][16]);
+
 // Check if S3 is alive (heartbeat received recently)
 bool uart_s3_alive(void);
 

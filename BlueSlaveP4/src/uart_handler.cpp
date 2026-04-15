@@ -62,6 +62,43 @@ void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value) {
 #endif
 }
 
+// =============================================================================
+// SEND PATTERN DATA TO S3 (extended packet)
+// =============================================================================
+void uart_send_pattern_to_s3(int pattern, const bool steps[16][16]) {
+    // Pack 16 tracks × 16 steps into 32 bytes (2 bytes/track, big-endian, bit per step)
+    uint8_t packed[32];
+    for (int t = 0; t < 16; t++) {
+        uint16_t bits = 0;
+        for (int s = 0; s < 16; s++) { if (steps[t][s]) bits |= (1u << s); }
+        packed[t * 2]     = (bits >> 8) & 0xFF;
+        packed[t * 2 + 1] = bits & 0xFF;
+    }
+    // Build extended header: 0xAB, type, id(pattern), len_h, len_l
+    const uint16_t plen = 32;
+    uint8_t hdr[UART_EXT_HEADER_LEN];
+    hdr[0] = UART_START_EXTENDED;
+    hdr[1] = MSG_PATTERN_DATA;
+    hdr[2] = (uint8_t)constrain(pattern, 0, 15);
+    hdr[3] = (plen >> 8) & 0xFF;
+    hdr[4] = plen & 0xFF;
+    uint8_t cs = 0;
+    for (int i = 0; i < UART_EXT_HEADER_LEN; i++) cs += hdr[i];
+    for (int i = 0; i < 32; i++) cs += packed[i];
+
+#if P4_USB_CDC_ENABLED
+    if (usb_cdc_connected()) {
+        usb_cdc_write(hdr, UART_EXT_HEADER_LEN);
+        usb_cdc_write(packed, 32);
+        usb_cdc_write(&cs, 1);
+        return;
+    }
+#endif
+    UartS3.write(hdr, UART_EXT_HEADER_LEN);
+    UartS3.write(packed, 32);
+    UartS3.write(cs);
+}
+
 bool uart_s3_alive(void) {
     return p4.s3_connected;
 }
@@ -198,6 +235,7 @@ static void process_basic(const UartBasicPacket* pkt) {
                         break;
                     case TRK_SOLO_BIT:
                         p4.track_solo[trk] = (val != 0);
+                        if (udp_wifi_connected()) udp_send_solo(trk, val != 0);
                         break;
                     case TRK_VOLUME:
                         p4.track_volume[trk] = val;
@@ -210,6 +248,19 @@ static void process_basic(const UartBasicPacket* pkt) {
 
         case MSG_SCREEN:
             if (id == SCR_NAVIGATE) p4.current_screen = val;
+            break;
+
+        case MSG_TOUCH_CMD:
+            // S3 relays a step toggle when it has no WiFi (P4 forwards to Master)
+            if (id == TCMD_STEP_TOGGLE) {
+                int trk = (val >> 4) & 0xF;
+                int stp = val & 0xF;
+                if (trk < 16 && stp < 16) {
+                    p4.steps[trk][stp] = !p4.steps[trk][stp];
+                    if (udp_wifi_connected())
+                        udp_send_set_step(trk, stp, p4.steps[trk][stp]);
+                }
+            }
             break;
     }
 }

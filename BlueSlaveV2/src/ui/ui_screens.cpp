@@ -19,6 +19,10 @@ extern uint8_t dfFxParamMode[];
 extern int dfFxParamValue[];
 extern bool analogFxMuted[];
 
+// UART bridge relay (for when S3 WiFi is off — P4 forwards to Master)
+extern void uart_bridge_send(uint8_t type, uint8_t id, uint8_t value);
+#include "../../include/uart_protocol.h"
+
 // Use SRAM allocator from main.cpp — avoids PSRAM bus contention with LCD DMA
 extern ArduinoJson::Allocator* sramAllocatorPtr;
 
@@ -1260,11 +1264,13 @@ static void seq_step_cb(lv_event_t* e) {
     bool active = patterns[currentPattern].steps[track][step];
     lv_obj_set_style_bg_color(lv_event_get_target(e),
         active ? inst_colors[track] : RED808_SURFACE, 0);
-    // Send step update to master (same format as old controller)
+    // Send step update to master
     char buf[80];
     snprintf(buf, sizeof(buf), "{\"cmd\":\"setStep\",\"track\":%d,\"step\":%d,\"active\":%s}",
         track, step, active ? "true" : "false");
     sendUDPCommand(buf);
+    // Relay to P4 when WiFi is off (P4 forwards to Master via its own WiFi)
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_STEP_TOGGLE, (uint8_t)((track << 4) | step));
 }
 
 // Is track effectively silent? (muted directly, or muted by another track's solo)
@@ -1336,6 +1342,7 @@ static void seq_solo_cb(lv_event_t* e) {
             snprintf(buf, sizeof(buf), "{\"cmd\":\"mute\",\"track\":%d,\"value\":%s}",
                 t, trackMuted[t] ? "true" : "false");
             sendUDPCommand(buf);
+            uart_bridge_send(MSG_TRACK, TRK_MUTE_BIT | (t & 0x0F), trackMuted[t] ? 1 : 0);
             seq_update_solo_mute_visuals(t);
         }
     } else {
@@ -1348,6 +1355,7 @@ static void seq_solo_cb(lv_event_t* e) {
             snprintf(buf, sizeof(buf), "{\"cmd\":\"mute\",\"track\":%d,\"value\":%s}",
                 t, shouldMute ? "true" : "false");
             sendUDPCommand(buf);
+            uart_bridge_send(MSG_TRACK, TRK_MUTE_BIT | (t & 0x0F), shouldMute ? 1 : 0);
             seq_update_solo_mute_visuals(t);
         }
     }
@@ -1367,6 +1375,8 @@ static void seq_mute_cb(lv_event_t* e) {
             track, trackMuted[track] ? "true" : "false");
         sendUDPCommand(buf);
     }
+    // Always relay mute to P4 regardless of WiFi/solo state
+    uart_bridge_send(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), trackMuted[track] ? 1 : 0);
     seq_update_solo_mute_visuals(track);
 }
 

@@ -371,6 +371,23 @@ void handleP4TouchCommand(uint8_t cmdId, uint8_t value) {
 }
 
 // =============================================================================
+// PATTERN DATA HANDLER — called when P4 pushes pattern data via UART
+// =============================================================================
+void handleP4PatternData(int pat, const bool steps[16][16]) {
+    if (pat < 0 || pat >= Config::MAX_PATTERNS) return;
+    for (int t = 0; t < Config::MAX_TRACKS; t++)
+        for (int s = 0; s < Config::MAX_STEPS; s++)
+            patterns[pat].steps[t][s] = steps[t][s];
+    // Update current pattern number
+    if (currentPattern != pat) {
+        currentPattern = pat;
+        uart_bridge_send_pattern(currentPattern);
+    }
+    // Mark UI for full redraw (sequencer grid needs refresh)
+    needsFullRedraw = true;
+}
+
+// =============================================================================
 // NVS PERSISTENCE — save/load user settings across reboots
 // =============================================================================
 #include "nvs.h"

@@ -101,6 +101,14 @@ void udp_send_mute(int track, bool muted) {
     sendJson(buf);
 }
 
+void udp_send_solo(int track, bool soloed) {
+    char buf[64];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"solo\",\"track\":%d,\"value\":%s}",
+             track, soloed ? "true" : "false");
+    sendJson(buf);
+}
+
 void udp_send_set_volume(int value) {
     char buf[64];
     snprintf(buf, sizeof(buf), "{\"cmd\":\"setVolume\",\"value\":%d}", value);
@@ -255,6 +263,8 @@ static void processJson(const char* json, int len) {
                 track++;
             }
         }
+        // Forward pattern data to S3 so it can sync its sequencer + pad-sync
+        uart_send_pattern_to_s3(pat, p4.steps);
     }
     // ----- Play state -----
     else if (strcmp(cmd, "play_state") == 0) {

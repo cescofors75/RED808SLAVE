@@ -19,6 +19,10 @@ void uart_bridge_send_extended(uint8_t type, uint8_t id, const uint8_t* data, ui
 // Returns number of commands processed.
 int uart_bridge_receive(void);
 
+// Called when P4 pushes a full pattern_data packet
+// (defined in main.cpp, implemented as external handler)
+extern void handleP4PatternData(int pattern, const bool steps[16][16]);
+
 // Send heartbeat to P4 (call periodically, e.g. every 500ms)
 void uart_bridge_heartbeat(void);
 

@@ -107,6 +107,7 @@
 #define TCMD_FX_TOGGLE     0x03 // Byte 3 = fx index (0-2)
 #define TCMD_THEME_NEXT    0x04 // Byte 3 = unused
 #define TCMD_SCREEN_NAV    0x05 // Byte 3 = screen enum
+#define TCMD_STEP_TOGGLE   0x06 // S3→P4: toggle step. id=TCMD_STEP_TOGGLE, value=(track<<4)|step
 
 // =============================================================================
 // PACKET STRUCTURES

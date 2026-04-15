@@ -44,5 +44,8 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted);
 // pot FX: 0=Distortion, 1=Cutoff, 2=Resonance
 void udp_send_fx_pot(int pot_id, uint8_t value, bool muted);
 
+// Solo
+void udp_send_solo(int track, bool soloed);
+
 // Request full sync from Master
 void udp_request_master_sync(void);

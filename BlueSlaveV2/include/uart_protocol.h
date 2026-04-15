@@ -87,6 +87,8 @@
 #define TCMD_FX_TOGGLE     0x03
 #define TCMD_THEME_NEXT    0x04
 #define TCMD_SCREEN_NAV    0x05
+#define TCMD_STEP_TOGGLE   0x06 // S3→P4: toggle step. value=(track<<4)|step
+#define TCMD_STEP_TOGGLE   0x06  // S3→P4: toggle step. id=cmdId, value=(track<<4)|step
 
 // =============================================================================
 // PACKET STRUCTURES
