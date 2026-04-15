@@ -1,6 +1,7 @@
 // =============================================================================
 // lvgl_port.cpp — LVGL display/touch integration for ESP32-P4
 // Guition JC1060P470C: 1024×600 MIPI-DSI + GT911 touch
+// Zero-copy double-buffer, dual-semaphore vsync sync, FreeRTOS task
 // =============================================================================
 
 #include "lvgl_port.h"
@@ -10,48 +11,80 @@
 #include <Wire.h>
 #include <lvgl.h>
 #include <esp_lcd_panel_ops.h>
+#include <esp_lcd_mipi_dsi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 
 // =============================================================================
-// LVGL DRAW BUFFERS — allocated in PSRAM
+// TASK + SYNC PRIMITIVES
 // =============================================================================
+static SemaphoreHandle_t lvgl_mutex    = NULL;
+static SemaphoreHandle_t sem_vsync_end = NULL;  // vsync acked our swap
+static SemaphoreHandle_t sem_gui_ready = NULL;  // swap pending, wait for vsync
+static volatile bool task_started = false;
+
 static lv_disp_draw_buf_t draw_buf;
-static lv_color_t* buf1 = NULL;
-static lv_color_t* buf2 = NULL;
 static lv_disp_drv_t disp_drv;
-static lv_indev_drv_t touch_drv;
-static lv_indev_t* touch_indev = NULL;
 
-static uint16_t map_touch_value(int raw, int in_min, int in_max, int out_max) {
-    if (in_max <= in_min) return 0;
-    if (raw < in_min) raw = in_min;
-    if (raw > in_max) raw = in_max;
-    return (uint16_t)(((raw - in_min) * out_max) / (in_max - in_min));
+// Multitouch: 5 input devices (one per GT911 touch point)
+#define MAX_TOUCH_POINTS 5
+static lv_indev_drv_t touch_drvs[MAX_TOUCH_POINTS];
+static lv_indev_t* touch_indevs[MAX_TOUCH_POINTS];
+
+static struct {
+    volatile lv_point_t point;
+    volatile lv_indev_state_t state;
+} touch_data[MAX_TOUCH_POINTS];
+
+// =============================================================================
+// VSYNC ISR — dual-semaphore handshake (Espressif pattern)
+// Fires every frame refresh (~60Hz). Only unblocks flush() when a swap
+// is genuinely pending (sem_gui_ready given by flush AFTER draw_bitmap).
+// =============================================================================
+static bool IRAM_ATTR dpi_on_refresh_done(esp_lcd_panel_handle_t panel,
+                                           esp_lcd_dpi_panel_event_data_t *edata,
+                                           void *user_ctx) {
+    (void)panel; (void)edata; (void)user_ctx;
+    BaseType_t woken = pdFALSE;
+    if (sem_gui_ready && xSemaphoreTakeFromISR(sem_gui_ready, &woken) == pdTRUE) {
+        xSemaphoreGiveFromISR(sem_vsync_end, &woken);
+    }
+    return woken == pdTRUE;
 }
 
-// Full-screen buffer for DPI panel (required for proper DMA2D flush)
-#define LVGL_BUF_SIZE   (LCD_H_RES * LCD_V_RES)
+// Full-screen buffer pixel count (for draw_buf init)
+#define LVGL_BUF_PIXELS   (LCD_H_RES * LCD_V_RES)
 
 // =============================================================================
-// DISPLAY FLUSH CALLBACK
+// DISPLAY FLUSH — zero-copy swap + vsync-gated completion
+// draw_bitmap with internal FB pointer → pointer swap (no memcpy!)
 // =============================================================================
 static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
     esp_lcd_panel_handle_t panel = display_get_panel();
-    if (panel) {
-        esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1,
-                                  area->x2 + 1, area->y2 + 1, color_p);
-    }
+
+    // Step 1: swap active FB (DPI recognises internal pointer → zero-copy)
+    esp_lcd_panel_draw_bitmap(panel, 0, 0, LCD_H_RES, LCD_V_RES, color_p);
+
+    // Step 2: arm handshake — must come AFTER draw_bitmap
+    xSemaphoreGive(sem_gui_ready);
+
+    // Step 3: wait for next frame refresh (vsync ACK)
+    xSemaphoreTake(sem_vsync_end, pdMS_TO_TICKS(500));
+
     lv_disp_flush_ready(drv);
 }
 
 // =============================================================================
 // GT911 TOUCH READ
 // =============================================================================
+// GT911 TOUCH — init + polling (runs on separate Core 0 task)
+// =============================================================================
 static bool gt911_initialized = false;
 
 static void gt911_init(void) {
     Wire.begin(TOUCH_I2C_SDA, TOUCH_I2C_SCL, 400000);
 
-    // Reset GT911 into address 0x5D mode
     pinMode(TOUCH_INT_GPIO, OUTPUT);
     pinMode(TOUCH_RST_GPIO, OUTPUT);
     digitalWrite(TOUCH_INT_GPIO, LOW);
@@ -62,7 +95,6 @@ static void gt911_init(void) {
     pinMode(TOUCH_INT_GPIO, INPUT);
     delay(50);
 
-    // Verify GT911 is present
     Wire.beginTransmission(TOUCH_I2C_ADDR);
     if (Wire.endTransmission() == 0) {
         gt911_initialized = true;
@@ -72,95 +104,160 @@ static void gt911_init(void) {
     }
 }
 
-static void touch_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
-    data->state = LV_INDEV_STATE_REL;
+static void gt911_poll_all(void) {
+    for (int i = 0; i < MAX_TOUCH_POINTS; i++)
+        touch_data[i].state = LV_INDEV_STATE_REL;
+
     if (!gt911_initialized) return;
 
-    // Read GT911 status register (0x814E)
     Wire.beginTransmission(TOUCH_I2C_ADDR);
-    Wire.write(0x81);
-    Wire.write(0x4E);
+    Wire.write(0x81); Wire.write(0x4E);
     if (Wire.endTransmission(false) != 0) return;
     if (Wire.requestFrom((uint8_t)TOUCH_I2C_ADDR, (uint8_t)1) != 1) return;
     uint8_t status = Wire.read();
 
     uint8_t touches = status & 0x0F;
-    if (!(status & 0x80) || touches == 0 || touches > 5) {
-        // Clear buffer-ready flag
-        if (status & 0x80) {
+    bool buf_ready = (status & 0x80);
+
+    if (!buf_ready || touches == 0 || touches > MAX_TOUCH_POINTS) {
+        if (buf_ready) {
             Wire.beginTransmission(TOUCH_I2C_ADDR);
-            Wire.write(0x81);
-            Wire.write(0x4E);
-            Wire.write((uint8_t)0);
+            Wire.write(0x81); Wire.write(0x4E); Wire.write((uint8_t)0);
             Wire.endTransmission();
         }
         return;
     }
 
-    // Read first touch point (0x8150..0x8153: x_lo, x_hi, y_lo, y_hi)
+    int readLen = touches * 8;
+    uint8_t buf[MAX_TOUCH_POINTS * 8];
     Wire.beginTransmission(TOUCH_I2C_ADDR);
-    Wire.write(0x81);
-    Wire.write(0x50);
-    if (Wire.endTransmission(false) != 0) return;
-    if (Wire.requestFrom((uint8_t)TOUCH_I2C_ADDR, (uint8_t)4) != 4) return;
+    Wire.write(0x81); Wire.write(0x50);
+    bool ok = (Wire.endTransmission(false) == 0);
+    if (ok) ok = (Wire.requestFrom((uint8_t)TOUCH_I2C_ADDR, (uint8_t)readLen) == readLen);
+    if (ok) {
+        for (int i = 0; i < readLen; i++) buf[i] = Wire.read();
+        for (int i = 0; i < touches; i++) {
+            uint16_t x = buf[i*8] | ((uint16_t)buf[i*8+1] << 8);
+            uint16_t y = buf[i*8+2] | ((uint16_t)buf[i*8+3] << 8);
+            touch_data[i].point.x = (x < LCD_H_RES) ? (lv_coord_t)x : (lv_coord_t)(LCD_H_RES - 1);
+            touch_data[i].point.y = (y < LCD_V_RES) ? (lv_coord_t)y : (lv_coord_t)(LCD_V_RES - 1);
+            touch_data[i].state = LV_INDEV_STATE_PR;
+        }
+    }
 
-    uint16_t x = Wire.read() | ((uint16_t)Wire.read() << 8);
-    uint16_t y = Wire.read() | ((uint16_t)Wire.read() << 8);
-
-    // Clear buffer-ready flag
     Wire.beginTransmission(TOUCH_I2C_ADDR);
-    Wire.write(0x81);
-    Wire.write(0x4E);
-    Wire.write((uint8_t)0);
+    Wire.write(0x81); Wire.write(0x4E); Wire.write((uint8_t)0);
     Wire.endTransmission();
+}
 
-    // GT911 on Guition JC1060P470C — landscape 1024×600 direct mapping
-    // GT911 raw x = 0..1023 (left→right), raw y = 0..599 (top→bottom)
-    data->point.x = (x < LCD_H_RES) ? (lv_coord_t)x : (lv_coord_t)(LCD_H_RES - 1);
-    data->point.y = (y < LCD_V_RES) ? (lv_coord_t)y : (lv_coord_t)(LCD_V_RES - 1);
-    data->state = LV_INDEV_STATE_PR;
+// Touch FreeRTOS task — Core 0, polls I2C independently of LVGL rendering
+static void touch_task(void* arg) {
+    (void)arg;
+    while (true) {
+        gt911_poll_all();
+        vTaskDelay(pdMS_TO_TICKS(5));   // 200Hz touch polling
+    }
+}
+
+// LVGL touch callback — instant read from cache (zero I2C overhead)
+static void touch_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
+    int idx = (int)(intptr_t)drv->user_data;
+    data->point.x = touch_data[idx].point.x;
+    data->point.y = touch_data[idx].point.y;
+    data->state   = touch_data[idx].state;
+}
+
+// =============================================================================
+// LVGL FREERTOS TASK — Core 0, priority 5
+// Core 1 reserved for Arduino loop() (WiFi/UDP/UART)
+// =============================================================================
+static void lvgl_task(void* arg) {
+    (void)arg;
+    while (!task_started) vTaskDelay(pdMS_TO_TICKS(10));
+
+    TickType_t last_wake = xTaskGetTickCount();
+    while (true) {
+        if (lvgl_port_lock(15)) {
+            lv_timer_handler();
+            lvgl_port_unlock();
+        }
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(5));  // 200Hz LVGL tick
+    }
 }
 
 // =============================================================================
 // INIT
 // =============================================================================
 void lvgl_port_init(void) {
-    P4_LOG_PRINTLN("[LVGL] Initializing...");
+    P4_LOG_PRINTLN("[LVGL] Initializing (zero-copy + vsync + dual-task)...");
+
+    lvgl_mutex    = xSemaphoreCreateMutex();
+    sem_vsync_end = xSemaphoreCreateBinary();
+    sem_gui_ready = xSemaphoreCreateBinary();
 
     lv_init();
 
-    // Allocate draw buffers in PSRAM
-    buf1 = (lv_color_t*)heap_caps_malloc(LVGL_BUF_SIZE * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    buf2 = (lv_color_t*)heap_caps_malloc(LVGL_BUF_SIZE * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    if (!buf1 || !buf2) {
-        P4_LOG_PRINTLN("[LVGL] FATAL: Failed to allocate draw buffers in PSRAM!");
-        return;
-    }
-    lv_disp_draw_buf_init(&draw_buf, buf1, buf2, LVGL_BUF_SIZE);
+    // Register vsync callback on DPI panel
+    esp_lcd_panel_handle_t panel = display_get_panel();
+    esp_lcd_dpi_panel_event_callbacks_t cbs = {};
+    cbs.on_refresh_done = dpi_on_refresh_done;
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_register_event_callbacks(panel, &cbs, NULL));
 
-    // Display driver — DPI panels MUST use full_refresh
+    // Zero-copy: get the DPI panel's own PSRAM framebuffers
+    void* fb0 = NULL;
+    void* fb1 = NULL;
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(panel, 2, &fb0, &fb1));
+    P4_LOG_PRINTF("[LVGL] DPI framebuffers: fb0=%p fb1=%p\n", fb0, fb1);
+
+    lv_disp_draw_buf_init(&draw_buf, fb0, fb1, LVGL_BUF_PIXELS);
+
+    // Display driver — zero-copy requires direct_mode + full_refresh
     lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = LCD_H_RES;
-    disp_drv.ver_res = LCD_V_RES;
-    disp_drv.flush_cb = disp_flush_cb;
-    disp_drv.draw_buf = &draw_buf;
-    disp_drv.full_refresh = 1;      // Required for MIPI-DPI
+    disp_drv.hor_res      = LCD_H_RES;
+    disp_drv.ver_res      = LCD_V_RES;
+    disp_drv.flush_cb     = disp_flush_cb;
+    disp_drv.draw_buf     = &draw_buf;
+    disp_drv.direct_mode  = 1;
+    disp_drv.full_refresh = 1;
     lv_disp_drv_register(&disp_drv);
 
-    // Touch input
+    // Touch — init GT911, then spawn polling task on Core 0
     gt911_init();
-    lv_indev_drv_init(&touch_drv);
-    touch_drv.type = LV_INDEV_TYPE_POINTER;
-    touch_drv.read_cb = touch_read_cb;
-    touch_indev = lv_indev_drv_register(&touch_drv);
+    xTaskCreatePinnedToCore(touch_task, "touch", 4096, NULL, 3, NULL, 0);
 
-    P4_LOG_PRINTF("[LVGL] Ready: %dx%d, portrait=%d\n", UI_W, UI_H, PORTRAIT_MODE);
+    // Register 5 LVGL input devices (read from cached touch_data — instant)
+    for (int i = 0; i < MAX_TOUCH_POINTS; i++) {
+        lv_indev_drv_init(&touch_drvs[i]);
+        touch_drvs[i].type = LV_INDEV_TYPE_POINTER;
+        touch_drvs[i].read_cb = touch_read_cb;
+        touch_drvs[i].user_data = (void*)(intptr_t)i;
+        touch_indevs[i] = lv_indev_drv_register(&touch_drvs[i]);
+    }
+
+    // LVGL rendering task — Core 0, priority 5
+    // Core 1 stays free for Arduino loop (WiFi/UDP/UART)
+    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 16384, NULL, 5, NULL, 0);
+
+    P4_LOG_PRINTF("[LVGL] Ready: %dx%d, zero-copy, vsync, touch+lvgl@Core0, wifi@Core1\n",
+                  LCD_H_RES, LCD_V_RES);
 }
 
 void lvgl_port_update(void) {
-    lv_timer_handler();
+    // No-op: LVGL now runs in dedicated FreeRTOS task
+}
+
+bool lvgl_port_lock(int timeout_ms) {
+    return xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
+void lvgl_port_unlock(void) {
+    xSemaphoreGive(lvgl_mutex);
+}
+
+void lvgl_port_task_start(void) {
+    task_started = true;
 }
 
 lv_indev_t* lvgl_port_get_touch_indev(void) {
-    return touch_indev;
+    return touch_indevs[0];
 }

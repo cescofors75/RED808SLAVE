@@ -162,8 +162,21 @@
 #define SD_MOUNT_POINT "/sdcard"
 
 // =============================================================================
-// WiFi / UDP
+// WiFi / UDP — S3 connects to Master directly (set to 0 when P4 handles WiFi)
 // =============================================================================
+#ifndef S3_WIFI_ENABLED
+#define S3_WIFI_ENABLED  0   // 0 = S3 is UART-only slave to P4, 1 = S3 has own WiFi
+#endif
+
+// =============================================================================
+// P4 bridge transport: 0 = UART1/Serial1 (RS485 connector), 1 = USB-C (Serial/HWCDC)
+// When USB bridge is enabled, binary protocol goes through the native USB-C port.
+// The P4 acts as USB Host on its OTG port and reads S3 as a CDC-ACM device.
+// =============================================================================
+#ifndef P4_USB_BRIDGE
+#define P4_USB_BRIDGE  1
+#endif
+
 namespace WiFiConfig {
     constexpr const char* SSID     = "RED808";
     constexpr const char* PASSWORD = "red808esp32";

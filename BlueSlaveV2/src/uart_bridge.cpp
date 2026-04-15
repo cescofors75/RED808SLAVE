@@ -8,8 +8,16 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
 
-// UART1 for P4 communication
+// Transport selection: USB-C (Serial0/UART0 → CH343 → USB) or RS485 (Serial1/UART1)
+#if P4_USB_BRIDGE
+// The Waveshare S3 LCD 7B routes USB-C through a CH343 chip connected to UART0.
+// Native USB (HWCDC/GPIO19-20) is NOT on the USB-C connector.
+// So we use Serial0 (UART0 → CH343 → USB-C → P4 USB Host CDC-ACM).
+static auto& P4Serial = Serial0;
+#else
+// UART1 via RS485 transceiver (GPIO15 RX, GPIO16 TX)
 static HardwareSerial& P4Serial = Serial1;
+#endif
 
 // TX buffer to coalesce sends
 static uint8_t txBuf[UART_BASIC_LEN];
@@ -18,11 +26,19 @@ static uint8_t txBuf[UART_BASIC_LEN];
 // INIT
 // =============================================================================
 void uart_bridge_init(void) {
+#if P4_USB_BRIDGE
+    // UART0 → CH343 → USB-C → P4. Use protocol baud rate.
+    // CH343 is transparent: whatever baud rate we set on UART0,
+    // the P4 USB Host sets the same via CDC LineCoding.
+    P4Serial.begin(UART_BAUD_RATE);
+    RED808_LOG_PRINTLN("[UART] Bridge: UART0 → CH343 → USB-C → P4");
+#else
     P4Serial.begin(UART_BAUD_RATE, SERIAL_8N1, Config::UART_P4_RX_PIN, Config::UART_P4_TX_PIN);
     P4Serial.setRxBufferSize(512);
     P4Serial.setTxBufferSize(256);
     RED808_LOG_PRINTF("[UART] Bridge init: TX=%d RX=%d @ %d baud\n",
                       Config::UART_P4_TX_PIN, Config::UART_P4_RX_PIN, UART_BAUD_RATE);
+#endif
 }
 
 // =============================================================================

@@ -72,6 +72,7 @@ struct P4State {
     // Connection
     unsigned long last_heartbeat_ms;
     bool s3_connected;
+    bool s3_wifi_connected;  // S3's own WiFi status (from UART SYS_WIFI_STATE)
 };
 
 extern P4State p4;

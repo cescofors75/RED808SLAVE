@@ -14,6 +14,10 @@
 #include "ui/ui_screens.h"
 #include "ui/ui_theme.h"
 
+#if P4_USB_CDC_ENABLED
+#include "usb_cdc_handler.h"
+#endif
+
 static unsigned long lastScreenUpdate = 0;
 
 void setup() {
@@ -49,7 +53,16 @@ void setup() {
     P4_LOG_PRINTLN("[INIT] UART bridge to S3 (optional)...");
     uart_handler_init();
 
+#if P4_USB_CDC_ENABLED
+    // 8. Start USB Host CDC (S3 via USB-C OTG port)
+    P4_LOG_PRINTLN("[INIT] USB-C Host for S3...");
+    usb_cdc_init();
+#endif
+
     P4_LOG_PRINTLN("=== P4 Ready — Connecting to Master ===");
+
+    // 8. Start LVGL rendering task (must be AFTER UI creation)
+    lvgl_port_task_start();
 }
 
 void loop() {
@@ -59,13 +72,19 @@ void loop() {
     // Process UART packets from S3 (optional secondary)
     uart_handler_process();
 
-    // Update LVGL screen content at target framerate
+#if P4_USB_CDC_ENABLED
+    // Try to connect/reconnect to S3 USB CDC device
+    usb_cdc_process();
+#endif
+
+    // Update LVGL screen content at target framerate (mutex-protected)
     unsigned long now = millis();
     if (now - lastScreenUpdate >= Config::SCREEN_UPDATE_MS) {
         lastScreenUpdate = now;
-        ui_update_current_screen();
+        if (lvgl_port_lock(15)) {
+            ui_update_current_screen();
+            lvgl_port_unlock();
+        }
     }
-
-    // Tick LVGL (display flush + touch read)
-    lvgl_port_update();
+    // LVGL rendering handled by dedicated FreeRTOS task
 }

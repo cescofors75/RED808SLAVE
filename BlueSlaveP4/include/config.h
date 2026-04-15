@@ -104,13 +104,22 @@
 #endif
 
 // =============================================================================
-// UART — Connection to ESP32-S3 (binary protocol)
+// USB-C connection to ESP32-S3 (via USB-OTG Host port)
+// Set to 1 to use USB-C instead of UART for S3 communication.
+// When enabled, P4 acts as USB Host on OTG port — S3 appears as CDC-ACM device.
+// =============================================================================
+#ifndef P4_USB_CDC_ENABLED
+#define P4_USB_CDC_ENABLED 1
+#endif
+
+// =============================================================================
+// UART — Connection to ESP32-S3 (binary protocol, fallback when USB disabled)
 // =============================================================================
 #ifndef UART_S3_TX_PIN
-#define UART_S3_TX_PIN  24      // P4 TX → S3 RX (GPIO15)
+#define UART_S3_TX_PIN  32      // P4 TX → S3 RX (GPIO15)
 #endif
 #ifndef UART_S3_RX_PIN
-#define UART_S3_RX_PIN  25      // P4 RX ← S3 TX (GPIO16)
+#define UART_S3_RX_PIN  33      // P4 RX ← S3 TX (GPIO16)
 #endif
 #define UART_S3_PORT    1       // UART1 (UART0 used for USB debug)
 #define UART_RX_BUF     512

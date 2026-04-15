@@ -2456,10 +2456,17 @@ void setup() {
     // 7. Scan I2C hub for M5 + DFRobot + ByteButton (before LVGL task starts - no I2C race)
     scanI2CHub();
 
-    // 8. WiFi + UDP — init BEFORE LVGL screens to reserve internal SRAM for WiFi DMA buffers
+    // 8. WiFi + UDP — only when S3 connects to Master directly
+#if S3_WIFI_ENABLED
     RED808_LOG_PRINTF("[HEAP] Before WiFi: %d bytes\n", ESP.getFreeHeap());
     setupWiFi();
     RED808_LOG_PRINTF("[HEAP] After WiFi: %d bytes\n", ESP.getFreeHeap());
+#else
+    RED808_LOG_PRINTLN("[WiFi] DISABLED — S3 is UART-only slave to P4");
+    wifiConnected = false;
+    udpConnected = false;
+    masterConnected = false;
+#endif
 
     // 8b. UART bridge to ESP32-P4 Visual Beast
     uart_bridge_init();
@@ -2625,12 +2632,14 @@ void loop() {
     // === Pad triggers now handled by pad_trigger_task (prio 2) ===
 
     // === NETWORK + STATUS ===
+#if S3_WIFI_ENABLED
     if (masterConnected && (now - lastMasterPacketMs > 3000)) {
         masterConnected = false;
         uart_bridge_send_wifi_state(wifiConnected, false);
     }
 
     checkWiFiReconnect();
+#endif
 
     // === UART BRIDGE (P4 receive + heartbeat) ===
     uart_bridge_receive();
@@ -2642,6 +2651,7 @@ void loop() {
         }
     }
 
+#if S3_WIFI_ENABLED
     static unsigned long lastUDPReceiveMs = 0;
     if (now - lastUDPReceiveMs >= WiFiConfig::UDP_RECEIVE_MS) {
         lastUDPReceiveMs = now;
@@ -2653,6 +2663,7 @@ void loop() {
         RED808_LOG_PRINTLN("[UDP] Master not responding, resending hello...");
         requestMasterSync(false);
     }
+#endif
 
     // Boot LED animation
     if (currentScreen == SCREEN_BOOT && !bootLedDone) {

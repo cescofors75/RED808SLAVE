@@ -59,6 +59,7 @@ esp_lcd_panel_handle_t display_init(void) {
     P4_LOG_PRINTLN("[Display] Creating JD9165 panel...");
     esp_lcd_dpi_panel_config_t dpi_cfg =
         JD9165_1024_600_PANEL_60HZ_DPI_CONFIG(LCD_COLOR_PIXEL_FORMAT_RGB565);
+    dpi_cfg.num_fbs = 2;   // Double buffering for zero-copy LVGL
 
     jd9165_vendor_config_t vendor_config = {
         .init_cmds = NULL,
