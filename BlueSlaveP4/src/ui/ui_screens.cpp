@@ -968,7 +968,7 @@ static void update_sequencer_screen(void) {
 }
 
 // =============================================================================
-// MIXER SCREEN — 16 track faders (2 rows × 8) with interactive sliders
+// MIXER SCREEN — 16 track faders in a single row
 // =============================================================================
 static lv_obj_t* vol_sliders[16] = {};
 static lv_obj_t* vol_labels[16] = {};
@@ -998,41 +998,31 @@ static void create_volumes_screen(void) {
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
     lv_obj_set_pos(title, 20, 64);
 
-    // 2 rows of 8 strips
-    int strip_w = 64;
-    int gap_h = (UI_W - 8 * strip_w) / 9;
-    int y_top = 96;
-    int y_bottom = UI_H - 16;
-    int total_h = y_bottom - y_top;
-    int row_gap = 14;
-    int strip_h = (total_h - row_gap) / 2;
-    int name_h  = 18;
-    int slider_h = strip_h - name_h - 38;
-    int y_name_row0   = y_top;
-    int y_slider_row0 = y_top + name_h + 2;
-    int y_value_row0  = y_slider_row0 + slider_h + 4;
-    int y_name_row1   = y_top + strip_h + row_gap;
-    int y_slider_row1 = y_name_row1 + name_h + 2;
-    int y_value_row1  = y_slider_row1 + slider_h + 4;
+    // Single row of 16 strips
+    int margin = 8;
+    int total_w = UI_W - 2 * margin;
+    int gap = 2;
+    int strip_w = (total_w - 15 * gap) / 16;
+    int y_top = 90;
+    int y_bottom = UI_H - 10;
+    int strip_h = y_bottom - y_top;
+    int name_h  = 16;
+    int value_h = 16;
+    int mute_h  = 12;
+    int slider_h = strip_h - name_h - value_h - mute_h - 20;
 
     for (int i = 0; i < 16; i++) {
-        int row = i / 8;
-        int col = i % 8;
-        int x = gap_h + col * (strip_w + gap_h);
+        int x = margin + i * (strip_w + gap);
         int cx = x + strip_w / 2;
-        int y_pos  = (row == 0) ? y_top : y_top + strip_h + row_gap;
-        int y_sl   = (row == 0) ? y_slider_row0 : y_slider_row1;
-        int y_val  = (row == 0) ? y_value_row0 : y_value_row1;
-        int y_name = (row == 0) ? y_name_row0 : y_name_row1;
         lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[i]);
 
         // Strip panel background
         vol_strip_panels[i] = lv_obj_create(scr_volumes);
         lv_obj_set_size(vol_strip_panels[i], strip_w, strip_h);
-        lv_obj_set_pos(vol_strip_panels[i], x, y_pos);
+        lv_obj_set_pos(vol_strip_panels[i], x, y_top);
         lv_obj_set_style_bg_color(vol_strip_panels[i], RED808_SURFACE, 0);
         lv_obj_set_style_bg_opa(vol_strip_panels[i], LV_OPA_40, 0);
-        lv_obj_set_style_radius(vol_strip_panels[i], 10, 0);
+        lv_obj_set_style_radius(vol_strip_panels[i], 8, 0);
         lv_obj_set_style_border_width(vol_strip_panels[i], 1, 0);
         lv_obj_set_style_border_color(vol_strip_panels[i], RED808_BORDER, 0);
         lv_obj_clear_flag(vol_strip_panels[i], LV_OBJ_FLAG_SCROLLABLE);
@@ -1040,52 +1030,51 @@ static void create_volumes_screen(void) {
         // Track name
         vol_name_labels[i] = lv_label_create(scr_volumes);
         lv_label_set_text(vol_name_labels[i], trackNames[i]);
-        lv_obj_set_style_text_font(vol_name_labels[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(vol_name_labels[i], &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(vol_name_labels[i], tc, 0);
         lv_obj_set_style_text_align(vol_name_labels[i], LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_pos(vol_name_labels[i], x, y_name);
+        lv_obj_set_pos(vol_name_labels[i], x, y_top + 2);
         lv_obj_set_width(vol_name_labels[i], strip_w);
 
         // Vertical slider (fader)
+        int y_sl = y_top + name_h + 4;
         vol_sliders[i] = lv_slider_create(scr_volumes);
-        lv_obj_set_size(vol_sliders[i], 10, slider_h);
-        lv_obj_set_pos(vol_sliders[i], cx - 5, y_sl);
+        lv_obj_set_size(vol_sliders[i], 8, slider_h);
+        lv_obj_set_pos(vol_sliders[i], cx - 4, y_sl);
         lv_slider_set_range(vol_sliders[i], 0, Config::MAX_VOLUME);
         lv_slider_set_value(vol_sliders[i], p4.track_volume[i], LV_ANIM_OFF);
-        // Rail
         lv_obj_set_style_bg_color(vol_sliders[i], lv_color_hex(0x2A2A2A), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(vol_sliders[i], LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_radius(vol_sliders[i], 5, LV_PART_MAIN);
-        // Indicator
+        lv_obj_set_style_radius(vol_sliders[i], 4, LV_PART_MAIN);
         lv_obj_set_style_bg_color(vol_sliders[i], tc, LV_PART_INDICATOR);
         lv_obj_set_style_bg_opa(vol_sliders[i], LV_OPA_COVER, LV_PART_INDICATOR);
-        lv_obj_set_style_radius(vol_sliders[i], 5, LV_PART_INDICATOR);
-        // Knob
+        lv_obj_set_style_radius(vol_sliders[i], 4, LV_PART_INDICATOR);
         lv_obj_set_style_bg_color(vol_sliders[i], lv_color_white(), LV_PART_KNOB);
         lv_obj_set_style_bg_opa(vol_sliders[i], LV_OPA_COVER, LV_PART_KNOB);
-        lv_obj_set_style_pad_all(vol_sliders[i], 6, LV_PART_KNOB);
+        lv_obj_set_style_pad_all(vol_sliders[i], 5, LV_PART_KNOB);
         lv_obj_set_style_radius(vol_sliders[i], LV_RADIUS_CIRCLE, LV_PART_KNOB);
         lv_obj_set_style_shadow_color(vol_sliders[i], tc, LV_PART_KNOB);
-        lv_obj_set_style_shadow_width(vol_sliders[i], 12, LV_PART_KNOB);
+        lv_obj_set_style_shadow_width(vol_sliders[i], 8, LV_PART_KNOB);
         lv_obj_set_style_shadow_opa(vol_sliders[i], LV_OPA_60, LV_PART_KNOB);
         lv_obj_set_style_border_color(vol_sliders[i], tc, LV_PART_KNOB);
         lv_obj_set_style_border_width(vol_sliders[i], 2, LV_PART_KNOB);
         lv_obj_add_event_cb(vol_sliders[i], vol_slider_cb, LV_EVENT_VALUE_CHANGED, (void*)(intptr_t)i);
 
-        // Color bar at bottom of strip
+        // Color bar at bottom of slider
         lv_obj_t* color_bar = lv_obj_create(scr_volumes);
-        lv_obj_set_size(color_bar, strip_w - 8, 4);
-        lv_obj_set_pos(color_bar, x + 4, y_sl + slider_h + 2);
+        lv_obj_set_size(color_bar, strip_w - 6, 3);
+        lv_obj_set_pos(color_bar, x + 3, y_sl + slider_h + 2);
         lv_obj_set_style_bg_color(color_bar, tc, 0);
         lv_obj_set_style_bg_opa(color_bar, LV_OPA_80, 0);
-        lv_obj_set_style_radius(color_bar, 2, 0);
+        lv_obj_set_style_radius(color_bar, 1, 0);
         lv_obj_set_style_border_width(color_bar, 0, 0);
         lv_obj_clear_flag(color_bar, LV_OBJ_FLAG_SCROLLABLE);
 
         // Value label
+        int y_val = y_sl + slider_h + 8;
         vol_labels[i] = lv_label_create(scr_volumes);
         lv_label_set_text_fmt(vol_labels[i], "%d", p4.track_volume[i]);
-        lv_obj_set_style_text_font(vol_labels[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(vol_labels[i], &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(vol_labels[i], RED808_TEXT, 0);
         lv_obj_set_style_text_align(vol_labels[i], LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_pos(vol_labels[i], x, y_val);
@@ -1093,9 +1082,9 @@ static void create_volumes_screen(void) {
 
         // Mute dot
         vol_mute_dots[i] = lv_obj_create(scr_volumes);
-        lv_obj_set_size(vol_mute_dots[i], 10, 10);
-        lv_obj_set_pos(vol_mute_dots[i], cx - 5, y_val + 18);
-        lv_obj_set_style_radius(vol_mute_dots[i], 5, 0);
+        lv_obj_set_size(vol_mute_dots[i], 8, 8);
+        lv_obj_set_pos(vol_mute_dots[i], cx - 4, y_val + value_h + 2);
+        lv_obj_set_style_radius(vol_mute_dots[i], 4, 0);
         lv_obj_set_style_bg_color(vol_mute_dots[i], RED808_SUCCESS, 0);
         lv_obj_set_style_bg_opa(vol_mute_dots[i], LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(vol_mute_dots[i], 0, 0);
@@ -1126,25 +1115,154 @@ static void update_volumes_screen(void) {
 }
 
 // =============================================================================
-// SETTINGS SCREEN (placeholder)
+// SETTINGS SCREEN — Device info + Visual Theme selector (syncs with S3)
 // =============================================================================
+static void settings_theme_cb(lv_event_t* e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= THEME_COUNT) return;
+    p4.theme = idx;
+    ui_theme_apply((VisualTheme)idx);
+    // Sync theme to S3
+    uart_send_to_s3(MSG_SYSTEM, SYS_THEME, (uint8_t)idx);
+}
+
 static void create_settings_screen(void) {
     scr_settings = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_settings, RED808_BG, 0);
     lv_obj_clear_flag(scr_settings, LV_OBJ_FLAG_SCROLLABLE);
     ui_create_header(scr_settings);
 
-    lv_obj_t* title = lv_label_create(scr_settings);
-    lv_label_set_text(title, LV_SYMBOL_SETTINGS "  SETTINGS");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(title, RED808_TEXT, 0);
-    lv_obj_set_pos(title, 20, 64);
+    // ── DEVICE INFO Card ──
+    lv_obj_t* info_card = lv_obj_create(scr_settings);
+    lv_obj_set_size(info_card, UI_W - 24, 110);
+    lv_obj_set_pos(info_card, 12, 80);
+    lv_obj_clear_flag(info_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(info_card, RED808_PANEL, 0);
+    lv_obj_set_style_bg_opa(info_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(info_card, 12, 0);
+    lv_obj_set_style_border_color(info_card, RED808_BORDER, 0);
+    lv_obj_set_style_border_width(info_card, 1, 0);
+    lv_obj_set_style_pad_all(info_card, 14, 0);
 
-    lv_obj_t* info = lv_label_create(scr_settings);
-    lv_label_set_text(info, "RED808 V6 — P4 Visual Beast\nGuition ESP32-P4 JC1060P470C\n1024x600 MIPI-DSI");
-    lv_obj_set_style_text_font(info, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(info, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(info, 20, 120);
+    lv_obj_t* info_icon = lv_label_create(info_card);
+    lv_label_set_text(info_icon, LV_SYMBOL_SETTINGS " DEVICE");
+    lv_obj_set_style_text_font(info_icon, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(info_icon, RED808_INFO, 0);
+    lv_obj_set_pos(info_icon, 0, 0);
+
+    lv_obj_t* info_left = lv_label_create(info_card);
+    lv_label_set_text(info_left,
+        "RED808 V6 — P4 Visual Beast\n"
+        "Guition ESP32-P4 JC1060P470C");
+    lv_obj_set_style_text_font(info_left, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(info_left, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(info_left, 16, 32);
+    lv_obj_set_style_text_line_space(info_left, 6, 0);
+
+    lv_obj_t* info_right = lv_label_create(info_card);
+    lv_label_set_text(info_right,
+        "1024x600 MIPI-DSI\n"
+        "WiFi via ESP32-C6 SDIO");
+    lv_obj_set_style_text_font(info_right, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(info_right, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(info_right, UI_W / 2 - 12, 32);
+    lv_obj_set_style_text_line_space(info_right, 6, 0);
+
+    // ── VISUAL THEME SELECTOR ──
+    lv_obj_t* theme_card = lv_obj_create(scr_settings);
+    lv_obj_set_size(theme_card, UI_W - 24, UI_H - 210);
+    lv_obj_set_pos(theme_card, 12, 200);
+    lv_obj_clear_flag(theme_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(theme_card, RED808_PANEL, 0);
+    lv_obj_set_style_bg_opa(theme_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(theme_card, 12, 0);
+    lv_obj_set_style_border_color(theme_card, RED808_BORDER, 0);
+    lv_obj_set_style_border_width(theme_card, 1, 0);
+    lv_obj_set_style_pad_all(theme_card, 14, 0);
+
+    lv_obj_t* theme_title = lv_label_create(theme_card);
+    lv_label_set_text(theme_title, LV_SYMBOL_EYE_OPEN " VISUAL THEME");
+    lv_obj_set_style_text_font(theme_title, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(theme_title, RED808_ACCENT, 0);
+    lv_obj_set_pos(theme_title, 0, 0);
+
+    // Theme buttons — 6 in a row
+    static const uint32_t btn_colors[THEME_COUNT] = {
+        0xFF4444, 0x4A9EFF, 0x39FF14, 0xFF6B35, 0xFF00AA, 0x999999
+    };
+    int card_inner_w = UI_W - 24 - 28;
+    int card_inner_h = UI_H - 210 - 28;
+    int btn_gap = 10;
+    int btn_w = (card_inner_w - (THEME_COUNT - 1) * btn_gap) / THEME_COUNT;
+    int btn_h = card_inner_h - 40;
+    if (btn_h > 340) btn_h = 340;
+    int btn_x_start = (card_inner_w - THEME_COUNT * btn_w - (THEME_COUNT - 1) * btn_gap) / 2;
+
+    for (int i = 0; i < THEME_COUNT; i++) {
+        lv_obj_t* btn = lv_btn_create(theme_card);
+        lv_obj_set_size(btn, btn_w, btn_h);
+        lv_obj_set_pos(btn, btn_x_start + i * (btn_w + btn_gap), 36);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(theme_presets[i].bg), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(btn, 12, 0);
+        lv_obj_set_style_border_width(btn, (i == currentTheme) ? 3 : 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(btn_colors[i]), 0);
+        lv_obj_set_style_shadow_width(btn, 12, 0);
+        lv_obj_set_style_shadow_color(btn, lv_color_hex(btn_colors[i]), 0);
+        lv_obj_set_style_shadow_opa(btn, (i == currentTheme) ? LV_OPA_80 : LV_OPA_30, 0);
+
+        // Color preview stripe at top
+        lv_obj_t* stripe = lv_obj_create(btn);
+        lv_obj_set_size(stripe, btn_w - 16, 6);
+        lv_obj_align(stripe, LV_ALIGN_TOP_MID, 0, 8);
+        lv_obj_clear_flag(stripe, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(stripe, lv_color_hex(btn_colors[i]), 0);
+        lv_obj_set_style_bg_opa(stripe, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(stripe, 3, 0);
+        lv_obj_set_style_border_width(stripe, 0, 0);
+
+        // 4 small color dots showing track palette preview (row 1)
+        for (int c = 0; c < 4; c++) {
+            lv_obj_t* dot = lv_obj_create(btn);
+            lv_obj_set_size(dot, 20, 20);
+            lv_obj_set_pos(dot, (btn_w - 4 * 24) / 2 + c * 24, 28);
+            lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_style_bg_color(dot, lv_color_hex(theme_presets[i].track_colors[c * 4]), 0);
+            lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_border_width(dot, 0, 0);
+        }
+
+        // 4 more color dots (row 2)
+        for (int c = 0; c < 4; c++) {
+            lv_obj_t* dot = lv_obj_create(btn);
+            lv_obj_set_size(dot, 20, 20);
+            lv_obj_set_pos(dot, (btn_w - 4 * 24) / 2 + c * 24, 54);
+            lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_style_bg_color(dot, lv_color_hex(theme_presets[i].track_colors[c * 4 + 2]), 0);
+            lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_border_width(dot, 0, 0);
+        }
+
+        // Theme name
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, theme_presets[i].name);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(theme_presets[i].text), 0);
+        lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -12);
+
+        // Active indicator
+        if (i == currentTheme) {
+            lv_obj_t* check = lv_label_create(btn);
+            lv_label_set_text(check, LV_SYMBOL_OK);
+            lv_obj_set_style_text_font(check, &lv_font_montserrat_20, 0);
+            lv_obj_set_style_text_color(check, lv_color_hex(btn_colors[i]), 0);
+            lv_obj_align(check, LV_ALIGN_BOTTOM_MID, 0, -34);
+        }
+
+        lv_obj_add_event_cb(btn, settings_theme_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    }
 }
 
 // =============================================================================

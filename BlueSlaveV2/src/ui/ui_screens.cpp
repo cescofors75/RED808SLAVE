@@ -620,8 +620,10 @@ void ui_create_header(lv_obj_t* parent) {
     lv_label_set_text(lbl_play[slot], get_play_state_text(isPlaying));
 
     // WiFi indicator chip
+#if S3_WIFI_ENABLED
     lv_obj_t* chip_wifi = create_info_chip(status_top, wifiConnected ? RED808_SUCCESS : RED808_ERROR, &lbl_wifi[slot]);
     lv_label_set_text(lbl_wifi[slot], wifiConnected ? LV_SYMBOL_WIFI " ON" : LV_SYMBOL_CLOSE " OFF");
+#endif
 
     // FOOTER ROW: BPM + FX + Master connection
     lv_obj_t* footer = lv_obj_create(parent);
@@ -707,6 +709,7 @@ void ui_update_header() {
             lv_obj_set_style_text_color(lbl_play[slot], RED808_TEXT, 0);
         }
     }
+#if S3_WIFI_ENABLED
     if ((int)wifiConnected != prev_wifi) {
         prev_wifi = (int)wifiConnected;
         if (lbl_wifi[slot]) {
@@ -714,6 +717,7 @@ void ui_update_header() {
             lv_obj_set_style_text_color(lbl_wifi[slot], wifiConnected ? RED808_SUCCESS : RED808_ERROR, 0);
         }
     }
+#endif
     static int prev_master_conn = -1;
     if (slotChanged) {
         prev_master_conn = -1;
@@ -2957,6 +2961,7 @@ void ui_create_settings_screen() {
     ui_create_header(scr_settings);
 
     // ── NETWORK Card (full width) ──
+#if S3_WIFI_ENABLED
     lv_obj_t* net_card = lv_obj_create(scr_settings);
 #if PORTRAIT_MODE
     lv_obj_set_size(net_card, UI_W - 40, 160);
@@ -3004,15 +3009,58 @@ void ui_create_settings_screen() {
     lv_obj_set_pos(role_info, 480, 40);
 #endif
     lv_obj_set_style_text_line_space(role_info, 8, 0);
+#endif  // S3_WIFI_ENABLED
+
+    // ── USB CONNECTION INFO (when WiFi disabled) ──
+#if !S3_WIFI_ENABLED
+    lv_obj_t* usb_card = lv_obj_create(scr_settings);
+#if PORTRAIT_MODE
+    lv_obj_set_size(usb_card, UI_W - 40, 120);
+    lv_obj_set_pos(usb_card, 20, 65);
+#else
+    lv_obj_set_size(usb_card, 970, 100);
+    lv_obj_set_pos(usb_card, 30, 75);
+#endif
+    lv_obj_clear_flag(usb_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(usb_card, RED808_PANEL, 0);
+    lv_obj_set_style_bg_opa(usb_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(usb_card, 12, 0);
+    lv_obj_set_style_border_color(usb_card, RED808_BORDER, 0);
+    lv_obj_set_style_border_width(usb_card, 1, 0);
+    lv_obj_set_style_pad_all(usb_card, 16, 0);
+
+    lv_obj_t* usb_icon = lv_label_create(usb_card);
+    lv_label_set_text(usb_icon, LV_SYMBOL_USB " CONNECTION");
+    lv_obj_set_style_text_font(usb_icon, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_color(usb_icon, RED808_INFO, 0);
+    lv_obj_set_pos(usb_icon, 0, 0);
+
+    lv_obj_t* usb_info = lv_label_create(usb_card);
+    lv_label_set_text_fmt(usb_info,
+        "Role: SURFACE CONTROLLER via USB-C to P4\n"
+        "Cores: %d x %d MHz", 2, ESP.getCpuFreqMHz());
+    lv_obj_set_style_text_font(usb_info, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(usb_info, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(usb_info, 20, 36);
+    lv_obj_set_style_text_line_space(usb_info, 8, 0);
+#endif  // !S3_WIFI_ENABLED
 
     // ── THEME SELECTOR Section ──
     lv_obj_t* theme_card = lv_obj_create(scr_settings);
 #if PORTRAIT_MODE
     lv_obj_set_size(theme_card, UI_W - 40, 740);
+#if S3_WIFI_ENABLED
     lv_obj_set_pos(theme_card, 20, 240);
 #else
+    lv_obj_set_pos(theme_card, 20, 200);
+#endif
+#else
     lv_obj_set_size(theme_card, 970, 340);
+#if S3_WIFI_ENABLED
     lv_obj_set_pos(theme_card, 30, 220);
+#else
+    lv_obj_set_pos(theme_card, 30, 190);
+#endif
 #endif
     lv_obj_clear_flag(theme_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(theme_card, RED808_PANEL, 0);
@@ -3330,9 +3378,13 @@ void ui_update_diagnostics() {
         unsigned long step_age = lastStepUpdateMs ? (now_millis - lastStepUpdateMs) : 0;
 
         lv_label_set_text(diag_runtime_values[0], screen_name(currentScreen));
+#if S3_WIFI_ENABLED
         lv_label_set_text(diag_runtime_values[1],
             wifiConnected ? (wifiReconnecting ? "ONLINE / RECOVER" : "ONLINE") :
                             (wifiReconnecting ? "RECONNECTING" : "OFFLINE"));
+#else
+        lv_label_set_text(diag_runtime_values[1], "USB-ONLY");
+#endif
         lv_label_set_text_fmt(diag_runtime_values[2], lastMasterPacketMs ? "%lu ms" : "No packets", master_age);
         lv_label_set_text_fmt(diag_runtime_values[3], lastStepUpdateMs ? "%lu ms" : "No sync", step_age);
         lv_label_set_text_fmt(diag_runtime_values[4], "%lu ms", (unsigned long)uiLastIntervalMs);

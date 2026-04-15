@@ -5,8 +5,11 @@
 // =============================================================================
 
 #include <Arduino.h>
+#include "../include/config.h"
+#if S3_WIFI_ENABLED
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#endif
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include <math.h>
@@ -16,7 +19,6 @@
 #include <DFRobot_VisualRotaryEncoder.h>
 #include "lvgl.h"
 
-#include "../include/config.h"
 #include "../include/system_state.h"
 
 // Drivers
@@ -107,9 +109,14 @@ int dfRobotPotHubChannel = -1;
 bool hubDetected = false;
 
 // Connection
+#if S3_WIFI_ENABLED
 bool udpConnected = false;
 bool wifiConnected = false;
 bool wifiReconnecting = false;
+#else
+bool udpConnected = false;
+bool wifiConnected = false;
+#endif
 bool masterConnected = false;
 
 // Diagnostic
@@ -137,7 +144,9 @@ const char* kitNames[] = {"808 CLASSIC", "808 BRIGHT", "808 DRY"};
 // HARDWARE INSTANCES
 // =============================================================================
 
+#if S3_WIFI_ENABLED
 WiFiUDP udp;
+#endif
 M5ROTATE8 m5encoders[M5_ENCODER_MODULES];
 bool m5encoderConnected[M5_ENCODER_MODULES] = {false, false};
 uint8_t m5FirmwareVersion[M5_ENCODER_MODULES] = {0, 0};  // stored at init for I2C health check
@@ -166,8 +175,10 @@ static unsigned long livePadReleaseMs[Config::MAX_SAMPLES] = {}; // when each pa
 
 // Timing
 unsigned long lastEncoderRead = 0;
+#if S3_WIFI_ENABLED
 unsigned long lastWiFiCheck = 0;
 unsigned long lastWiFiConnectedMs = 0;
+#endif
 unsigned long lastScreenUpdate = 0;
 unsigned long lastUDPCheck = 0;
 unsigned long lastMasterPacketMs = 0;
@@ -297,16 +308,20 @@ static uint32_t encoder_poll_interval_ms(Screen screen) {
 // =============================================================================
 
 void initState();
+#if S3_WIFI_ENABLED
 void setupWiFi();
 void checkWiFiReconnect();
 static void finalizeWiFiConnection();
 static void startWiFiReconnectAttempt();
+#endif
 static void requestMasterSync(bool requestState);
 void sendUDPCommand(const char* cmd);
 void sendUDPCommand(JsonDocument& doc);
 static void applyUnifiedMasterVolume(int value, bool sendToMaster);
 static void applyBPMPrecise(float bpm, bool sendToMaster);
+#if S3_WIFI_ENABLED
 void receiveUDPData();
+#endif
 void requestPatternFromMaster();
 void sendPlayStateCommand(bool shouldPlay);
 void selectPatternOnMaster(int patternIndex);
@@ -797,6 +812,7 @@ void initState() {
 // WiFi / UDP
 // =============================================================================
 
+#if S3_WIFI_ENABLED
 static void finalizeWiFiConnection() {
     wifiConnected = true;
     wifiReconnecting = false;
@@ -899,15 +915,19 @@ void checkWiFiReconnect() {
         startWiFiReconnectAttempt();
     }
 }
+#endif // S3_WIFI_ENABLED
 
 void sendUDPCommand(const char* cmd) {
+#if S3_WIFI_ENABLED
     if (!udpConnected) return;  // silent drop — no Serial in hot path
     udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
     udp.write((const uint8_t*)cmd, strlen(cmd));
     udp.endPacket();
+#endif
 }
 
 void sendUDPCommand(JsonDocument& doc) {
+#if S3_WIFI_ENABLED
     if (!udpConnected) return;
     char buf[512];
     size_t len = serializeJson(doc, buf, sizeof(buf));
@@ -916,6 +936,7 @@ void sendUDPCommand(JsonDocument& doc) {
         udp.write((const uint8_t*)buf, len);
         udp.endPacket();
     }
+#endif
 }
 
 void requestPatternFromMaster() {
@@ -1024,6 +1045,7 @@ static int microtiming_velocity(int velocity) {
 
 void sendLivePadTrigger(int pad, int velocity) {
     if (pad < 0 || pad >= Config::MAX_SAMPLES) return;
+#if S3_WIFI_ENABLED
     if (!udpConnected) return;
 
     // Humanize velocity with subtle random variation
@@ -1041,12 +1063,14 @@ void sendLivePadTrigger(int pad, int velocity) {
     udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
     udp.write((const uint8_t*)buf, len);
     udp.endPacket();
+#endif
 }
 
 // =============================================================================
 // UDP RECEIVE
 // =============================================================================
 
+#if S3_WIFI_ENABLED
 void receiveUDPData() {
     if (!udpConnected) return;
 
@@ -1219,6 +1243,7 @@ void receiveUDPData() {
     }
     // end receiveUDPData
 }
+#endif // S3_WIFI_ENABLED
 
 // =============================================================================
 // FILTER UDP SEND
@@ -2585,6 +2610,7 @@ static void pad_trigger_task(void* arg) {
             if (livePadRemainingRepeats[pad] == 0) continue;
             if (now < livePadNextRepeatMs[pad]) continue;
             sendLivePadTrigger(pad, padVelocity);
+            uart_bridge_send_pad_trigger(pad, (uint8_t)padVelocity);
             lastLivePadTriggerMs[pad] = now;
             livePadFlashUntilMs[pad] = now + LIVE_PAD_FLASH_MS;
             livePadRemainingRepeats[pad]--;
