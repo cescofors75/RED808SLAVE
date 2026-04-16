@@ -66,6 +66,9 @@ void setup() {
 }
 
 void loop() {
+    // Drain pad event queue FIRST — lowest latency pad→Master path (Core 1, no mutex)
+    ui_process_pad_queue();
+
     // Process WiFi/UDP from Master (primary connection)
     udp_handler_process();
 

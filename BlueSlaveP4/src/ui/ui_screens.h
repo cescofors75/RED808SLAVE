@@ -20,6 +20,12 @@ void ui_create_all_screens(void);
 // Update current screen from P4State (call every frame)
 void ui_update_current_screen(void);
 
+// Drain pad event queue — call from loop() on Core 1 (outside LVGL mutex)
+void ui_process_pad_queue(void);
+
+// Direct touch bypass — call from GT911 touch_task (Core 0, 200Hz)
+void ui_direct_touch_check(uint16_t x, uint16_t y);
+
 // Navigate to a screen
 void ui_navigate_to(int screen_id);
 

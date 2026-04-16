@@ -9,6 +9,23 @@
 #include "../uart_handler.h"
 #include "../include/config.h"
 #include <Arduino.h>
+#include <atomic>
+
+// ── Pad event queue: LVGL callback (Core 0) → loop (Core 1) ──
+// Decouples UDP send from LVGL mutex to reduce pad-to-audio latency.
+static volatile uint8_t s_pad_q[32];
+static std::atomic<uint8_t> s_pad_qh{0};
+static std::atomic<uint8_t> s_pad_qt{0};
+
+// Direct touch bypass: flag + debounce timestamps
+static std::atomic<bool> g_live_screen_active{false};
+static volatile unsigned long pad_last_direct[16] = {0};
+
+static void enqueue_pad_event(uint8_t pad) {
+    uint8_t h = s_pad_qh.load(std::memory_order_relaxed);
+    s_pad_q[h & 0x1F] = pad;
+    s_pad_qh.store(h + 1, std::memory_order_release);
+}
 
 // Screen objects
 lv_obj_t* scr_boot = NULL;
@@ -240,11 +257,14 @@ static bool sync_pads_active = true;  // ON by default
 
 static void pad_touch_cb(lv_event_t* e) {
     int pad = (int)(intptr_t)lv_event_get_user_data(e);
-    if (p4.wifi_connected || p4.master_connected) {
-        udp_send_trigger((uint8_t)pad, 127);
-    } else {
-        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_PAD_TAP, (uint8_t)pad);
-    }
+    if (pad < 0 || pad > 15) return;
+    // Dedup: skip if direct touch bypass already handled this pad recently
+    unsigned long now = millis();
+    if (now - pad_last_direct[pad] < 100) return;
+    // Immediate visual flash (local, no I/O)
+    p4.pad_flash_until[pad] = now + 120;
+    // Queue for UDP/UART send on Core 1 (outside LVGL mutex)
+    enqueue_pad_event((uint8_t)pad);
 }
 
 static void grid_nav_cb(lv_event_t* e) {
@@ -1640,6 +1660,61 @@ void ui_navigate_to(int screen_id) {
         prev_active_screen = active_screen;
         active_screen = screen_id;
     }
+    // Enable/disable direct touch bypass for live pads
+    g_live_screen_active.store(screen_id == 2, std::memory_order_release);
+}
+
+// =============================================================================
+// PAD QUEUE DRAIN — called from loop() on Core 1 (outside LVGL mutex)
+// =============================================================================
+void ui_process_pad_queue(void) {
+    uint8_t t = s_pad_qt.load(std::memory_order_relaxed);
+    uint8_t h = s_pad_qh.load(std::memory_order_acquire);
+    while (t != h) {
+        uint8_t pad = s_pad_q[t & 0x1F];
+        t++;
+        if (p4.wifi_connected || p4.master_connected) {
+            udp_send_trigger(pad, 127);
+        } else {
+            uart_send_to_s3(MSG_TOUCH_CMD, TCMD_PAD_TAP, pad);
+        }
+    }
+    s_pad_qt.store(t, std::memory_order_relaxed);
+}
+
+// =============================================================================
+// DIRECT TOUCH BYPASS — called from GT911 touch_task (Core 0, 200Hz)
+// Detects pad hits from raw coordinates, bypasses LVGL event system entirely.
+// Eliminates ~16ms vsync latency from the touch→UDP path.
+// =============================================================================
+void ui_direct_touch_check(uint16_t x, uint16_t y) {
+    if (!g_live_screen_active.load(std::memory_order_acquire)) return;
+
+    // Pad grid geometry (must match create_live_screen layout)
+    // M=8, CW=122, CH=143, stride_x=CW+G=126, stride_y=CH+G=147
+    const int M = 8, CW = 122, CH = 143, SX = 126, SY = 147;
+
+    if (x < M || x >= (M + 4 * SX) || y < M || y >= (M + 4 * SY)) return;
+
+    int col = (x - M) / SX;
+    int row = (y - M) / SY;
+    int x_in = (x - M) % SX;
+    int y_in = (y - M) % SY;
+
+    if (x_in >= CW || y_in >= CH || col >= 4 || row >= 4) return;
+
+    int pad = row * 4 + col;
+
+    // Debounce: don't re-trigger same pad within 100ms
+    unsigned long now = millis();
+    if (now - pad_last_direct[pad] < 100) return;
+    pad_last_direct[pad] = now;
+
+    // Visual flash (direct, no LVGL needed)
+    p4.pad_flash_until[pad] = now + 120;
+
+    // Enqueue for UDP send on Core 1
+    enqueue_pad_event((uint8_t)pad);
 }
 
 void ui_update_current_screen(void) {

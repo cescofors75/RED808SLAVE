@@ -7,6 +7,7 @@
 #include "lvgl_port.h"
 #include "display_init.h"
 #include "../include/config.h"
+#include "../ui/ui_screens.h"
 #include <Arduino.h>
 #include <Wire.h>
 #include <lvgl.h>
@@ -155,6 +156,15 @@ static void touch_task(void* arg) {
     (void)arg;
     while (true) {
         gt911_poll_all();
+        // Direct pad hit detection — bypasses LVGL for minimum latency
+        for (int i = 0; i < MAX_TOUCH_POINTS; i++) {
+            if (touch_data[i].state == LV_INDEV_STATE_PR) {
+                ui_direct_touch_check(
+                    (uint16_t)touch_data[i].point.x,
+                    (uint16_t)touch_data[i].point.y
+                );
+            }
+        }
         vTaskDelay(pdMS_TO_TICKS(5));   // 200Hz touch polling
     }
 }

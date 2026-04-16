@@ -10,6 +10,7 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
+#include <math.h>
 
 // =============================================================================
 // CONFIGURATION
@@ -161,61 +162,66 @@ void udp_send_set_distortion(float val) {
 
 // =============================================================================
 // FX LIVE COMMANDS — enc/pot values → Master FX engine
+// Aggressive mix curve (sqrt) so small encoder values produce audible FX.
+// Params resent periodically to survive UDP packet drops.
 // =============================================================================
 void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
     if (!udpStarted) return;
     if (enc_id < 0 || enc_id > 2) return;
 
-    static bool prev_active[3] = {false, false, false};
+    static bool was_active[3] = {false, false, false};
+    static unsigned long last_full_send[3] = {0, 0, 0};
     char buf[96];
     bool active = (!muted && value > 0);
     float norm = (float)value / 127.0f;
-    bool justActivated = (active && !prev_active[enc_id]);
-    bool justDeactivated = (!active && prev_active[enc_id]);
-    prev_active[enc_id] = active;
+    // sqrt curve: value=2→0.13, value=10→0.28, value=30→0.49, value=60→0.69
+    // Plus 15% floor so first click is ~25% mix (clearly audible)
+    float mix = 0.15f + 0.85f * sqrtf(norm);
+
+    bool justActivated = (active && !was_active[enc_id]);
+    unsigned long now = millis();
+    // Resend ALL params on activation OR every 2s (survive UDP drops)
+    bool fullSend = justActivated || (active && (now - last_full_send[enc_id] > 2000));
+    if (fullSend) last_full_send[enc_id] = now;
+    was_active[enc_id] = active;
+
+    P4_LOG_PRINTF("[FX] enc%d val=%d muted=%d active=%d mix=%.2f full=%d\n",
+                  enc_id, value, muted, active, mix, fullSend);
 
     switch (enc_id) {
         case 0: // Flanger
-            if (justActivated) {
-                sendJson("{\"cmd\":\"setFlangerActive\",\"value\":1}");
-                sendJson("{\"cmd\":\"setFlangerRate\",\"value\":0.5}");
-                sendJson("{\"cmd\":\"setFlangerDepth\",\"value\":0.8}");
-                sendJson("{\"cmd\":\"setFlangerFeedback\",\"value\":0.6}");
-            }
-            if (justDeactivated) {
-                sendJson("{\"cmd\":\"setFlangerActive\",\"value\":0}");
-            }
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerActive\",\"value\":%d}", active ? 1 : 0);
+            sendJson(buf);
             if (active) {
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerMix\",\"value\":%.3f}", norm);
+                if (fullSend) {
+                    sendJson("{\"cmd\":\"setFlangerRate\",\"value\":0.4}");
+                    sendJson("{\"cmd\":\"setFlangerDepth\",\"value\":0.8}");
+                    sendJson("{\"cmd\":\"setFlangerFeedback\",\"value\":0.7}");
+                }
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerMix\",\"value\":%.3f}", mix);
                 sendJson(buf);
             }
             break;
         case 1: // Chorus
-            if (justActivated) {
-                sendJson("{\"cmd\":\"setChorusActive\",\"value\":1}");
-                sendJson("{\"cmd\":\"setChorusRate\",\"value\":1.5}");
-                sendJson("{\"cmd\":\"setChorusDepth\",\"value\":0.5}");
-                sendJson("{\"cmd\":\"setChorusStereo\",\"value\":1}");
-            }
-            if (justDeactivated) {
-                sendJson("{\"cmd\":\"setChorusActive\",\"value\":0}");
-            }
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusActive\",\"value\":%d}", active ? 1 : 0);
+            sendJson(buf);
             if (active) {
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusMix\",\"value\":%.3f}", norm);
+                if (fullSend) {
+                    sendJson("{\"cmd\":\"setChorusRate\",\"value\":1.5}");
+                    sendJson("{\"cmd\":\"setChorusDepth\",\"value\":0.6}");
+                    sendJson("{\"cmd\":\"setChorusStereo\",\"value\":1}");
+                }
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusMix\",\"value\":%.3f}", mix);
                 sendJson(buf);
             }
             break;
         case 2: // Tremolo
-            if (justActivated) {
-                sendJson("{\"cmd\":\"setTremoloActive\",\"value\":1}");
-            }
-            if (justDeactivated) {
-                sendJson("{\"cmd\":\"setTremoloActive\",\"value\":0}");
-            }
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloActive\",\"value\":%d}", active ? 1 : 0);
+            sendJson(buf);
             if (active) {
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloDepth\",\"value\":%.3f}", norm);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloDepth\",\"value\":%.3f}", mix);
                 sendJson(buf);
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloRate\",\"value\":%.1f}", 2.0f + norm * 6.0f);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloRate\",\"value\":%.1f}", 3.0f + mix * 7.0f);
                 sendJson(buf);
             }
             break;
