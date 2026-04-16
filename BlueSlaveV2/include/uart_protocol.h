@@ -26,7 +26,7 @@
 #define MSG_TRACK       0x06
 #define MSG_SCREEN      0x07
 #define MSG_TOUCH_CMD   0x08
-#define MSG_DIAG        0x09
+#define MSG_DIAG        0x09    // RESERVED (unused)
 #define MSG_PATTERN_DATA 0x0A
 #define MSG_SD_DATA     0x0B    // S3→P4: SD card data (extended packets)
 
@@ -85,7 +85,7 @@
 #define TCMD_PAD_TAP       0x00
 #define TCMD_PLAY_TOGGLE   0x01
 #define TCMD_PATTERN_SEL   0x02
-#define TCMD_FX_TOGGLE     0x03
+#define TCMD_FX_TOGGLE     0x03    // RESERVED (unused)
 #define TCMD_THEME_NEXT    0x04
 #define TCMD_SCREEN_NAV    0x05
 #define TCMD_STEP_TOGGLE   0x06  // S3→P4: toggle step. value=(track<<4)|step

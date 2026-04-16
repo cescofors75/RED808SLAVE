@@ -29,6 +29,15 @@ void uart_send_pattern_to_s3(int pattern, const bool steps[16][16]);
 // Check if S3 is alive (heartbeat received recently)
 bool uart_s3_alive(void);
 
+// UART link statistics (for diagnostics)
+struct UartStats {
+    uint32_t tx_packets;
+    uint32_t rx_packets;
+    uint32_t rx_checksum_errors;
+    uint32_t rx_framing_errors;
+};
+extern UartStats uart_stats;
+
 // =============================================================================
 // P4 LOCAL STATE — updated by UART handler, read by UI
 // =============================================================================

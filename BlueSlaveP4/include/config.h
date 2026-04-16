@@ -10,7 +10,7 @@
 // DEBUG LOGGING
 // =============================================================================
 #ifndef P4_ENABLE_DEBUG_LOG
-#define P4_ENABLE_DEBUG_LOG 1
+#define P4_ENABLE_DEBUG_LOG 0
 #endif
 
 #if P4_ENABLE_DEBUG_LOG

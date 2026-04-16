@@ -1240,11 +1240,8 @@ void ui_update_live_pads() {
         if (!active && millis() < livePadFlashUntilMs[pad]) {
             active = true;
         }
-        if (livePadSyncMode && isPlaying) {
-            if (patterns[currentPattern].steps[pad][currentStep]) {
-                active = true;
-            }
-        }
+        // Note: sequencer steps flash via livePadFlashUntilMs set in main.cpp step clock
+        // livePadSyncMode is kept as a toggle but visual flash is timer-driven (no always-on)
         if (active) {
             state_mask |= (1UL << pad);
         }

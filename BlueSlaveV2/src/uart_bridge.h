@@ -26,6 +26,15 @@ extern void handleP4PatternData(int pattern, const bool steps[16][16]);
 // Send heartbeat to P4 (call periodically, e.g. every 500ms)
 void uart_bridge_heartbeat(void);
 
+// UART link statistics (for diagnostics)
+struct UartStats {
+    uint32_t tx_packets;
+    uint32_t rx_packets;
+    uint32_t rx_checksum_errors;
+    uint32_t rx_framing_errors;   // unexpected start byte
+};
+extern UartStats uart_stats;
+
 // ---- Convenience senders (call from state-change sites) ----
 
 // System state

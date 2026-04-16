@@ -4,6 +4,7 @@
 
 #include "uart_handler.h"
 #include "udp_handler.h"
+#include "dsp_task.h"
 #include "ui/ui_screens.h"
 #include "../include/config.h"
 #include <Arduino.h>
@@ -17,6 +18,9 @@ P4State p4 = {};
 
 // P4 SD remote browse state
 P4SdState p4sd = {};
+
+// Link statistics
+UartStats uart_stats = {};
 
 // UART instance
 static HardwareSerial UartS3(UART_S3_PORT);
@@ -64,6 +68,7 @@ void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value) {
 #else
     UartS3.write((uint8_t*)&pkt, sizeof(pkt));
 #endif
+    uart_stats.tx_packets++;
 }
 
 // =============================================================================
@@ -155,6 +160,7 @@ static void process_basic(const UartBasicPacket* pkt) {
             if (id < 16) {
                 p4.pad_velocity[id] = val;
                 p4.pad_flash_until[id] = millis() + 120;
+                dsp_notify_pad(id, val);
                 // Relay S3 pad triggers to Master when S3 WiFi is down
                 if (!p4.s3_wifi_connected && udp_wifi_connected()) {
                     udp_send_trigger(id, val);
@@ -366,6 +372,7 @@ static void feed_byte(uint8_t b) {
     if (rxHead == 0) {
         if (b != UART_START_BASIC && b != UART_START_EXTENDED) {
             s_totalDiscarded++;
+            uart_stats.rx_framing_errors++;
             if (s_totalDiscarded <= 50) {
                 P4_LOG_PRINTF("[UART-DISC] 0x%02X\n", b);
             }
@@ -380,7 +387,10 @@ static void feed_byte(uint8_t b) {
         UartBasicPacket* pkt = (UartBasicPacket*)rxBuf;
         if (uart_validate_basic(pkt)) {
             process_basic(pkt);
+            uart_stats.rx_packets++;
             s_processed++;
+        } else {
+            uart_stats.rx_checksum_errors++;
         }
         rxHead = 0;
     }
@@ -404,7 +414,10 @@ static void feed_byte(uint8_t b) {
             if (sum == rxBuf[total - 1]) {
                 process_extended(hdr->type, hdr->id,
                                  &rxBuf[UART_EXT_HEADER_LEN], payload_len);
+                uart_stats.rx_packets++;
                 s_processed++;
+            } else {
+                uart_stats.rx_checksum_errors++;
             }
             rxHead = 0;
         }

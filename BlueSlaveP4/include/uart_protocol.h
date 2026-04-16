@@ -26,7 +26,7 @@
 #define MSG_TRACK       0x06    // Per-track info (mute, volume)
 #define MSG_SCREEN      0x07    // Screen navigation
 #define MSG_TOUCH_CMD   0x08    // P4→S3: touch-initiated command
-#define MSG_DIAG        0x09    // Diagnostic info
+#define MSG_DIAG        0x09    // RESERVED (unused)
 #define MSG_PATTERN_DATA 0x0A   // Extended: pattern step data
 #define MSG_SD_DATA     0x0B    // S3→P4: SD card data (extended packets)
 
@@ -105,7 +105,7 @@
 #define TCMD_PAD_TAP       0x00 // Byte 3 = pad index (velocity fixed 127)
 #define TCMD_PLAY_TOGGLE   0x01 // Byte 3 = unused
 #define TCMD_PATTERN_SEL   0x02 // Byte 3 = pattern index
-#define TCMD_FX_TOGGLE     0x03 // Byte 3 = fx index (0-2)
+#define TCMD_FX_TOGGLE     0x03 // RESERVED (unused)
 #define TCMD_THEME_NEXT    0x04 // Byte 3 = unused
 #define TCMD_SCREEN_NAV    0x05 // Byte 3 = screen enum
 #define TCMD_STEP_TOGGLE   0x06 // S3→P4: toggle step. id=TCMD_STEP_TOGGLE, value=(track<<4)|step

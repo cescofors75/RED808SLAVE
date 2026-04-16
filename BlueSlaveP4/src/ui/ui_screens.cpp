@@ -7,6 +7,7 @@
 #include "ui_theme.h"
 #include "../udp_handler.h"
 #include "../uart_handler.h"
+#include "../dsp_task.h"
 #include "../include/config.h"
 #include <Arduino.h>
 #include <atomic>
@@ -239,6 +240,7 @@ static void create_boot_screen(void) {
 // =============================================================================
 static lv_obj_t* live_pad_btns[16] = {};
 static lv_obj_t* live_pad_labels[16] = {};
+static lv_obj_t* live_spectrum_bars[16] = {};  // spectrum bar per pad (bottom of pad)
 
 // Right-side control widgets (dynamic updates)
 static lv_obj_t* grid_play_btn = NULL;
@@ -255,6 +257,83 @@ static lv_obj_t* grid_vol_lbl = NULL;
 static lv_obj_t* grid_sync_btn = NULL;
 static bool sync_pads_active = false;  // OFF by default (synced with S3)
 
+// Ripple effect — pool of expanding ring objects
+static constexpr int RIPPLE_POOL = 4;
+static constexpr int RIPPLE_FRAMES = 12;      // animation steps at ~60Hz = 200ms
+static constexpr int RIPPLE_MAX_R = 80;        // max radius in pixels
+struct RippleState {
+    lv_obj_t* obj = nullptr;
+    int frame = 0;         // 0 = inactive
+    lv_color_t color;
+    lv_coord_t cx, cy;     // center position (absolute on scr_live)
+};
+static RippleState ripples[RIPPLE_POOL];
+
+static void ripple_spawn(int pad) {
+    if (pad < 0 || pad >= 16 || !live_pad_btns[pad] || !scr_live) return;
+    // Calculate pad center in screen coordinates
+    lv_coord_t px = lv_obj_get_x(live_pad_btns[pad]);
+    lv_coord_t py = lv_obj_get_y(live_pad_btns[pad]);
+    lv_coord_t pw = lv_obj_get_width(live_pad_btns[pad]);
+    lv_coord_t ph = lv_obj_get_height(live_pad_btns[pad]);
+    lv_coord_t cx = px + pw / 2;
+    lv_coord_t cy = py + ph / 2;
+    lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[pad]);
+
+    // Find free or oldest ripple slot
+    int slot = 0;
+    for (int i = 0; i < RIPPLE_POOL; i++) {
+        if (ripples[i].frame == 0) { slot = i; break; }
+        if (ripples[i].frame > ripples[slot].frame) slot = i;
+    }
+
+    RippleState& r = ripples[slot];
+    r.frame = 1;
+    r.color = tc;
+    r.cx = cx;
+    r.cy = cy;
+
+    if (!r.obj) {
+        r.obj = lv_obj_create(scr_live);
+        lv_obj_clear_flag(r.obj, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_opa(r.obj, LV_OPA_0, 0);
+        lv_obj_set_style_shadow_width(r.obj, 0, 0);
+    }
+    // Reset visual
+    lv_obj_set_size(r.obj, 10, 10);
+    lv_obj_set_pos(r.obj, cx - 5, cy - 5);
+    lv_obj_set_style_radius(r.obj, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(r.obj, 3, 0);
+    lv_obj_set_style_border_color(r.obj, tc, 0);
+    lv_obj_set_style_border_opa(r.obj, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(r.obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(r.obj);
+}
+
+// Called each frame from update_live_screen to animate active ripples
+static void ripple_update(void) {
+    for (int i = 0; i < RIPPLE_POOL; i++) {
+        RippleState& r = ripples[i];
+        if (r.frame == 0 || !r.obj) continue;
+
+        r.frame++;
+        if (r.frame > RIPPLE_FRAMES) {
+            // Animation done — hide and recycle
+            r.frame = 0;
+            lv_obj_add_flag(r.obj, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+
+        float t = (float)(r.frame - 1) / (float)RIPPLE_FRAMES;  // 0..1
+        int sz = 10 + (int)(t * RIPPLE_MAX_R * 2);
+        lv_obj_set_size(r.obj, sz, sz);
+        lv_obj_set_pos(r.obj, r.cx - sz / 2, r.cy - sz / 2);
+        lv_obj_set_style_border_opa(r.obj, (lv_opa_t)(255 * (1.0f - t)), 0);
+        // Border thins as it expands
+        lv_obj_set_style_border_width(r.obj, (lv_coord_t)(3 * (1.0f - t * 0.7f)), 0);
+    }
+}
+
 static void pad_touch_cb(lv_event_t* e) {
     int pad = (int)(intptr_t)lv_event_get_user_data(e);
     if (pad < 0 || pad > 15) return;
@@ -263,6 +342,8 @@ static void pad_touch_cb(lv_event_t* e) {
     if (now - pad_last_direct[pad] < 100) return;
     // Immediate visual flash (local, no I/O)
     p4.pad_flash_until[pad] = now + 120;
+    // Ripple effect
+    ripple_spawn(pad);
     // Queue for UDP/UART send on Core 1 (outside LVGL mutex)
     enqueue_pad_event((uint8_t)pad);
 }
@@ -415,6 +496,16 @@ static void create_live_screen(void) {
         lv_obj_set_style_text_font(live_pad_labels[i], &lv_font_montserrat_24, 0);
         lv_obj_set_style_text_color(live_pad_labels[i], tc, 0);
         lv_obj_center(live_pad_labels[i]);
+
+        // Spectrum bar — thin horizontal bar at bottom of pad, grows upward
+        live_spectrum_bars[i] = lv_obj_create(live_pad_btns[i]);
+        lv_obj_set_size(live_spectrum_bars[i], CW - 20, 0);  // starts at 0 height
+        lv_obj_align(live_spectrum_bars[i], LV_ALIGN_BOTTOM_MID, 0, -4);
+        lv_obj_set_style_bg_color(live_spectrum_bars[i], tc, 0);
+        lv_obj_set_style_bg_opa(live_spectrum_bars[i], LV_OPA_60, 0);
+        lv_obj_set_style_border_width(live_spectrum_bars[i], 0, 0);
+        lv_obj_set_style_radius(live_spectrum_bars[i], 3, 0);
+        lv_obj_clear_flag(live_spectrum_bars[i], LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     }
 
     // === RIGHT 4×4: Controls ===
@@ -543,8 +634,11 @@ static void update_live_screen(void) {
         // Sequencer sync: light up pads for active steps
         if (sync_pads_active && p4.is_playing && p4.steps[i][p4.current_step])
             flashing = true;
-        if (flashing == pad_was_flash[i] && !step_changed) continue;
+        bool was_flash = pad_was_flash[i];
+        if (flashing == was_flash && !step_changed) continue;
         pad_was_flash[i] = flashing;
+        // Spawn ripple on rising edge (pad just started flashing)
+        if (flashing && !was_flash) ripple_spawn(i);
         lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[i]);
 
         if (flashing) {
@@ -650,6 +744,26 @@ static void update_live_screen(void) {
         gp_prev_vol = p4.master_volume;
         lv_label_set_text_fmt(grid_vol_lbl, "%d", p4.master_volume);
     }
+
+    // Spectrum bars — read from DSP task
+    {
+        const SpectrumData& sp = dsp_get_spectrum();
+        static uint8_t prev_bar_h[16] = {};
+        const int MAX_BAR_H = 60;  // max bar height in pixels (pad is 143px)
+        for (int i = 0; i < 16; i++) {
+            if (!live_spectrum_bars[i]) continue;
+            uint8_t h_px = (uint8_t)((sp.bars[i] * MAX_BAR_H) / 255);
+            if (h_px == prev_bar_h[i]) continue;
+            prev_bar_h[i] = h_px;
+            lv_obj_set_height(live_spectrum_bars[i], h_px);
+            lv_obj_align(live_spectrum_bars[i], LV_ALIGN_BOTTOM_MID, 0, -4);
+            lv_obj_set_style_bg_opa(live_spectrum_bars[i],
+                h_px > 0 ? LV_OPA_60 : LV_OPA_0, 0);
+        }
+    }
+
+    // Ripple animation
+    ripple_update();
 }
 
 // =============================================================================
@@ -1758,6 +1872,12 @@ static void ui_reload_themed_screens(void) {
     for (int i = 0; i < 16; i++) hdr_step_dots[i] = NULL;
     for (int i = 0; i < 16; i++) {
         live_pad_btns[i] = NULL; live_pad_labels[i] = NULL;
+        live_spectrum_bars[i] = NULL;
+    }
+    // Invalidate ripple pool — objects are children of scr_live (already deleted)
+    for (int i = 0; i < RIPPLE_POOL; i++) {
+        ripples[i].obj = nullptr;
+        ripples[i].frame = 0;
     }
     grid_play_btn = NULL; grid_play_lbl = NULL; grid_bpm_lbl = NULL;
     grid_pat_lbl = NULL; grid_step_lbl = NULL;
@@ -1835,6 +1955,8 @@ void ui_process_pad_queue(void) {
     while (t != h) {
         uint8_t pad = s_pad_q[t & 0x1F];
         t++;
+        // Feed DSP spectrum
+        dsp_notify_pad(pad, 127);
         // Notify S3 via UART first (fast, 5 bytes)
         uart_send_to_s3(MSG_TOUCH_CMD, TCMD_PAD_TAP, pad);
         // Then send UDP to master if connected

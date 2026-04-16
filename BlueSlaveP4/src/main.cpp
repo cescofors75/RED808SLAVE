@@ -13,6 +13,7 @@
 #include "udp_handler.h"
 #include "ui/ui_screens.h"
 #include "ui/ui_theme.h"
+#include "dsp_task.h"
 
 #if P4_USB_CDC_ENABLED
 #include "usb_cdc_handler.h"
@@ -59,9 +60,13 @@ void setup() {
     usb_cdc_init();
 #endif
 
+    // 8. Start DSP processing task (Core 0)
+    P4_LOG_PRINTLN("[INIT] DSP task...");
+    dsp_task_init();
+
     P4_LOG_PRINTLN("=== P4 Ready — Connecting to Master ===");
 
-    // 8. Start LVGL rendering task (must be AFTER UI creation)
+    // 9. Start LVGL rendering task (must be AFTER UI creation)
     lvgl_port_task_start();
 }
 

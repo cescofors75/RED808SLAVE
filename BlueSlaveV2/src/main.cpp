@@ -277,27 +277,27 @@ static uint32_t ui_refresh_interval_ms(Screen screen, bool playing_now) {
         case SCREEN_BOOT:
             return 33;
         case SCREEN_MENU:
-            return 120;
+            return 200;    // static screen, no animation
         case SCREEN_LIVE:
-            return 50;
+            return 16;     // fast pad flash response
         case SCREEN_SEQUENCER:
         case SCREEN_SEQ_CIRCLE:
-            return playing_now ? 16 : 50;
+            return playing_now ? 16 : 80;
         case SCREEN_VOLUMES:
-            return 16;
+            return 33;     // smooth but relaxed
         case SCREEN_FILTERS:
-            return 50;
+            return 80;
         case SCREEN_PATTERNS:
-            return 100;
+            return 150;
         case SCREEN_DIAGNOSTICS:
         case SCREEN_PERFORMANCE:
-            return 200;
+            return 300;    // near-static text
         case SCREEN_SETTINGS:
         case SCREEN_SDCARD:
         case SCREEN_SAMPLES:
-            return 250;
+            return 300;
         default:
-            return 100;
+            return 150;
     }
 }
 
@@ -2951,14 +2951,18 @@ void loop() {
             currentStep = (currentStep + 1) % Config::MAX_STEPS;
             uart_bridge_send_step(currentStep);
 
-            // ── Sequencer triggers: send active pads on this step to Master ──
-            if (udpConnected) {
+            // ── Sequencer triggers: flash pads always; send UDP only when connected ──
+            {
                 const int seqVel = map(constrain(sequencerVolume, 0, Config::MAX_VOLUME),
                                        0, Config::MAX_VOLUME, 32, 127);
                 for (int t = 0; t < Config::MAX_TRACKS; t++) {
                     if (patterns[currentPattern].steps[t][currentStep] &&
                         !patterns[currentPattern].muted[t]) {
-                        sendLivePadTrigger(t, seqVel);
+                        // Flash live pad on the live screen (always, even without UDP)
+                        livePadFlashUntilMs[t] = now + LIVE_PAD_FLASH_MS;
+                        if (udpConnected) {
+                            sendLivePadTrigger(t, seqVel);
+                        }
                     }
                 }
             }

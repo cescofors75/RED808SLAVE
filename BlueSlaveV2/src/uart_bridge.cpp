@@ -22,6 +22,9 @@ static HardwareSerial& P4Serial = Serial1;
 // TX buffer to coalesce sends
 static uint8_t txBuf[UART_BASIC_LEN];
 
+// Link statistics
+UartStats uart_stats = {};
+
 // =============================================================================
 // INIT
 // =============================================================================
@@ -48,6 +51,7 @@ void uart_bridge_send(uint8_t type, uint8_t id, uint8_t value) {
     UartBasicPacket pkt;
     uart_build_basic(&pkt, type, id, value);
     P4Serial.write((const uint8_t*)&pkt, UART_BASIC_LEN);
+    uart_stats.tx_packets++;
 }
 
 // =============================================================================
@@ -82,7 +86,8 @@ int uart_bridge_receive(void) {
             uint8_t buf[UART_BASIC_LEN];
             P4Serial.readBytes(buf, UART_BASIC_LEN);
             UartBasicPacket* pkt = (UartBasicPacket*)buf;
-            if (!uart_validate_basic(pkt)) continue;
+            if (!uart_validate_basic(pkt)) { uart_stats.rx_checksum_errors++; continue; }
+            uart_stats.rx_packets++;
             if (pkt->type == MSG_TOUCH_CMD) {
                 extern void handleP4TouchCommand(uint8_t cmdId, uint8_t value);
                 handleP4TouchCommand(pkt->id, pkt->value);
@@ -128,6 +133,7 @@ int uart_bridge_receive(void) {
             }
         } else {
             P4Serial.read();  // discard unrecognized byte
+            uart_stats.rx_framing_errors++;
         }
     }
     return count;

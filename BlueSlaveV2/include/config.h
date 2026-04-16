@@ -187,7 +187,7 @@ namespace WiFiConfig {
     constexpr uint32_t RECONNECT_ATTEMPT_TIMEOUT_MS = 5000;
     constexpr uint32_t DISCONNECT_GRACE_MS = 1500;
     constexpr uint32_t MASTER_HELLO_RETRY_MS = 300;
-    constexpr uint32_t UDP_RECEIVE_MS = 8;
+    constexpr uint32_t UDP_RECEIVE_MS = 20;  // relaxed — JSON parse is expensive
 }
 
 // =============================================================================
