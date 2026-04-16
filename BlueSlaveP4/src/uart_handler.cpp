@@ -4,6 +4,7 @@
 
 #include "uart_handler.h"
 #include "udp_handler.h"
+#include "ui/ui_screens.h"
 #include "../include/config.h"
 #include <Arduino.h>
 
@@ -290,6 +291,9 @@ static void process_basic(const UartBasicPacket* pkt) {
                     if (udp_wifi_connected())
                         udp_send_set_step(trk, stp, p4.steps[trk][stp]);
                 }
+            }
+            else if (id == TCMD_SYNC_PADS) {
+                ui_live_set_sync_p4(val != 0);
             }
             break;
     }

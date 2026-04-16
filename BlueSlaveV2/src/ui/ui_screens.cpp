@@ -288,10 +288,6 @@ static void live_layout_pads() {
         }
     }
 
-    if (live_sync_btn) {
-        lv_obj_set_pos(live_sync_btn, grid_left + (grid_width - 120) / 2, LIVE_PAD_AREA_TOP - 34);
-    }
-
     live_update_view_controls();
 }
 
@@ -960,6 +956,24 @@ static void live_sync_cb(lv_event_t* e) {
         lv_obj_set_style_text_color(live_sync_lbl,
             livePadSyncMode ? RED808_BG : RED808_TEXT, 0);
     }
+    // Sync state to P4
+    extern void uart_bridge_send(uint8_t type, uint8_t id, uint8_t value);
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_SYNC_PADS, livePadSyncMode ? 1 : 0);
+}
+
+// Called when P4 sends sync toggle — update UI without re-sending
+void ui_live_set_sync(bool on) {
+    livePadSyncMode = on;
+    if (live_sync_btn) {
+        lv_obj_set_style_bg_color(live_sync_btn,
+            on ? RED808_ACCENT : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(live_sync_btn,
+            on ? RED808_ACCENT : RED808_ACCENT, 0);
+    }
+    if (live_sync_lbl) {
+        lv_obj_set_style_text_color(live_sync_lbl,
+            on ? RED808_BG : RED808_TEXT, 0);
+    }
 }
 
 void ui_create_live_screen() {
@@ -1113,10 +1127,13 @@ void ui_create_live_screen() {
         live_pad_h[i] = h;
     }
 
-    // SYNC button — centered horizontally, between header and pad grid
-    live_sync_btn = lv_obj_create(scr_live);
-    lv_obj_set_size(live_sync_btn, 120, 34);
-    lv_obj_set_pos(live_sync_btn, (UI_W - 120) / 2, LIVE_PAD_AREA_TOP - 34);
+    // SYNC button — inside VIEW panel
+    live_sync_btn = lv_obj_create(left_panel);
+#if PORTRAIT_MODE
+    lv_obj_set_size(live_sync_btn, 48, 32);
+#else
+    lv_obj_set_size(live_sync_btn, 56, 36);
+#endif
     lv_obj_clear_flag(live_sync_btn, LV_OBJ_FLAG_SCROLLABLE);
     apply_stable_button_style(live_sync_btn, RED808_SURFACE, RED808_ACCENT);
     lv_obj_set_style_radius(live_sync_btn, 8, 0);
@@ -1124,8 +1141,8 @@ void ui_create_live_screen() {
     lv_obj_add_event_cb(live_sync_btn, live_sync_cb, LV_EVENT_PRESSED, NULL);
 
     live_sync_lbl = lv_label_create(live_sync_btn);
-    lv_label_set_text(live_sync_lbl, LV_SYMBOL_REFRESH " SYNC");
-    lv_obj_set_style_text_font(live_sync_lbl, &lv_font_montserrat_16, 0);
+    lv_label_set_text(live_sync_lbl, LV_SYMBOL_REFRESH);
+    lv_obj_set_style_text_font(live_sync_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(live_sync_lbl, RED808_TEXT, 0);
     lv_obj_center(live_sync_lbl);
 

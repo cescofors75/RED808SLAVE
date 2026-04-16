@@ -253,7 +253,7 @@ static lv_obj_t* grid_vol_lbl = NULL;
 
 // Sync Pads LEDs — pads illuminate automatically with sequencer
 static lv_obj_t* grid_sync_btn = NULL;
-static bool sync_pads_active = true;  // ON by default
+static bool sync_pads_active = false;  // OFF by default (synced with S3)
 
 static void pad_touch_cb(lv_event_t* e) {
     int pad = (int)(intptr_t)lv_event_get_user_data(e);
@@ -282,6 +282,21 @@ static void grid_sync_cb(lv_event_t* e) {
             sync_pads_active ? RED808_CYAN : RED808_BORDER, 0);
         lv_obj_t* lbl = lv_obj_get_child(grid_sync_btn, 0);
         if (lbl) lv_label_set_text(lbl, sync_pads_active ? "SYNC\nON" : "SYNC\nOFF");
+    }
+    // Sync state to S3
+    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SYNC_PADS, sync_pads_active ? 1 : 0);
+}
+
+// Called when S3 sends sync toggle — update UI without re-sending
+void ui_live_set_sync_p4(bool on) {
+    sync_pads_active = on;
+    if (grid_sync_btn) {
+        lv_obj_set_style_bg_color(grid_sync_btn,
+            on ? RED808_SUCCESS : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(grid_sync_btn,
+            on ? RED808_CYAN : RED808_BORDER, 0);
+        lv_obj_t* lbl = lv_obj_get_child(grid_sync_btn, 0);
+        if (lbl) lv_label_set_text(lbl, on ? "SYNC\nON" : "SYNC\nOFF");
     }
 }
 
@@ -447,9 +462,9 @@ static void create_live_screen(void) {
     }
     // SYNC button — replaces PERF, toggles pad LED sync with sequencer
     grid_sync_btn = create_ctrl_btn(scr_live, COL_X(7), ROW_Y(1), CW, CH,
-                                     "SYNC\nON", RED808_SUCCESS, &lv_font_montserrat_20);
-    lv_obj_set_style_bg_color(grid_sync_btn, RED808_SUCCESS, 0);
-    lv_obj_set_style_border_color(grid_sync_btn, RED808_CYAN, 0);
+                                     "SYNC\nOFF", RED808_SURFACE, &lv_font_montserrat_20);
+    lv_obj_set_style_bg_color(grid_sync_btn, RED808_SURFACE, 0);
+    lv_obj_set_style_border_color(grid_sync_btn, RED808_BORDER, 0);
     lv_obj_add_event_cb(grid_sync_btn, grid_sync_cb, LV_EVENT_CLICKED, NULL);
 
     // --- Row 2: System ---

@@ -46,6 +46,7 @@ void ui_update_header();
 void ui_update_menu_status();
 void ui_update_live_pads();
 void ui_live_pads_invalidate();
+void ui_live_set_sync(bool on);
 void ui_volumes_retheme();
 void ui_update_sdcard();
 

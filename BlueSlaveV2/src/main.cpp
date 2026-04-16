@@ -494,6 +494,9 @@ void handleP4TouchCommand(uint8_t cmdId, uint8_t value) {
         case TCMD_SD_LOAD:
             handleP4SdLoad(value);
             break;
+        case TCMD_SYNC_PADS:
+            ui_live_set_sync(value != 0);
+            break;
         default:
             break;
     }

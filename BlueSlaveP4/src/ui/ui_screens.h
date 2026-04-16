@@ -35,3 +35,6 @@ lv_obj_t* create_section_shell(lv_obj_t* parent, int x, int y, int w, int h);
 // Header bar (shared across screens)
 void ui_create_header(lv_obj_t* parent);
 void ui_update_header(void);
+
+// Sync pads state (called from UART handler)
+void ui_live_set_sync_p4(bool on);

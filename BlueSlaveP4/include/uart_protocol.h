@@ -113,7 +113,7 @@
 #define TCMD_SD_SELECT     0x08 // P4→S3: select entry N (0-based index)
 #define TCMD_SD_BACK       0x09 // P4→S3: go to parent directory
 #define TCMD_SD_LOAD       0x0A // P4→S3: load selected file to pad N
-
+#define TCMD_SYNC_PADS     0x0B  // Bidirectional: toggle pad LED sync mode
 // =============================================================================
 // SD DATA sub-IDs (MSG_SD_DATA extended, Byte 2)
 // =============================================================================
