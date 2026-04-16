@@ -7,6 +7,7 @@
 #include "../../include/system_state.h"
 #include "../../include/config.h"
 #include "../drivers/io_extension.h"
+#include "../sd_midi_loader.h"
 #include <Esp.h>
 #include <ArduinoJson.h>
 #include <math.h>
@@ -3018,12 +3019,24 @@ static lv_obj_t* sd_pad_btns[Config::MAX_TRACKS] = {};
 static lv_obj_t* sd_load_btn    = NULL;
 static lv_obj_t* sd_load_lbl    = NULL;
 
+// MIDI section widgets
+static lv_obj_t* sd_wav_section  = NULL;
+static lv_obj_t* sd_midi_section = NULL;
+static lv_obj_t* sd_midi_info_lbl    = NULL;
+static lv_obj_t* sd_midi_status_lbl  = NULL;
+static lv_obj_t* sd_midi_load_btn    = NULL;
+static lv_obj_t* sd_midi_pat_btns[10] = {};   // slots 6-15
+static int       sd_midi_target_slot  = 6;    // currently selected target pattern slot
+static bool      sd_is_midi_selected  = false;
+
 // Forward declarations
 static void sd_refresh_filelist();
 static void sd_file_btn_cb(lv_event_t* e);
 static void sd_pad_btn_cb(lv_event_t* e);
 static void sd_load_btn_cb(lv_event_t* e);
 static void sd_back_btn_cb(lv_event_t* e);
+static void sd_midi_pat_btn_cb(lv_event_t* e);
+static void sd_midi_load_btn_cb(lv_event_t* e);
 
 // Send loadSample UDP  (also callable from outside)
 void ui_sdcard_send_load_sample(int pad, const char* family, const char* filename) {
@@ -3121,12 +3134,12 @@ static void sd_refresh_filelist() {
 
         // Skip hidden files
         if (name[0] == '.') { entry.close(); entry = dir.openNextFile(); continue; }
-        // Only show .wav/.WAV files and directories
+        // Only show .wav/.WAV, .mid/.MID files and directories
         if (!is_dir) {
             size_t nlen = strlen(name);
-            bool is_wav = (nlen > 4 &&
-                           (strcasecmp(name + nlen - 4, ".wav") == 0));
-            if (!is_wav) { entry.close(); entry = dir.openNextFile(); continue; }
+            bool is_wav = (nlen > 4 && strcasecmp(name + nlen - 4, ".wav") == 0);
+            bool is_mid = (nlen > 4 && strcasecmp(name + nlen - 4, ".mid") == 0);
+            if (!is_wav && !is_mid) { entry.close(); entry = dir.openNextFile(); continue; }
         }
 
         lv_obj_t* btn = lv_btn_create(sd_file_list);
@@ -3139,16 +3152,26 @@ static void sd_refresh_filelist() {
 
         lv_obj_t* lbl = lv_label_create(btn);
         char display[80];
-        snprintf(display, sizeof(display), is_dir ? LV_SYMBOL_DIRECTORY "  %s" : LV_SYMBOL_AUDIO "  %s", name);
+        size_t nlen2 = strlen(name);
+        bool entry_is_mid = !is_dir && nlen2 > 4 && strcasecmp(name + nlen2 - 4, ".mid") == 0;
+        snprintf(display, sizeof(display),
+            is_dir      ? LV_SYMBOL_DIRECTORY "  %s" :
+            entry_is_mid ? LV_SYMBOL_FILE "  %s [MIDI]" :
+                           LV_SYMBOL_AUDIO "  %s", name);
         lv_label_set_text(lbl, display);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(lbl, is_dir ? RED808_CYAN : RED808_SUCCESS, 0);
+        lv_obj_set_style_text_color(lbl,
+            is_dir       ? RED808_CYAN :
+            entry_is_mid ? RED808_WARNING :
+                           RED808_SUCCESS, 0);
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
 
         // Store entry name in user data (heap allocated, freed on lv_obj_clean)
         char* name_copy = (char*)lv_mem_alloc(strlen(name) + 2);
         if (name_copy) {
-            name_copy[0] = is_dir ? 'D' : 'F';  // D=dir, F=file prefix
+            size_t nlen3 = strlen(name);
+            bool ud_is_mid = !is_dir && nlen3 > 4 && strcasecmp(name + nlen3 - 4, ".mid") == 0;
+            name_copy[0] = is_dir ? 'D' : (ud_is_mid ? 'M' : 'F');  // D=dir, F=wav, M=midi
             strcpy(name_copy + 1, name);
             lv_obj_set_user_data(btn, name_copy);
             lv_obj_add_event_cb(btn, sd_file_btn_cb, LV_EVENT_CLICKED, name_copy);
@@ -3191,14 +3214,34 @@ static void sd_file_btn_cb(lv_event_t* e) {
         sd_refresh_filelist();
         if (sd_selected_lbl) lv_label_set_text(sd_selected_lbl, "");
     } else {
-        // Select file
+        // Select file (WAV or MIDI)
         strncpy(sd_current_file, name, sizeof(sd_current_file) - 1);
         sd_current_file[sizeof(sd_current_file) - 1] = '\0';
-        char sel[128];
-        snprintf(sel, sizeof(sel), "%s / %s", sd_current_family, sd_current_file);
-        if (sd_selected_lbl) lv_label_set_text(sd_selected_lbl, sel);
-        if (sd_load_btn) lv_obj_clear_state(sd_load_btn, LV_STATE_DISABLED);
-    }
+
+        sd_is_midi_selected = (type == 'M');
+
+        if (sd_is_midi_selected) {
+            // Switch right panel to MIDI mode
+            if (sd_wav_section)  lv_obj_add_flag(sd_wav_section,   LV_OBJ_FLAG_HIDDEN);
+            if (sd_midi_section) lv_obj_clear_flag(sd_midi_section, LV_OBJ_FLAG_HIDDEN);
+            // Update info label
+            if (sd_midi_info_lbl) {
+                char info[80];
+                snprintf(info, sizeof(info), LV_SYMBOL_FILE "  %s", name);
+                lv_label_set_text(sd_midi_info_lbl, info);
+            }
+            if (sd_midi_load_btn) lv_obj_clear_state(sd_midi_load_btn, LV_STATE_DISABLED);
+            if (sd_midi_status_lbl) lv_label_set_text(sd_midi_status_lbl, "");
+        } else {
+            // Switch right panel to WAV mode
+            if (sd_midi_section) lv_obj_add_flag(sd_midi_section,  LV_OBJ_FLAG_HIDDEN);
+            if (sd_wav_section)  lv_obj_clear_flag(sd_wav_section,  LV_OBJ_FLAG_HIDDEN);
+            char sel[128];
+            snprintf(sel, sizeof(sel), "%s / %s", sd_current_family, sd_current_file);
+            if (sd_selected_lbl) lv_label_set_text(sd_selected_lbl, sel);
+            if (sd_load_btn) lv_obj_clear_state(sd_load_btn, LV_STATE_DISABLED);
+        }  // end WAV/MIDI else
+    }  // end type != 'D'
 }
 
 // Back button: go up one level
@@ -3208,6 +3251,10 @@ static void sd_back_btn_cb(lv_event_t* e) {
     strncpy(sd_current_dir, "/", sizeof(sd_current_dir));
     sd_current_family[0] = '\0';
     sd_current_file[0] = '\0';
+    sd_is_midi_selected = false;
+    // Restore WAV section
+    if (sd_midi_section) lv_obj_add_flag(sd_midi_section,  LV_OBJ_FLAG_HIDDEN);
+    if (sd_wav_section)  lv_obj_clear_flag(sd_wav_section,  LV_OBJ_FLAG_HIDDEN);
     if (sd_selected_lbl) lv_label_set_text(sd_selected_lbl, "");
     if (sd_load_btn) lv_obj_add_state(sd_load_btn, LV_STATE_DISABLED);
     sd_refresh_filelist();
@@ -3226,7 +3273,7 @@ static void sd_pad_btn_cb(lv_event_t* e) {
     sd_selected_pad = pad;
 }
 
-// Load button: send loadSample UDP
+// Load button (WAV): send loadSample UDP
 static void sd_load_btn_cb(lv_event_t* e) {
     (void)e;
     if (sd_current_file[0] == '\0' || sd_current_family[0] == '\0') return;
@@ -3236,6 +3283,66 @@ static void sd_load_btn_cb(lv_event_t* e) {
     lv_timer_t* t = lv_timer_create([](lv_timer_t* t) {
         if (sd_load_lbl) lv_label_set_text(sd_load_lbl,
             LV_SYMBOL_UPLOAD "  LOAD TO PAD");
+        lv_timer_del(t);
+    }, 1200, NULL);
+    (void)t;
+}
+
+// MIDI pattern slot selector (slots 6-15)
+static void sd_midi_pat_btn_cb(lv_event_t* e) {
+    int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    if (slot < 6 || slot > 15) return;
+    sd_midi_target_slot = slot;
+    // Highlight selected button
+    for (int i = 0; i < 10; i++) {
+        if (!sd_midi_pat_btns[i]) continue;
+        bool selected = (i + 6 == slot);
+        lv_obj_set_style_bg_color(sd_midi_pat_btns[i],
+            selected ? RED808_ACCENT : lv_color_hex(0x1A2A3A), 0);
+        lv_obj_set_style_border_color(sd_midi_pat_btns[i],
+            selected ? RED808_CYAN : lv_color_hex(0x334455), 0);
+    }
+}
+
+// MIDI load button: parse MIDI → fill pattern → send to master + P4
+static void sd_midi_load_btn_cb(lv_event_t* e) {
+    (void)e;
+    if (sd_current_file[0] == '\0') return;
+
+    // Build full path
+    char path[192];
+    if (strcmp(sd_current_dir, "/") == 0)
+        snprintf(path, sizeof(path), "/%s", sd_current_file);
+    else
+        snprintf(path, sizeof(path), "%s/%s", sd_current_dir, sd_current_file);
+
+    // Show progress
+    if (sd_midi_status_lbl) lv_label_set_text(sd_midi_status_lbl, "Parsing MIDI...");
+
+    // Parse MIDI file
+    bool steps[16][16];
+    char name[12] = "";
+    int  found = 0;
+    bool ok = midi_load_pattern(path, steps, name, sizeof(name), &found);
+
+    if (!ok || found == 0) {
+        if (sd_midi_status_lbl)
+            lv_label_set_text(sd_midi_status_lbl,
+                LV_SYMBOL_WARNING " No GM drum steps found (ch.10)");
+        return;
+    }
+
+    // Apply pattern locally + send to Master + P4
+    handleMidiPatternLoaded(sd_midi_target_slot, steps, name);
+
+    // Feedback + navigate to sequencer after delay
+    char msg[72];
+    snprintf(msg, sizeof(msg), LV_SYMBOL_OK " %d steps → P%02d '%s'",
+             found, sd_midi_target_slot + 1, name);
+    if (sd_midi_status_lbl) lv_label_set_text(sd_midi_status_lbl, msg);
+
+    lv_timer_t* t = lv_timer_create([](lv_timer_t* t) {
+        nav_to(SCREEN_SEQUENCER, scr_sequencer);
         lv_timer_del(t);
     }, 1200, NULL);
     (void)t;
@@ -3298,7 +3405,7 @@ void ui_create_sdcard_screen() {
     lv_obj_set_scroll_dir(sd_file_list, LV_DIR_VER);
     lv_obj_add_flag(sd_file_list, LV_OBJ_FLAG_SCROLLABLE);
 
-    // ── Right Panel: pad assignment ───────────────────────────────────────
+    // ── Right Panel: pad assignment (WAV) / pattern slot (MIDI) ──────────
     sd_right_panel = lv_obj_create(scr_sdcard);
     lv_obj_set_size(sd_right_panel, SD_RIGHT_W, SD_H);
 #if PORTRAIT_MODE
@@ -3313,8 +3420,17 @@ void ui_create_sdcard_screen() {
     lv_obj_set_style_pad_all(sd_right_panel, 8, 0);
     lv_obj_clear_flag(sd_right_panel, LV_OBJ_FLAG_SCROLLABLE);
 
+    // ── WAV section (default visible) ─────────────────────────────────────
+    sd_wav_section = lv_obj_create(sd_right_panel);
+    lv_obj_set_size(sd_wav_section, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(sd_wav_section, 0, 0);
+    lv_obj_set_style_bg_opa(sd_wav_section, LV_OPA_0, 0);
+    lv_obj_set_style_border_width(sd_wav_section, 0, 0);
+    lv_obj_set_style_pad_all(sd_wav_section, 0, 0);
+    lv_obj_clear_flag(sd_wav_section, LV_OBJ_FLAG_SCROLLABLE);
+
     // "ASSIGN TO PAD" title
-    lv_obj_t* assign_lbl = lv_label_create(sd_right_panel);
+    lv_obj_t* assign_lbl = lv_label_create(sd_wav_section);
     lv_label_set_text(assign_lbl, "ASSIGN TO PAD");
     lv_obj_set_style_text_font(assign_lbl, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(assign_lbl, RED808_ACCENT, 0);
@@ -3329,7 +3445,7 @@ void ui_create_sdcard_screen() {
         int px = px_start + col * (pad_w + pad_gap);
         int py = py_start + row * (pad_h + pad_gap);
 
-        lv_obj_t* btn = lv_btn_create(sd_right_panel);
+        lv_obj_t* btn = lv_btn_create(sd_wav_section);
         lv_obj_set_size(btn, pad_w, pad_h);
         lv_obj_set_pos(btn, px, py);
         lv_obj_set_style_bg_color(btn, i == 0 ? RED808_ACCENT : lv_color_hex(0x222233), 0);
@@ -3351,7 +3467,7 @@ void ui_create_sdcard_screen() {
     }
 
     // Selected file label
-    sd_selected_lbl = lv_label_create(sd_right_panel);
+    sd_selected_lbl = lv_label_create(sd_wav_section);
     lv_label_set_text(sd_selected_lbl, "");
     lv_obj_set_width(sd_selected_lbl, 390);
     lv_obj_set_style_text_font(sd_selected_lbl, &lv_font_montserrat_14, 0);
@@ -3360,8 +3476,8 @@ void ui_create_sdcard_screen() {
     lv_label_set_long_mode(sd_selected_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_pos(sd_selected_lbl, 12, 264);
 
-    // LOAD button
-    sd_load_btn = lv_btn_create(sd_right_panel);
+    // LOAD WAV button
+    sd_load_btn = lv_btn_create(sd_wav_section);
     lv_obj_set_size(sd_load_btn, 380, 60);
     lv_obj_set_pos(sd_load_btn, 16, 320);
     lv_obj_set_style_bg_color(sd_load_btn, RED808_ACCENT, 0);
@@ -3375,6 +3491,101 @@ void ui_create_sdcard_screen() {
     lv_obj_set_style_text_color(sd_load_lbl, lv_color_white(), 0);
     lv_obj_center(sd_load_lbl);
     lv_obj_add_event_cb(sd_load_btn, sd_load_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    // ── MIDI section (hidden by default) ──────────────────────────────────
+    sd_midi_section = lv_obj_create(sd_right_panel);
+    lv_obj_set_size(sd_midi_section, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(sd_midi_section, 0, 0);
+    lv_obj_set_style_bg_opa(sd_midi_section, LV_OPA_0, 0);
+    lv_obj_set_style_border_width(sd_midi_section, 0, 0);
+    lv_obj_set_style_pad_all(sd_midi_section, 0, 0);
+    lv_obj_clear_flag(sd_midi_section, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(sd_midi_section, LV_OBJ_FLAG_HIDDEN);
+
+    // MIDI title
+    lv_obj_t* midi_title = lv_label_create(sd_midi_section);
+    lv_label_set_text(midi_title, LV_SYMBOL_AUDIO "  LOAD MIDI TO PATTERN");
+    lv_obj_set_style_text_font(midi_title, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(midi_title, RED808_WARNING, 0);
+    lv_obj_set_pos(midi_title, 8, 4);
+
+    // MIDI file info label
+    sd_midi_info_lbl = lv_label_create(sd_midi_section);
+    lv_label_set_text(sd_midi_info_lbl, "");
+    lv_obj_set_style_text_font(sd_midi_info_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(sd_midi_info_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(sd_midi_info_lbl, 8, 32);
+    lv_obj_set_width(sd_midi_info_lbl, SD_RIGHT_W - 24);
+    lv_label_set_long_mode(sd_midi_info_lbl, LV_LABEL_LONG_DOT);
+
+    // "SELECT TARGET SLOT:"
+    lv_obj_t* slot_lbl = lv_label_create(sd_midi_section);
+    lv_label_set_text(slot_lbl, "SELECT TARGET PATTERN SLOT:");
+    lv_obj_set_style_text_font(slot_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(slot_lbl, RED808_CYAN, 0);
+    lv_obj_set_pos(slot_lbl, 8, 58);
+
+    // Pattern slot grid 2×5 (P06-P15)
+    {
+        int rp_cw     = SD_RIGHT_W - 16;   // right panel content width
+        int mp_btn_w  = (rp_cw - 10) / 2;  // 2 cols, gap=10
+        int mp_btn_h  = 44;
+        int mp_gap    = 6;
+        int mp_x0     = 0, mp_y0 = 80;
+        for (int i = 0; i < 10; i++) {
+            int col = i % 2, row = i / 2;
+            int slot_id = i + 6;  // slots 6-15
+            int bx = mp_x0 + col * (mp_btn_w + 10);
+            int by = mp_y0 + row * (mp_btn_h + mp_gap);
+
+            lv_obj_t* btn = lv_btn_create(sd_midi_section);
+            lv_obj_set_size(btn, mp_btn_w, mp_btn_h);
+            lv_obj_set_pos(btn, bx, by);
+            lv_obj_set_style_bg_color(btn,
+                slot_id == sd_midi_target_slot ? RED808_ACCENT : lv_color_hex(0x1A2A3A), 0);
+            lv_obj_set_style_border_width(btn, 2, 0);
+            lv_obj_set_style_border_color(btn,
+                slot_id == sd_midi_target_slot ? RED808_CYAN : lv_color_hex(0x334455), 0);
+            lv_obj_set_style_radius(btn, 8, 0);
+
+            lv_obj_t* bl = lv_label_create(btn);
+            char bname[8];
+            snprintf(bname, sizeof(bname), "P%02d", slot_id + 1);
+            lv_label_set_text(bl, bname);
+            lv_obj_set_style_text_font(bl, &lv_font_montserrat_20, 0);
+            lv_obj_set_style_text_color(bl,
+                slot_id == sd_midi_target_slot ? lv_color_white() : RED808_TEXT_DIM, 0);
+            lv_obj_center(bl);
+
+            sd_midi_pat_btns[i] = btn;
+            lv_obj_add_event_cb(btn, sd_midi_pat_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)slot_id);
+        }
+    }
+
+    // LOAD MIDI PATTERN button
+    sd_midi_load_btn = lv_btn_create(sd_midi_section);
+    lv_obj_set_size(sd_midi_load_btn, SD_RIGHT_W - 16, 56);
+    lv_obj_set_pos(sd_midi_load_btn, 0, 338);
+    lv_obj_set_style_bg_color(sd_midi_load_btn, RED808_WARNING, 0);
+    lv_obj_set_style_bg_color(sd_midi_load_btn, lv_color_hex(0x554400), LV_STATE_DISABLED);
+    lv_obj_set_style_radius(sd_midi_load_btn, 10, 0);
+    lv_obj_add_state(sd_midi_load_btn, LV_STATE_DISABLED);
+    lv_obj_add_event_cb(sd_midi_load_btn, sd_midi_load_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* midi_load_lbl = lv_label_create(sd_midi_load_btn);
+    lv_label_set_text(midi_load_lbl, LV_SYMBOL_DOWNLOAD "  LOAD MIDI PATTERN");
+    lv_obj_set_style_text_font(midi_load_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(midi_load_lbl, lv_color_black(), 0);
+    lv_obj_center(midi_load_lbl);
+
+    // MIDI status label
+    sd_midi_status_lbl = lv_label_create(sd_midi_section);
+    lv_label_set_text(sd_midi_status_lbl, "");
+    lv_obj_set_style_text_font(sd_midi_status_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_SUCCESS, 0);
+    lv_obj_set_pos(sd_midi_status_lbl, 8, 402);
+    lv_obj_set_width(sd_midi_status_lbl, SD_RIGHT_W - 24);
+    lv_label_set_long_mode(sd_midi_status_lbl, LV_LABEL_LONG_WRAP);
 
     // Mount SD card now (non-blocking approach — just try once)
     if (!sd_init_attempted) {

@@ -58,5 +58,9 @@ void ui_sdcard_send_load_sample(int pad, const char* family, const char* filenam
 void ui_update_patterns();
 int ui_live_pad_hit_test(int x, int y);
 
+// MIDI pattern loading: called from sd_midi_load_btn_cb (ui_screens) into main.cpp
+// Fills patterns[slot], sends to Master via UDP, sends to P4 via UART
+void handleMidiPatternLoaded(int slot, const bool steps[16][16], const char* name);
+
 // Footer bar (shared across screens)
 void ui_create_header(lv_obj_t* parent);

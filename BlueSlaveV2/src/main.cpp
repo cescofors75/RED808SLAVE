@@ -36,6 +36,7 @@
 // UART bridge to P4 Visual Beast
 #include "uart_bridge.h"
 #include "../include/uart_protocol.h"
+#include "sd_midi_loader.h"
 
 // =============================================================================
 // SRAM ALLOCATOR — forces ArduinoJson to use internal SRAM (not PSRAM)
@@ -360,7 +361,7 @@ extern bool sd_try_mount();            // defined in ui_screens.cpp
 static char p4sd_dir[128] = "/";
 static char p4sd_selected[64] = "";
 static char p4sd_family[32] = "";
-struct P4SdDirEntry { char name[48]; bool is_dir; };
+struct P4SdDirEntry { char name[48]; bool is_dir; bool is_midi; };
 static P4SdDirEntry p4sd_entries[64];
 static int p4sd_count = 0;
 
@@ -391,17 +392,23 @@ static void p4sd_send_listing() {
         if (name[0] == '.') { entry.close(); entry = dir.openNextFile(); continue; }
         if (!isDir) {
             size_t nlen = strlen(name);
-            if (nlen <= 4 || strcasecmp(name + nlen - 4, ".wav") != 0) {
+            bool isWav  = (nlen > 4 && strcasecmp(name + nlen - 4, ".wav") == 0);
+            bool isMidi = (nlen > 4 && strcasecmp(name + nlen - 4, ".mid") == 0);
+            if (!isWav && !isMidi) {
                 entry.close(); entry = dir.openNextFile(); continue;
             }
         }
         strncpy(p4sd_entries[p4sd_count].name, name, 47);
         p4sd_entries[p4sd_count].name[47] = '\0';
         p4sd_entries[p4sd_count].is_dir = isDir;
+        p4sd_entries[p4sd_count].is_midi = !isDir && [&](){
+            size_t nlen = strlen(name);
+            return nlen > 4 && strcasecmp(name + nlen - 4, ".mid") == 0;
+        }();
         // Send entry: [index, type, name...]
         uint8_t buf[50];
         buf[0] = (uint8_t)p4sd_count;
-        buf[1] = isDir ? 'D' : 'F';
+        buf[1] = isDir ? 'D' : (p4sd_entries[p4sd_count].is_midi ? 'M' : 'F');
         int nameLen = strlen(name);
         if (nameLen > 47) nameLen = 47;
         memcpy(&buf[2], name, nameLen);
@@ -458,6 +465,24 @@ static void handleP4SdLoad(uint8_t pad) {
     uart_bridge_send_extended(MSG_SD_DATA, SD_RESP_LOAD_OK, &ok, 1);
 }
 
+static void handleP4SdLoadMidi(uint8_t slot) {
+    if (slot < 6 || slot >= Config::MAX_PATTERNS || p4sd_selected[0] == '\0') return;
+    // Build full path
+    char path[192];
+    if (strcmp(p4sd_dir, "/") == 0)
+        snprintf(path, sizeof(path), "/%s", p4sd_selected);
+    else
+        snprintf(path, sizeof(path), "%s/%s", p4sd_dir, p4sd_selected);
+    // Parse MIDI
+    bool steps[16][16] = {};
+    char name[12] = "";
+    int found = 0;
+    bool ok = midi_load_pattern(path, steps, name, sizeof(name), &found);
+    uint8_t resp = ok ? slot : 0xFF;
+    uart_bridge_send_extended(MSG_SD_DATA, SD_RESP_LOAD_OK, &resp, 1);
+    if (ok) handleMidiPatternLoaded(slot, steps, name);
+}
+
 // =============================================================================
 // P4 TOUCH COMMAND HANDLER (called from uart_bridge_receive)
 // =============================================================================
@@ -495,6 +520,9 @@ void handleP4TouchCommand(uint8_t cmdId, uint8_t value) {
         case TCMD_SD_LOAD:
             handleP4SdLoad(value);
             break;
+        case TCMD_SD_LOAD_MIDI:
+            handleP4SdLoadMidi(value);
+            break;
         case TCMD_SYNC_PADS:
             ui_live_set_sync(value != 0);
             break;
@@ -518,6 +546,47 @@ void handleP4PatternData(int pat, const bool steps[16][16]) {
     }
     // Mark UI for full redraw (sequencer grid needs refresh)
     needsFullRedraw = true;
+}
+
+// =============================================================================
+// MIDI PATTERN LOADER — called from SD screen MIDI load button callback
+// Fills patterns[slot], sends full pattern to Master via UDP (fire-and-forget),
+// sends pattern data + selection to P4 via UART, then navigates to sequencer.
+// NOTE: called from within LVGL callback — no delay() allowed, no lvgl_port_lock.
+// =============================================================================
+void handleMidiPatternLoaded(int slot, const bool steps[16][16], const char* name) {
+    if (slot < 6 || slot >= Config::MAX_PATTERNS) return;  // protect slots 0-5
+
+    // Copy steps into local pattern array
+    for (int t = 0; t < Config::MAX_TRACKS; t++)
+        for (int s = 0; s < Config::MAX_STEPS; s++)
+            patterns[slot].steps[t][s] = steps[t][s];
+    patterns[slot].name = name;
+
+    // Select this pattern locally
+    currentPattern = slot;
+    needsFullRedraw = true;
+
+    // Send to Master via UDP: selectPattern + all active steps (no delays)
+    selectPatternOnMaster(slot);
+    if (udpConnected) {
+        for (int t = 0; t < Config::MAX_TRACKS; t++) {
+            for (int s = 0; s < Config::MAX_STEPS; s++) {
+                if (steps[t][s]) {
+                    char buf[80];
+                    snprintf(buf, sizeof(buf),
+                        "{\"cmd\":\"setStep\",\"track\":%d,\"step\":%d,\"active\":true}", t, s);
+                    sendUDPCommand(buf);
+                }
+            }
+        }
+    }
+
+    // Send to P4 via UART (extended pattern data packet + pattern select)
+    uart_bridge_send_pattern_data(slot, patterns[slot].steps, Config::MAX_TRACKS);
+    uart_bridge_send_pattern(slot);
+
+    RED808_LOG_PRINTF("[MIDI] Loaded pattern %d '%s' → Master + P4\n", slot + 1, name);
 }
 
 // =============================================================================

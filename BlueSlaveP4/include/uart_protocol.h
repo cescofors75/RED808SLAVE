@@ -114,7 +114,7 @@
 #define TCMD_SD_BACK       0x09 // P4→S3: go to parent directory
 #define TCMD_SD_LOAD       0x0A // P4→S3: load selected file to pad N
 #define TCMD_SYNC_PADS     0x0B  // Bidirectional: toggle pad LED sync mode
-// =============================================================================
+#define TCMD_SD_LOAD_MIDI  0x0C  // P4→S3: load selected MIDI file into pattern slot N (value=slot 6-15)// =============================================================================
 // SD DATA sub-IDs (MSG_SD_DATA extended, Byte 2)
 // =============================================================================
 #define SD_RESP_STATUS     0x00 // payload: [mounted(1)]

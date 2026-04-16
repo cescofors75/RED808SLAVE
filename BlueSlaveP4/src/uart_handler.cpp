@@ -137,6 +137,10 @@ void uart_send_sd_load(uint8_t pad) {
     uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SD_LOAD, pad);
 }
 
+void uart_send_sd_load_midi(uint8_t slot) {
+    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SD_LOAD_MIDI, slot);
+}
+
 // =============================================================================
 // PROCESS BASIC PACKET
 // =============================================================================
@@ -327,7 +331,8 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
             case SD_RESP_ENTRY:
                 if (len >= 3 && p4sd.entry_count < P4_SD_MAX_ENTRIES) {
                     int idx = p4sd.entry_count++;
-                    p4sd.entries[idx].is_dir = (payload[1] == 'D');
+                    p4sd.entries[idx].is_dir  = (payload[1] == 'D');
+                    p4sd.entries[idx].is_midi = (payload[1] == 'M');
                     int nameLen = len - 2;
                     if (nameLen > 47) nameLen = 47;
                     memcpy(p4sd.entries[idx].name, &payload[2], nameLen);
@@ -353,6 +358,13 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
                 break;
             case SD_RESP_LOAD_OK:
                 p4sd.needs_refresh = true;
+                // Update UI feedback from LVGL context (p4sd state read in sd_refresh_ui)
+                // The payload[0]==0xFF signals MIDI parse failure
+                if (len >= 1 && p4sd.selected_is_midi) {
+                    // Store result for UI to display
+                    // 0xFF = error, otherwise = slot number
+                    p4sd.selected_pad = (payload[0] == 0xFF) ? -1 : (int)payload[0];
+                }
                 break;
         }
     }

@@ -1554,18 +1554,59 @@ static lv_obj_t* sd_selected_lbl = NULL;
 static lv_obj_t* sd_pad_btns[16] = {};
 static lv_obj_t* sd_load_btn    = NULL;
 static lv_obj_t* sd_load_lbl    = NULL;
+// MIDI section
+static lv_obj_t* sd_wav_section       = NULL;
+static lv_obj_t* sd_midi_section      = NULL;
+static lv_obj_t* sd_midi_pat_btns[10] = {};
+static lv_obj_t* sd_midi_load_btn     = NULL;
+static lv_obj_t* sd_midi_info_lbl     = NULL;
+static lv_obj_t* sd_midi_status_lbl   = NULL;
+static int        sd_midi_target_slot  = 6;   // default: P07
+static bool       sd_is_midi_mode      = false;
 
 // Forward declarations
 static void sd_refresh_ui(void);
+static void sd_switch_panel_mode(bool midi_mode);
+static void sd_midi_pat_btn_cb(lv_event_t* e);
+static void sd_midi_load_btn_cb(lv_event_t* e);
+
+static void sd_switch_panel_mode(bool midi_mode) {
+    sd_is_midi_mode = midi_mode;
+    if (sd_wav_section) {
+        if (midi_mode) lv_obj_add_flag(sd_wav_section, LV_OBJ_FLAG_HIDDEN);
+        else           lv_obj_clear_flag(sd_wav_section, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (sd_midi_section) {
+        if (midi_mode) lv_obj_clear_flag(sd_midi_section, LV_OBJ_FLAG_HIDDEN);
+        else           lv_obj_add_flag(sd_midi_section, LV_OBJ_FLAG_HIDDEN);
+    }
+}
 
 static void sd_file_btn_cb(lv_event_t* e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx >= p4sd.entry_count) return;
+    const P4SdEntry& entry = p4sd.entries[idx];
+    if (!entry.is_dir) {
+        // Track selection type immediately (before S3 response arrives)
+        p4sd.selected_is_midi = entry.is_midi;
+        sd_switch_panel_mode(entry.is_midi);
+        if (entry.is_midi && sd_midi_info_lbl) {
+            lv_label_set_text(sd_midi_info_lbl, entry.name);
+        }
+        if (entry.is_midi && sd_midi_load_btn) {
+            lv_obj_clear_state(sd_midi_load_btn, LV_STATE_DISABLED);
+        }
+        if (entry.is_midi && sd_midi_status_lbl) {
+            lv_label_set_text(sd_midi_status_lbl, "");
+        }
+    }
     uart_send_sd_select((uint8_t)idx);
 }
 
 static void sd_back_btn_cb(lv_event_t* e) {
     (void)e;
+    p4sd.selected_is_midi = false;
+    sd_switch_panel_mode(false);
     uart_send_sd_back();
 }
 
@@ -1580,6 +1621,27 @@ static void sd_pad_btn_cb(lv_event_t* e) {
                 i == pad ? RED808_ACCENT : lv_color_hex(0x222233), 0);
         }
     }
+}
+
+static void sd_midi_pat_btn_cb(lv_event_t* e) {
+    int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    if (slot < 6 || slot > 15) return;
+    sd_midi_target_slot = slot;
+    for (int i = 0; i < 10; i++) {
+        if (!sd_midi_pat_btns[i]) continue;
+        bool sel = (i + 6 == slot);
+        lv_obj_set_style_bg_color(sd_midi_pat_btns[i],
+            sel ? RED808_ACCENT : lv_color_hex(0x1A2A3A), 0);
+        lv_obj_set_style_border_color(sd_midi_pat_btns[i],
+            sel ? RED808_CYAN : lv_color_hex(0x334455), 0);
+    }
+}
+
+static void sd_midi_load_btn_cb(lv_event_t* e) {
+    (void)e;
+    if (p4sd.selected_file[0] == '\0') return;
+    if (sd_midi_status_lbl) lv_label_set_text(sd_midi_status_lbl, "Sending to S3...");
+    uart_send_sd_load_midi((uint8_t)sd_midi_target_slot);
 }
 
 static void sd_load_btn_cb(lv_event_t* e) {
@@ -1610,10 +1672,20 @@ static void sd_refresh_ui(void) {
     }
     // Enable/disable LOAD button
     if (sd_load_btn) {
-        if (p4sd.selected_file[0])
+        if (p4sd.selected_file[0] && !p4sd.selected_is_midi)
             lv_obj_clear_state(sd_load_btn, LV_STATE_DISABLED);
         else
             lv_obj_add_state(sd_load_btn, LV_STATE_DISABLED);
+    }
+    if (sd_midi_load_btn) {
+        if (p4sd.selected_file[0] && p4sd.selected_is_midi)
+            lv_obj_clear_state(sd_midi_load_btn, LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(sd_midi_load_btn, LV_STATE_DISABLED);
+    }
+    // MIDI status: after load, selected_pad holds slot (-1=error) only for MIDI
+    if (sd_midi_status_lbl && p4sd.selected_is_midi && p4sd.selected_pad != (int)p4sd.selected_pad) {
+        // Nothing needed here — status set directly by file_btn_cb and load_btn_cb
     }
 
     if (!p4sd.mounted) {
@@ -1644,17 +1716,24 @@ static void sd_refresh_ui(void) {
         lv_obj_set_size(btn, 580, 44);
         lv_obj_set_style_radius(btn, 6, 0);
 
-        bool is_dir = p4sd.entries[i].is_dir;
-        lv_obj_set_style_bg_color(btn, is_dir ? lv_color_hex(0x1A3A5C) : lv_color_hex(0x1A2A1A), 0);
+        bool is_dir  = p4sd.entries[i].is_dir;
+        bool is_midi = p4sd.entries[i].is_midi;
+        lv_obj_set_style_bg_color(btn,
+            is_dir  ? lv_color_hex(0x1A3A5C) :
+            is_midi ? lv_color_hex(0x3A2A00) : lv_color_hex(0x1A2A1A), 0);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x446688), LV_STATE_PRESSED);
 
         lv_obj_t* lbl = lv_label_create(btn);
         char display[64];
-        snprintf(display, sizeof(display), is_dir ? LV_SYMBOL_DIRECTORY "  %s" : LV_SYMBOL_AUDIO "  %s",
-                 p4sd.entries[i].name);
+        snprintf(display, sizeof(display),
+            is_dir  ? LV_SYMBOL_DIRECTORY "  %s" :
+            is_midi ? LV_SYMBOL_FILE "  %s [MIDI]" : LV_SYMBOL_AUDIO "  %s",
+            p4sd.entries[i].name);
         lv_label_set_text(lbl, display);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(lbl, is_dir ? RED808_CYAN : RED808_SUCCESS, 0);
+        lv_obj_set_style_text_color(lbl,
+            is_dir  ? RED808_CYAN :
+            is_midi ? RED808_WARNING : RED808_SUCCESS, 0);
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
 
         lv_obj_add_event_cb(btn, sd_file_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
@@ -1662,7 +1741,7 @@ static void sd_refresh_ui(void) {
 
     if (p4sd.list_complete && p4sd.entry_count == 0) {
         lv_obj_t* lbl = lv_label_create(sd_file_list);
-        lv_label_set_text(lbl, "No files found (.wav)");
+        lv_label_set_text(lbl, "No files found (.wav / .mid)");
         lv_obj_set_style_text_color(lbl, RED808_TEXT_DIM, 0);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
     }
@@ -1727,7 +1806,7 @@ static void create_sdcard_screen(void) {
     lv_obj_set_scroll_dir(sd_file_list, LV_DIR_VER);
     lv_obj_add_flag(sd_file_list, LV_OBJ_FLAG_SCROLLABLE);
 
-    // ── Right Panel: pad assignment ──
+    // ── Right Panel: WAV pad assign + MIDI pattern slot ──
     sd_right_panel = lv_obj_create(scr_sdcard);
     lv_obj_set_size(sd_right_panel, RIGHT_W, PANEL_H);
     lv_obj_set_pos(sd_right_panel, LEFT_W + GAP, TOP);
@@ -1739,8 +1818,17 @@ static void create_sdcard_screen(void) {
     lv_obj_set_style_pad_all(sd_right_panel, 8, 0);
     lv_obj_clear_flag(sd_right_panel, LV_OBJ_FLAG_SCROLLABLE);
 
+    // ── WAV section (default visible) ─────────────────────────────────────
+    sd_wav_section = lv_obj_create(sd_right_panel);
+    lv_obj_set_size(sd_wav_section, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(sd_wav_section, 0, 0);
+    lv_obj_set_style_bg_opa(sd_wav_section, LV_OPA_0, 0);
+    lv_obj_set_style_border_width(sd_wav_section, 0, 0);
+    lv_obj_set_style_pad_all(sd_wav_section, 0, 0);
+    lv_obj_clear_flag(sd_wav_section, LV_OBJ_FLAG_SCROLLABLE);
+
     // "ASSIGN TO PAD" title
-    lv_obj_t* assign_lbl = lv_label_create(sd_right_panel);
+    lv_obj_t* assign_lbl = lv_label_create(sd_wav_section);
     lv_label_set_text(assign_lbl, "ASSIGN TO PAD");
     lv_obj_set_style_text_font(assign_lbl, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(assign_lbl, RED808_ACCENT, 0);
@@ -1757,7 +1845,7 @@ static void create_sdcard_screen(void) {
         int px = px_start + col * (pad_w + pad_gap);
         int py = py_start + row * (pad_h + pad_gap);
 
-        lv_obj_t* btn = lv_btn_create(sd_right_panel);
+        lv_obj_t* btn = lv_btn_create(sd_wav_section);
         lv_obj_set_size(btn, pad_w, pad_h);
         lv_obj_set_pos(btn, px, py);
         lv_obj_set_style_bg_color(btn, i == 0 ? RED808_ACCENT : lv_color_hex(0x222233), 0);
@@ -1779,7 +1867,7 @@ static void create_sdcard_screen(void) {
     }
 
     // Selected file label
-    sd_selected_lbl = lv_label_create(sd_right_panel);
+    sd_selected_lbl = lv_label_create(sd_wav_section);
     lv_label_set_text(sd_selected_lbl, "");
     lv_obj_set_width(sd_selected_lbl, RIGHT_W - 24);
     lv_obj_set_style_text_font(sd_selected_lbl, &lv_font_montserrat_14, 0);
@@ -1788,8 +1876,8 @@ static void create_sdcard_screen(void) {
     lv_label_set_long_mode(sd_selected_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_pos(sd_selected_lbl, 8, 300);
 
-    // LOAD button
-    sd_load_btn = lv_btn_create(sd_right_panel);
+    // LOAD WAV button
+    sd_load_btn = lv_btn_create(sd_wav_section);
     lv_obj_set_size(sd_load_btn, RIGHT_W - 24, 60);
     lv_obj_set_pos(sd_load_btn, 8, 360);
     lv_obj_set_style_bg_color(sd_load_btn, RED808_ACCENT, 0);
@@ -1803,6 +1891,100 @@ static void create_sdcard_screen(void) {
     lv_obj_set_style_text_color(sd_load_lbl, lv_color_white(), 0);
     lv_obj_center(sd_load_lbl);
     lv_obj_add_event_cb(sd_load_btn, sd_load_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    // ── MIDI section (hidden by default) ──────────────────────────────────
+    sd_midi_section = lv_obj_create(sd_right_panel);
+    lv_obj_set_size(sd_midi_section, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(sd_midi_section, 0, 0);
+    lv_obj_set_style_bg_opa(sd_midi_section, LV_OPA_0, 0);
+    lv_obj_set_style_border_width(sd_midi_section, 0, 0);
+    lv_obj_set_style_pad_all(sd_midi_section, 0, 0);
+    lv_obj_clear_flag(sd_midi_section, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(sd_midi_section, LV_OBJ_FLAG_HIDDEN);
+
+    // MIDI title
+    lv_obj_t* midi_title = lv_label_create(sd_midi_section);
+    lv_label_set_text(midi_title, LV_SYMBOL_AUDIO "  LOAD MIDI TO PATTERN");
+    lv_obj_set_style_text_font(midi_title, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(midi_title, RED808_WARNING, 0);
+    lv_obj_set_pos(midi_title, 8, 4);
+
+    // File info label
+    sd_midi_info_lbl = lv_label_create(sd_midi_section);
+    lv_label_set_text(sd_midi_info_lbl, "");
+    lv_obj_set_style_text_font(sd_midi_info_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(sd_midi_info_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(sd_midi_info_lbl, 8, 30);
+    lv_obj_set_width(sd_midi_info_lbl, RIGHT_W - 24);
+    lv_label_set_long_mode(sd_midi_info_lbl, LV_LABEL_LONG_DOT);
+
+    // "SELECT TARGET SLOT:"
+    lv_obj_t* slot_lbl = lv_label_create(sd_midi_section);
+    lv_label_set_text(slot_lbl, "SELECT TARGET PATTERN SLOT:");
+    lv_obj_set_style_text_font(slot_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(slot_lbl, RED808_CYAN, 0);
+    lv_obj_set_pos(slot_lbl, 8, 54);
+
+    // Pattern slot grid 2×5 (P07-P16 = slots 6-15)
+    {
+        int mp_btn_w = (RIGHT_W - 16 - 10) / 2;  // 2 cols, gap=10
+        int mp_btn_h = 52;
+        int mp_gap   = 6;
+        int mp_x0 = 0, mp_y0 = 76;
+        for (int i = 0; i < 10; i++) {
+            int col = i % 2, row = i / 2;
+            int slot_id = i + 6;
+            int bx = mp_x0 + col * (mp_btn_w + 10);
+            int by = mp_y0 + row * (mp_btn_h + mp_gap);
+
+            lv_obj_t* btn = lv_btn_create(sd_midi_section);
+            lv_obj_set_size(btn, mp_btn_w, mp_btn_h);
+            lv_obj_set_pos(btn, bx, by);
+            lv_obj_set_style_bg_color(btn,
+                slot_id == sd_midi_target_slot ? RED808_ACCENT : lv_color_hex(0x1A2A3A), 0);
+            lv_obj_set_style_border_width(btn, 2, 0);
+            lv_obj_set_style_border_color(btn,
+                slot_id == sd_midi_target_slot ? RED808_CYAN : lv_color_hex(0x334455), 0);
+            lv_obj_set_style_radius(btn, 8, 0);
+
+            lv_obj_t* bl = lv_label_create(btn);
+            char bname[8];
+            snprintf(bname, sizeof(bname), "P%02d", slot_id + 1);
+            lv_label_set_text(bl, bname);
+            lv_obj_set_style_text_font(bl, &lv_font_montserrat_20, 0);
+            lv_obj_set_style_text_color(bl,
+                slot_id == sd_midi_target_slot ? lv_color_white() : RED808_TEXT_DIM, 0);
+            lv_obj_center(bl);
+
+            sd_midi_pat_btns[i] = btn;
+            lv_obj_add_event_cb(btn, sd_midi_pat_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)slot_id);
+        }
+    }
+
+    // LOAD MIDI PATTERN button
+    sd_midi_load_btn = lv_btn_create(sd_midi_section);
+    lv_obj_set_size(sd_midi_load_btn, RIGHT_W - 24, 56);
+    lv_obj_set_pos(sd_midi_load_btn, 8, 362);
+    lv_obj_set_style_bg_color(sd_midi_load_btn, RED808_WARNING, 0);
+    lv_obj_set_style_bg_color(sd_midi_load_btn, lv_color_hex(0x554400), LV_STATE_DISABLED);
+    lv_obj_set_style_radius(sd_midi_load_btn, 10, 0);
+    lv_obj_add_state(sd_midi_load_btn, LV_STATE_DISABLED);
+    lv_obj_add_event_cb(sd_midi_load_btn, sd_midi_load_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* midi_load_lbl = lv_label_create(sd_midi_load_btn);
+    lv_label_set_text(midi_load_lbl, LV_SYMBOL_DOWNLOAD "  LOAD MIDI PATTERN");
+    lv_obj_set_style_text_font(midi_load_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(midi_load_lbl, lv_color_black(), 0);
+    lv_obj_center(midi_load_lbl);
+
+    // Status label
+    sd_midi_status_lbl = lv_label_create(sd_midi_section);
+    lv_label_set_text(sd_midi_status_lbl, "");
+    lv_obj_set_style_text_font(sd_midi_status_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_SUCCESS, 0);
+    lv_obj_set_pos(sd_midi_status_lbl, 8, 426);
+    lv_obj_set_width(sd_midi_status_lbl, RIGHT_W - 24);
+    lv_label_set_long_mode(sd_midi_status_lbl, LV_LABEL_LONG_WRAP);
 
     // BACK button (return to live)
     lv_obj_t* back_btn = lv_btn_create(sd_right_panel);
@@ -1912,6 +2094,10 @@ static void ui_reload_themed_screens(void) {
     sd_path_lbl = NULL; sd_file_list = NULL; sd_selected_lbl = NULL;
     sd_load_btn = NULL; sd_load_lbl = NULL;
     for (int i = 0; i < 16; i++) sd_pad_btns[i] = NULL;
+    sd_wav_section = NULL; sd_midi_section = NULL;
+    sd_midi_info_lbl = NULL; sd_midi_status_lbl = NULL; sd_midi_load_btn = NULL;
+    for (int i = 0; i < 10; i++) sd_midi_pat_btns[i] = NULL;
+    sd_is_midi_mode = false;
 
     // Recreate with new theme colors
     create_live_screen();
