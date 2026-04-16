@@ -10,6 +10,7 @@ void io_ext_init();
 void io_ext_output(uint8_t pin, uint8_t value);
 void io_ext_backlight_on();
 void io_ext_backlight_off();
+void io_ext_backlight_set(uint8_t brightness);  // 0-255 PWM brightness
 void io_ext_touch_reset();
 void io_ext_lcd_reset();
 void io_ext_sd_enable();   // Pull SD CS low (assert)

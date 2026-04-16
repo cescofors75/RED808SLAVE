@@ -15,6 +15,8 @@ static uint8_t output_state = 0xFF;
 void io_ext_init() {
     // Configure all pins as outputs (bit=1 means output on CH32V003)
     i2c_write_byte(IO_EXT_ADDR, CH32V003_DIRECTION_REG, 0xFF);
+    // Reset PWM register to 0 (clean up any previous PWM state)
+    i2c_write_byte(IO_EXT_ADDR, CH32V003_PWM_REG, 0);
     // All outputs high EXCEPT backlight (bit 2) — keep backlight OFF during init
     // to avoid showing random PSRAM framebuffer content before LVGL renders.
     output_state = 0xFF & ~(1 << EXIO_BL);
@@ -36,6 +38,11 @@ void io_ext_backlight_on() {
 
 void io_ext_backlight_off() {
     io_ext_output(EXIO_BL, 0);
+}
+
+void io_ext_backlight_set(uint8_t brightness) {
+    // TODO: investigate correct CH32V003 PWM sequence from Waveshare Demo 15
+    (void)brightness;
 }
 
 void io_ext_touch_reset() {

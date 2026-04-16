@@ -439,7 +439,7 @@ static lv_obj_t* create_info_chip(lv_obj_t* parent, const lv_color_t accent_colo
     lv_obj_set_height(chip, 30);
     lv_obj_set_style_radius(chip, 6, 0);
     lv_obj_set_style_bg_color(chip, RED808_SURFACE, 0);
-    lv_obj_set_style_bg_opa(chip, LV_OPA_80, 0);
+    lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(chip, 0, 0);
     lv_obj_set_style_border_side(chip, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_width(chip, 3, 0);
@@ -501,7 +501,7 @@ static lv_obj_t* create_section_shell(lv_obj_t* parent, lv_coord_t x, lv_coord_t
     lv_obj_set_pos(shell, x, y);
     lv_obj_set_size(shell, w, h);
     lv_obj_set_style_bg_color(shell, RED808_PANEL, 0);
-    lv_obj_set_style_bg_opa(shell, LV_OPA_70, 0);
+    lv_obj_set_style_bg_opa(shell, LV_OPA_90, 0);
     lv_obj_set_style_border_width(shell, 1, 0);
     lv_obj_set_style_border_color(shell, RED808_BORDER, 0);
     lv_obj_set_style_radius(shell, 18, 0);
@@ -864,7 +864,7 @@ void ui_create_menu_screen() {
             lv_obj_set_style_border_opa(btn, LV_OPA_COVER, 0);
             lv_obj_set_style_outline_width(btn, 3, 0);
             lv_obj_set_style_outline_color(btn, menu_colors[i], 0);
-            lv_obj_set_style_outline_opa(btn, LV_OPA_30, 0);
+            lv_obj_set_style_outline_opa(btn, LV_OPA_50, 0);
             lv_obj_set_style_outline_pad(btn, 2, 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, menu_btn_cb, LV_EVENT_PRESSED, (void*)(intptr_t)i);
@@ -1081,7 +1081,7 @@ void ui_create_live_screen() {
 
         // Neon ring style — identical look to P4 pads
         lv_obj_set_style_bg_color(pad, lv_color_black(), 0);
-        lv_obj_set_style_bg_opa(pad, LV_OPA_80, 0);
+        lv_obj_set_style_bg_opa(pad, LV_OPA_90, 0);
         lv_obj_set_style_radius(pad, 14, 0);
         lv_obj_set_style_border_width(pad, 3, 0);
         lv_obj_set_style_border_color(pad, inst_colors[i], 0);
@@ -1327,15 +1327,15 @@ static void seq_update_solo_mute_visuals(int track) {
     // Track panel: solo'd = gold border, muted = dim + red border, normal = default
     if (seq_track_panels[track]) {
         if (trackSolo[track]) {
-            lv_obj_set_style_bg_opa(seq_track_panels[track], LV_OPA_70, 0);
+            lv_obj_set_style_bg_opa(seq_track_panels[track], LV_OPA_90, 0);
             lv_obj_set_style_border_width(seq_track_panels[track], 2, 0);
             lv_obj_set_style_border_color(seq_track_panels[track], lv_color_hex(0xFFD700), 0);
         } else if (effMuted) {
-            lv_obj_set_style_bg_opa(seq_track_panels[track], LV_OPA_20, 0);
+            lv_obj_set_style_bg_opa(seq_track_panels[track], LV_OPA_30, 0);
             lv_obj_set_style_border_width(seq_track_panels[track], 1, 0);
             lv_obj_set_style_border_color(seq_track_panels[track], lv_color_hex(0xFF3030), 0);
         } else {
-            lv_obj_set_style_bg_opa(seq_track_panels[track], LV_OPA_40, 0);
+            lv_obj_set_style_bg_opa(seq_track_panels[track], LV_OPA_70, 0);
             lv_obj_set_style_border_width(seq_track_panels[track], 0, 0);
         }
     }
@@ -1550,7 +1550,7 @@ void ui_create_sequencer_screen() {
         lv_obj_set_size(panel, name_w, cell_h);
         lv_obj_set_pos(panel, name_x, panel_y);
         lv_obj_set_style_bg_color(panel, RED808_PANEL, 0);
-        lv_obj_set_style_bg_opa(panel, LV_OPA_40, 0);
+        lv_obj_set_style_bg_opa(panel, LV_OPA_70, 0);
         lv_obj_set_style_border_width(panel, 1, 0);
         lv_obj_set_style_border_color(panel, RED808_BORDER, 0);
         lv_obj_set_style_radius(panel, 8, 0);
@@ -2064,7 +2064,7 @@ void ui_create_volumes_screen() {
         lv_obj_set_size(strip, strip_w, strip_h);
         lv_obj_set_pos(strip, x, y_pos);
         lv_obj_set_style_bg_color(strip, RED808_SURFACE, 0);
-        lv_obj_set_style_bg_opa(strip, LV_OPA_40, 0);
+        lv_obj_set_style_bg_opa(strip, LV_OPA_70, 0);
         lv_obj_set_style_radius(strip, 10, 0);
         lv_obj_set_style_border_width(strip, 1, 0);
         lv_obj_set_style_border_color(strip, RED808_BORDER, 0);
@@ -2118,7 +2118,7 @@ void ui_create_volumes_screen() {
         lv_obj_set_size(color_bar, strip_w - 8, 4);
         lv_obj_set_pos(color_bar, x + 4, y_sl + slider_h + 2);
         lv_obj_set_style_bg_color(color_bar, inst_colors[i], 0);
-        lv_obj_set_style_bg_opa(color_bar, LV_OPA_80, 0);
+        lv_obj_set_style_bg_opa(color_bar, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(color_bar, 2, 0);
         lv_obj_set_style_border_width(color_bar, 0, 0);
         lv_obj_clear_flag(color_bar, LV_OBJ_FLAG_SCROLLABLE);
@@ -2162,7 +2162,7 @@ void ui_update_volumes() {
             ui_apply_volume_track_style(i);
             if (vol_strip_panels[i]) {
                 lv_obj_set_style_border_color(vol_strip_panels[i], trackMuted[i] ? RED808_ERROR : inst_colors[i], 0);
-                lv_obj_set_style_bg_opa(vol_strip_panels[i], trackMuted[i] ? LV_OPA_20 : LV_OPA_40, 0);
+                lv_obj_set_style_bg_opa(vol_strip_panels[i], trackMuted[i] ? LV_OPA_30 : LV_OPA_70, 0);
             }
         }
 
@@ -2406,7 +2406,6 @@ void ui_create_filters_screen() {
 #else
     lv_obj_t* shell = create_section_shell(scr_filters, 18, 78, 988, 500);
 #endif
-    lv_obj_set_style_bg_opa(shell, LV_OPA_70, 0);
 
     lv_obj_t* title = lv_label_create(shell);
     lv_label_set_text(title, LV_SYMBOL_AUDIO "  FX LAB");
@@ -2453,7 +2452,7 @@ void ui_create_filters_screen() {
     if (panelH < 220) panelH = 220;
 
     lv_obj_t* compact_panel = create_section_shell(shell, panelX, panelY, panelW, panelH);
-    lv_obj_set_style_bg_opa(compact_panel, LV_OPA_80, 0);
+    lv_obj_set_style_bg_opa(compact_panel, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(compact_panel, lv_color_hex(0x101820), 0);
     lv_obj_set_style_border_width(compact_panel, 2, 0);
     lv_obj_set_style_border_color(compact_panel, RED808_ACCENT, 0);
@@ -2493,7 +2492,7 @@ void ui_create_filters_screen() {
 
         lv_obj_t* card = create_section_shell(compact_panel, x, y, cellW, cellH);
         lv_obj_set_style_bg_color(card, lv_color_hex(0x17222B), 0);
-        lv_obj_set_style_bg_opa(card, LV_OPA_80, 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(card, 2, 0);
         lv_obj_set_style_border_color(card, RED808_BORDER, 0);
 
@@ -2511,7 +2510,7 @@ void ui_create_filters_screen() {
         lv_obj_set_style_text_font(filter_grid_mute_labels[cell], &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(filter_grid_mute_labels[cell],
                         cell < 3 ? RED808_SUCCESS : (analogMuted ? RED808_ERROR : RED808_ACCENT2), 0);
-        lv_obj_set_style_bg_opa(filter_grid_mute_labels[cell], LV_OPA_30, 0);
+        lv_obj_set_style_bg_opa(filter_grid_mute_labels[cell], LV_OPA_50, 0);
         lv_obj_set_style_bg_color(filter_grid_mute_labels[cell],
                       cell < 3 ? RED808_SUCCESS : (analogMuted ? RED808_ERROR : RED808_ACCENT2), 0);
         lv_obj_set_style_radius(filter_grid_mute_labels[cell], 8, 0);
@@ -2638,7 +2637,7 @@ void ui_create_filters_screen() {
         lv_obj_set_pos(row, 0, 60 + i * 78);
 #endif
         lv_obj_set_style_bg_color(row, RED808_SURFACE, 0);
-        lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_70, 0);
         lv_obj_set_style_radius(row, 16, 0);
         lv_obj_set_style_border_width(row, 1, 0);
         lv_obj_set_style_border_color(row, fx_colors[i], 0);
@@ -3614,7 +3613,6 @@ void ui_create_patterns_screen() {
 #else
     lv_obj_t* shell = create_section_shell(scr_patterns, 18, 78, 988, 500);
 #endif
-    lv_obj_set_style_bg_opa(shell, LV_OPA_70, 0);
 
     lv_obj_t* title = lv_label_create(shell);
     lv_label_set_text(title, LV_SYMBOL_LIST "  PATTERN BANKS");
