@@ -16,6 +16,18 @@
 			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe run --target uploadfs",
 			"problemMatcher": [],
 			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Upload S3",
+			"type": "shell",
+			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe run --target upload --environment esp32s3",
+			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Build Verbose S3",
+			"type": "shell",
+			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe run --environment esp32s3 --verbose 2>&1 | Select-String -Pattern 'error:|warning:C' | Select-Object -First 40",
+			"group": "build"
 		}
 	]
 }

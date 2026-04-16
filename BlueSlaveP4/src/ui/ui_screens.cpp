@@ -1625,11 +1625,11 @@ static void sd_pad_btn_cb(lv_event_t* e) {
 
 static void sd_midi_pat_btn_cb(lv_event_t* e) {
     int slot = (int)(intptr_t)lv_event_get_user_data(e);
-    if (slot < 6 || slot > 15) return;
+    if (slot < 0 || slot > 5) return;
     sd_midi_target_slot = slot;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 6; i++) {
         if (!sd_midi_pat_btns[i]) continue;
-        bool sel = (i + 6 == slot);
+        bool sel = (i == slot);
         lv_obj_set_style_bg_color(sd_midi_pat_btns[i],
             sel ? RED808_ACCENT : lv_color_hex(0x1A2A3A), 0);
         lv_obj_set_style_border_color(sd_midi_pat_btns[i],
@@ -1925,15 +1925,15 @@ static void create_sdcard_screen(void) {
     lv_obj_set_style_text_color(slot_lbl, RED808_CYAN, 0);
     lv_obj_set_pos(slot_lbl, 8, 54);
 
-    // Pattern slot grid 2×5 (P07-P16 = slots 6-15)
+    // Pattern slot grid 2×3 (P01-P06 = slots 0-5, valid master patterns)
     {
         int mp_btn_w = (RIGHT_W - 16 - 10) / 2;  // 2 cols, gap=10
         int mp_btn_h = 52;
         int mp_gap   = 6;
         int mp_x0 = 0, mp_y0 = 76;
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 6; i++) {
             int col = i % 2, row = i / 2;
-            int slot_id = i + 6;
+            int slot_id = i;
             int bx = mp_x0 + col * (mp_btn_w + 10);
             int by = mp_y0 + row * (mp_btn_h + mp_gap);
 
@@ -2096,7 +2096,7 @@ static void ui_reload_themed_screens(void) {
     for (int i = 0; i < 16; i++) sd_pad_btns[i] = NULL;
     sd_wav_section = NULL; sd_midi_section = NULL;
     sd_midi_info_lbl = NULL; sd_midi_status_lbl = NULL; sd_midi_load_btn = NULL;
-    for (int i = 0; i < 10; i++) sd_midi_pat_btns[i] = NULL;
+    for (int i = 0; i < 6; i++) sd_midi_pat_btns[i] = NULL;
     sd_is_midi_mode = false;
 
     // Recreate with new theme colors

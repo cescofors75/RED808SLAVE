@@ -314,11 +314,21 @@ static void process_basic(const UartBasicPacket* pkt) {
 // =============================================================================
 static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, int len) {
     if (type == MSG_PATTERN_DATA && len == 32) {
-        // 32 bytes = 256 bits = 16 tracks × 16 steps
+        // 32 bytes = 256 bits = 16 tracks × 16 steps (big-endian: MSB first per track)
         for (int track = 0; track < 16; track++) {
-            uint16_t row = (uint16_t)payload[track * 2] | ((uint16_t)payload[track * 2 + 1] << 8);
+            uint16_t row = ((uint16_t)payload[track * 2] << 8) | payload[track * 2 + 1];
             for (int step = 0; step < 16; step++) {
                 p4.steps[track][step] = (row >> step) & 1;
+            }
+        }
+        // Forward active steps to master via UDP.
+        // selectPattern is sent separately by the SYS_PATTERN handler (arrives first).
+        if (udp_wifi_connected()) {
+            for (int track = 0; track < 16; track++) {
+                for (int step = 0; step < 16; step++) {
+                    if (p4.steps[track][step])
+                        udp_send_set_step(track, step, true);
+                }
             }
         }
     }

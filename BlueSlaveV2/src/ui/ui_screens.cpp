@@ -3025,8 +3025,8 @@ static lv_obj_t* sd_midi_section = NULL;
 static lv_obj_t* sd_midi_info_lbl    = NULL;
 static lv_obj_t* sd_midi_status_lbl  = NULL;
 static lv_obj_t* sd_midi_load_btn    = NULL;
-static lv_obj_t* sd_midi_pat_btns[10] = {};   // slots 6-15
-static int       sd_midi_target_slot  = 6;    // currently selected target pattern slot
+static lv_obj_t* sd_midi_pat_btns[6] = {};    // slots 0-5 (P01-P06, valid master patterns)
+static int       sd_midi_target_slot  = 0;    // currently selected target pattern slot
 static bool      sd_is_midi_selected  = false;
 
 // Forward declarations
@@ -3291,12 +3291,12 @@ static void sd_load_btn_cb(lv_event_t* e) {
 // MIDI pattern slot selector (slots 6-15)
 static void sd_midi_pat_btn_cb(lv_event_t* e) {
     int slot = (int)(intptr_t)lv_event_get_user_data(e);
-    if (slot < 6 || slot > 15) return;
+    if (slot < 0 || slot > 5) return;
     sd_midi_target_slot = slot;
     // Highlight selected button
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 6; i++) {
         if (!sd_midi_pat_btns[i]) continue;
-        bool selected = (i + 6 == slot);
+        bool selected = (i == slot);
         lv_obj_set_style_bg_color(sd_midi_pat_btns[i],
             selected ? RED808_ACCENT : lv_color_hex(0x1A2A3A), 0);
         lv_obj_set_style_border_color(sd_midi_pat_btns[i],
@@ -3525,16 +3525,16 @@ void ui_create_sdcard_screen() {
     lv_obj_set_style_text_color(slot_lbl, RED808_CYAN, 0);
     lv_obj_set_pos(slot_lbl, 8, 58);
 
-    // Pattern slot grid 2×5 (P06-P15)
+    // Pattern slot grid 2×3 (P01-P06 = slots 0-5, valid master patterns)
     {
         int rp_cw     = SD_RIGHT_W - 16;   // right panel content width
         int mp_btn_w  = (rp_cw - 10) / 2;  // 2 cols, gap=10
         int mp_btn_h  = 44;
         int mp_gap    = 6;
         int mp_x0     = 0, mp_y0 = 80;
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 6; i++) {
             int col = i % 2, row = i / 2;
-            int slot_id = i + 6;  // slots 6-15
+            int slot_id = i;  // slots 0-5
             int bx = mp_x0 + col * (mp_btn_w + 10);
             int by = mp_y0 + row * (mp_btn_h + mp_gap);
 

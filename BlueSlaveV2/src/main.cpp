@@ -466,7 +466,7 @@ static void handleP4SdLoad(uint8_t pad) {
 }
 
 static void handleP4SdLoadMidi(uint8_t slot) {
-    if (slot < 6 || slot >= Config::MAX_PATTERNS || p4sd_selected[0] == '\0') return;
+    if (slot >= Config::MAX_PATTERNS || p4sd_selected[0] == '\0') return;
     // Build full path
     char path[192];
     if (strcmp(p4sd_dir, "/") == 0)
@@ -555,7 +555,7 @@ void handleP4PatternData(int pat, const bool steps[16][16]) {
 // NOTE: called from within LVGL callback — no delay() allowed, no lvgl_port_lock.
 // =============================================================================
 void handleMidiPatternLoaded(int slot, const bool steps[16][16], const char* name) {
-    if (slot < 6 || slot >= Config::MAX_PATTERNS) return;  // protect slots 0-5
+    if (slot < 0 || slot >= Config::MAX_PATTERNS) return;
 
     // Copy steps into local pattern array
     for (int t = 0; t < Config::MAX_TRACKS; t++)
@@ -582,9 +582,10 @@ void handleMidiPatternLoaded(int slot, const bool steps[16][16], const char* nam
         }
     }
 
-    // Send to P4 via UART (extended pattern data packet + pattern select)
-    uart_bridge_send_pattern_data(slot, patterns[slot].steps, Config::MAX_TRACKS);
+    // Send to P4 via UART: pattern select FIRST so P4→master selectPattern
+    // arrives before the setStep commands (extended packet arrives after)
     uart_bridge_send_pattern(slot);
+    uart_bridge_send_pattern_data(slot, patterns[slot].steps, Config::MAX_TRACKS);
 
     RED808_LOG_PRINTF("[MIDI] Loaded pattern %d '%s' → Master + P4\n", slot + 1, name);
 }
