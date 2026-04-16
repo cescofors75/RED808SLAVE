@@ -33,6 +33,8 @@ void io_ext_output(uint8_t pin, uint8_t value) {
 }
 
 void io_ext_backlight_on() {
+    // PWM 0 = max brightness (inverted logic on CH32V003)
+    i2c_write_byte(IO_EXT_ADDR, CH32V003_PWM_REG, 0);
     io_ext_output(EXIO_BL, 1);
 }
 
@@ -41,8 +43,18 @@ void io_ext_backlight_off() {
 }
 
 void io_ext_backlight_set(uint8_t brightness) {
-    // TODO: investigate correct CH32V003 PWM sequence from Waveshare Demo 15
-    (void)brightness;
+    // CH32V003 PWM is inverted: 0=max bright, 247=min bright, >247=off
+    // brightness input: 0=off, 100=max
+    if (brightness == 0) {
+        io_ext_output(EXIO_BL, 0);
+        return;
+    }
+    // Clamp to 97% max (Waveshare hardware limit)
+    if (brightness > 97) brightness = 97;
+    // Invert: high input brightness = low PWM value
+    uint8_t pwm_val = (uint8_t)((100 - brightness) * 2.55f);
+    i2c_write_byte(IO_EXT_ADDR, CH32V003_PWM_REG, pwm_val);
+    io_ext_output(EXIO_BL, 1);
 }
 
 void io_ext_touch_reset() {
