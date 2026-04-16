@@ -453,10 +453,10 @@ static void create_live_screen(void) {
     lv_obj_add_event_cb(grid_sync_btn, grid_sync_cb, LV_EVENT_CLICKED, NULL);
 
     // --- Row 2: System ---
-    // [4,2] SETTINGS
+    // [4,2] SD CARD
     b = create_ctrl_btn(scr_live, COL_X(4), ROW_Y(2), CW, CH,
-                         LV_SYMBOL_SETTINGS "\nSET", RED808_TEXT_DIM, &lv_font_montserrat_18);
-    lv_obj_add_event_cb(b, grid_nav_cb, LV_EVENT_CLICKED, (void*)(intptr_t)4);
+                         LV_SYMBOL_DRIVE "\nSD", RED808_CYAN, &lv_font_montserrat_18);
+    lv_obj_add_event_cb(b, grid_nav_cb, LV_EVENT_CLICKED, (void*)(intptr_t)9);
 
     // [5,2] THEME
     b = create_ctrl_btn(scr_live, COL_X(5), ROW_Y(2), CW, CH,
@@ -1500,7 +1500,7 @@ static void sd_refresh_ui(void) {
     // "Back" button if not root
     if (strcmp(p4sd.path, "/") != 0 && p4sd.path[0] != '\0') {
         lv_obj_t* back_btn = lv_btn_create(sd_file_list);
-        lv_obj_set_size(back_btn, UI_W - 60, 44);
+        lv_obj_set_size(back_btn, 580, 44);
         lv_obj_set_style_bg_color(back_btn, lv_color_hex(0x333344), 0);
         lv_obj_set_style_radius(back_btn, 6, 0);
         lv_obj_t* back_lbl = lv_label_create(back_btn);
@@ -1514,7 +1514,7 @@ static void sd_refresh_ui(void) {
     // File/directory entries
     for (int i = 0; i < p4sd.entry_count; i++) {
         lv_obj_t* btn = lv_btn_create(sd_file_list);
-        lv_obj_set_size(btn, UI_W - 60, 44);
+        lv_obj_set_size(btn, 580, 44);
         lv_obj_set_style_radius(btn, 6, 0);
 
         bool is_dir = p4sd.entries[i].is_dir;
@@ -1545,13 +1545,22 @@ static void create_sdcard_screen(void) {
     scr_sdcard = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_sdcard, RED808_BG, 0);
     lv_obj_clear_flag(scr_sdcard, LV_OBJ_FLAG_SCROLLABLE);
-    ui_create_header(scr_sdcard);
+
+    // Landscape layout: 1024×600
+    // Left panel (file browser): 620px wide
+    // Right panel (pad assign):  380px wide
+    const int TOP    = 8;
+    const int PANEL_H = LCD_V_RES - TOP - 8;  // ~584px
+    const int LEFT_W  = 620;
+    const int RIGHT_W = LCD_H_RES - LEFT_W - 16;  // ~392px
+    const int GAP     = 8;
 
     // ── Left Panel: file browser ──
     sd_left_panel = lv_obj_create(scr_sdcard);
-    lv_obj_set_size(sd_left_panel, UI_W - 24, 440);
-    lv_obj_set_pos(sd_left_panel, 12, 54);
+    lv_obj_set_size(sd_left_panel, LEFT_W, PANEL_H);
+    lv_obj_set_pos(sd_left_panel, 4, TOP);
     lv_obj_set_style_bg_color(sd_left_panel, lv_color_hex(0x0D1520), 0);
+    lv_obj_set_style_bg_opa(sd_left_panel, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(sd_left_panel, RED808_INFO, 0);
     lv_obj_set_style_border_width(sd_left_panel, 1, 0);
     lv_obj_set_style_radius(sd_left_panel, 8, 0);
@@ -1570,7 +1579,7 @@ static void create_sdcard_screen(void) {
     lv_label_set_text(sd_status_lbl, "CONNECTING...");
     lv_obj_set_style_text_font(sd_status_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(sd_status_lbl, RED808_WARNING, 0);
-    lv_obj_set_pos(sd_status_lbl, 300, 8);
+    lv_obj_set_pos(sd_status_lbl, 420, 8);
 
     // Path label
     sd_path_lbl = lv_label_create(sd_left_panel);
@@ -1581,7 +1590,7 @@ static void create_sdcard_screen(void) {
 
     // Scrollable file list
     sd_file_list = lv_obj_create(sd_left_panel);
-    lv_obj_set_size(sd_file_list, UI_W - 48, 350);
+    lv_obj_set_size(sd_file_list, LEFT_W - 24, PANEL_H - 72);
     lv_obj_set_pos(sd_file_list, 4, 54);
     lv_obj_set_style_bg_opa(sd_file_list, LV_OPA_0, 0);
     lv_obj_set_style_border_width(sd_file_list, 0, 0);
@@ -1593,9 +1602,10 @@ static void create_sdcard_screen(void) {
 
     // ── Right Panel: pad assignment ──
     sd_right_panel = lv_obj_create(scr_sdcard);
-    lv_obj_set_size(sd_right_panel, UI_W - 24, 440);
-    lv_obj_set_pos(sd_right_panel, 12, 504);
+    lv_obj_set_size(sd_right_panel, RIGHT_W, PANEL_H);
+    lv_obj_set_pos(sd_right_panel, LEFT_W + GAP, TOP);
     lv_obj_set_style_bg_color(sd_right_panel, lv_color_hex(0x0D1520), 0);
+    lv_obj_set_style_bg_opa(sd_right_panel, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(sd_right_panel, RED808_ACCENT, 0);
     lv_obj_set_style_border_width(sd_right_panel, 1, 0);
     lv_obj_set_style_radius(sd_right_panel, 8, 0);
@@ -1609,10 +1619,11 @@ static void create_sdcard_screen(void) {
     lv_obj_set_style_text_color(assign_lbl, RED808_ACCENT, 0);
     lv_obj_set_pos(assign_lbl, 8, 4);
 
-    // 4x4 pad grid
-    int pad_w = (UI_W - 24 - 16 - 3 * 6) / 4;  // fit 4 cols
-    int pad_h = 50, pad_gap = 6;
-    int px_start = 16, py_start = 36;
+    // 4x4 pad grid — fit within RIGHT_W
+    int pad_gap = 6;
+    int pad_w = (RIGHT_W - 32 - 3 * pad_gap) / 4;
+    int pad_h = 56;
+    int px_start = 8, py_start = 36;
     for (int i = 0; i < 16; i++) {
         int col = i % 4;
         int row = i / 4;
@@ -1643,17 +1654,17 @@ static void create_sdcard_screen(void) {
     // Selected file label
     sd_selected_lbl = lv_label_create(sd_right_panel);
     lv_label_set_text(sd_selected_lbl, "");
-    lv_obj_set_width(sd_selected_lbl, UI_W - 60);
+    lv_obj_set_width(sd_selected_lbl, RIGHT_W - 24);
     lv_obj_set_style_text_font(sd_selected_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(sd_selected_lbl, RED808_SUCCESS, 0);
     lv_obj_set_style_text_align(sd_selected_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(sd_selected_lbl, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(sd_selected_lbl, 12, 280);
+    lv_obj_set_pos(sd_selected_lbl, 8, 300);
 
     // LOAD button
     sd_load_btn = lv_btn_create(sd_right_panel);
-    lv_obj_set_size(sd_load_btn, UI_W - 60, 60);
-    lv_obj_set_pos(sd_load_btn, 16, 330);
+    lv_obj_set_size(sd_load_btn, RIGHT_W - 24, 60);
+    lv_obj_set_pos(sd_load_btn, 8, 360);
     lv_obj_set_style_bg_color(sd_load_btn, RED808_ACCENT, 0);
     lv_obj_set_style_bg_color(sd_load_btn, lv_color_hex(0x882200), LV_STATE_DISABLED);
     lv_obj_set_style_radius(sd_load_btn, 10, 0);
@@ -1665,6 +1676,24 @@ static void create_sdcard_screen(void) {
     lv_obj_set_style_text_color(sd_load_lbl, lv_color_white(), 0);
     lv_obj_center(sd_load_lbl);
     lv_obj_add_event_cb(sd_load_btn, sd_load_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    // BACK button (return to live)
+    lv_obj_t* back_btn = lv_btn_create(sd_right_panel);
+    lv_obj_set_size(back_btn, RIGHT_W - 24, 50);
+    lv_obj_set_pos(back_btn, 8, PANEL_H - 74);
+    lv_obj_set_style_bg_color(back_btn, RED808_SURFACE, 0);
+    lv_obj_set_style_radius(back_btn, 8, 0);
+    lv_obj_set_style_border_width(back_btn, 1, 0);
+    lv_obj_set_style_border_color(back_btn, RED808_BORDER, 0);
+    lv_obj_t* back_lbl = lv_label_create(back_btn);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT "  BACK TO LIVE");
+    lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(back_lbl, RED808_TEXT, 0);
+    lv_obj_center(back_lbl);
+    lv_obj_add_event_cb(back_btn, [](lv_event_t* e) {
+        (void)e;
+        ui_navigate_to(2);  // SCREEN_LIVE
+    }, LV_EVENT_CLICKED, NULL);
 }
 
 // =============================================================================
