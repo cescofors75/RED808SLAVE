@@ -148,7 +148,7 @@ static lv_coord_t live_pad_h[Config::MAX_SAMPLES] = {};
 
 static constexpr int LIVE_PAD_COLS = 4;
 static constexpr int LIVE_PAD_GAP = 12;
-static constexpr int LIVE_PAD_AREA_TOP = 100;
+static constexpr int LIVE_PAD_AREA_TOP = 40;
 static constexpr int LIVE_VIEW_MODE_COUNT = 5;
 static const uint8_t live_view_options[LIVE_VIEW_MODE_COUNT] = {16, 8, 4, 2, 1};
 static lv_obj_t* live_view_btns[LIVE_VIEW_MODE_COUNT] = {};
@@ -223,12 +223,12 @@ static void live_layout_pads() {
     const int grid_right = UI_W - 12;
     const int grid_width = grid_right - grid_left;
     const int ctrl_zone = 210;
-    const int grid_height = UI_H - LIVE_PAD_AREA_TOP - ctrl_zone;
+    const int grid_height = UI_H - 72 - LIVE_PAD_AREA_TOP - ctrl_zone;
 #else
     const int grid_left = left_panel_x + left_panel_w + 12;
     const int grid_right = 1024 - right_panel_w - right_panel_margin;
     const int grid_width = grid_right - grid_left;
-    const int grid_height = 600 - LIVE_PAD_AREA_TOP - 18;
+    const int grid_height = 508 - LIVE_PAD_AREA_TOP;
 #endif
 
     int cols = 4;
@@ -396,7 +396,7 @@ static constexpr int CIRC_CX = UI_W / 2;       // 300
 static constexpr int CIRC_CY = 340;
 #else
 static constexpr int CIRC_CX = 295;
-static constexpr int CIRC_CY = 315;
+static constexpr int CIRC_CY = 250;
 #endif
 static constexpr float CIRC_R = 218.0f;
 static constexpr float CIRC_INNER_R = 152.0f;
@@ -600,14 +600,15 @@ void ui_create_header(lv_obj_t* parent) {
     lv_obj_t* header = lv_obj_create(parent);
 #if PORTRAIT_MODE
     lv_obj_set_size(header, UI_W - 16, 60);
+    lv_obj_set_pos(header, 8, UI_H - 66);
 #else
     lv_obj_set_size(header, UI_W - 16, 80);
+    lv_obj_set_pos(header, 8, UI_H - 86);
 #endif
-    lv_obj_set_pos(header, 8, 6);
     lv_obj_set_style_bg_color(header, RED808_PANEL, 0);
     lv_obj_set_style_bg_opa(header, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(header, 0, 0);
-    lv_obj_set_style_border_side(header, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_side(header, LV_BORDER_SIDE_TOP, 0);
     lv_obj_set_style_border_width(header, 2, 0);
     lv_obj_set_style_border_color(header, RED808_ACCENT, 0);
     lv_obj_set_style_radius(header, 12, 0);
@@ -618,7 +619,7 @@ void ui_create_header(lv_obj_t* parent) {
     lv_obj_set_style_shadow_width(header, 8, 0);
     lv_obj_set_style_shadow_color(header, lv_color_black(), 0);
     lv_obj_set_style_shadow_opa(header, LV_OPA_30, 0);
-    lv_obj_set_style_shadow_ofs_y(header, 2, 0);
+    lv_obj_set_style_shadow_ofs_y(header, -2, 0);
     lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_gap(header, 6, 0);
@@ -809,20 +810,19 @@ void ui_create_menu_screen() {
     // Portrait: 2 cols, fill height
     static const int cols    = 2;
     static const int x_start = 10;
-    static const int y_start = 68;
+    static const int y_start = 6;
     static const int gap     = 10;
     static const int btn_w   = (UI_W - 2 * x_start - gap) / cols;
-    static const int btn_h   = (UI_H - y_start - 6 - 4 * gap) / 5;
+    static const int btn_h   = (UI_H - 72 - y_start - 4 * gap) / 5;
 #else
     // Landscape 1024×600: 3 cols, 4 rows, 10 botones (8 activos + 2 placeholder)
-    // Header bottom=86, y_start=102 → 16px gap.
-    // Available: 600-102-6=492. 4 filas: btn_h=(492-3×12)/4=114px
+    // Footer at bottom (86px). Content area 0..508.
     static const int cols    = 3;
     static const int x_start = 12;
-    static const int y_start = 102;
+    static const int y_start = 8;
     static const int gap     = 12;
     static const int btn_w   = (UI_W - 2 * x_start - 2 * gap) / cols;  // 325px
-    static const int btn_h   = (UI_H - y_start - 6 - 3 * gap) / 4;     // 114px
+    static const int btn_h   = (UI_H - 92 - y_start - 3 * gap) / 4;    // 116px
 #endif
 
     for (int i = 0; i < menu_total; i++) {
@@ -977,13 +977,13 @@ void ui_create_live_screen() {
     const int grid_width = grid_right - grid_left;
     // Reserve 200px for controls + footer (footer at UI_H-52)
     const int ctrl_zone = 210;
-    const int row_h = (UI_H - LIVE_PAD_AREA_TOP - ctrl_zone - 3 * LIVE_PAD_GAP) / 4;
+    const int row_h = (UI_H - 72 - LIVE_PAD_AREA_TOP - ctrl_zone - 3 * LIVE_PAD_GAP) / 4;
     const int default_pad_w = (grid_width - 3 * LIVE_PAD_GAP) / LIVE_PAD_COLS;
 #else
     const int grid_left = left_panel_x + left_panel_w + 12;
     const int grid_right = 1024 - right_panel_w - right_panel_margin;
     const int grid_width = grid_right - grid_left;
-    const int row_h = (600 - LIVE_PAD_AREA_TOP - 18 - 3 * LIVE_PAD_GAP) / 4;
+    const int row_h = (508 - LIVE_PAD_AREA_TOP - 3 * LIVE_PAD_GAP) / 4;
     const int default_pad_w = (grid_width - 3 * LIVE_PAD_GAP) / LIVE_PAD_COLS;
 #endif
 
@@ -991,10 +991,10 @@ void ui_create_live_screen() {
     // In portrait, controls go below the pad grid, above footer
     int pad_grid_bottom = LIVE_PAD_AREA_TOP + 4 * (row_h + LIVE_PAD_GAP);
     int bottom_y = pad_grid_bottom + 6;
-    int ctrl_h = UI_H - 60 - bottom_y;  // stop above footer
+    int ctrl_h = UI_H - 72 - bottom_y;  // stop above footer
     lv_obj_t* left_panel = create_section_shell(scr_live, 12, bottom_y, UI_W / 2 - 18, ctrl_h);
 #else
-    lv_obj_t* left_panel = create_section_shell(scr_live, left_panel_x, LIVE_PAD_AREA_TOP, left_panel_w, 510);
+    lv_obj_t* left_panel = create_section_shell(scr_live, left_panel_x, LIVE_PAD_AREA_TOP, left_panel_w, 468);
 #endif
     lv_obj_set_style_pad_all(left_panel, 8, 0);
 #if PORTRAIT_MODE
@@ -1147,7 +1147,7 @@ void ui_create_live_screen() {
         int label_h = 50;
         int gap_v = 12;
         int total_h = btn_h + label_h + btn_h + gap_v*2;  // 2 gaps
-        int y_start = LIVE_PAD_AREA_TOP + (600 - LIVE_PAD_AREA_TOP - total_h) / 2;
+        int y_start = LIVE_PAD_AREA_TOP + (508 - LIVE_PAD_AREA_TOP - total_h) / 2;
 #endif
 
         // Title
@@ -1483,8 +1483,8 @@ void ui_create_sequencer_screen() {
     int grid_w  = Config::MAX_STEPS * (cell_w + gap) - gap; // 510
     int solo_x  = grid_x + grid_w + 2; // 568
     int solo_w  = UI_W - solo_x - 4;   // fill remaining (~28px)
-    int step_label_y = 68;
-    int grid_y       = 88;
+    int step_label_y = 6;
+    int grid_y       = 26;
     int row_pitch    = cell_h + gap;  // 52
 #else
     // Columns: [track_name 68px] [grid 16*(48+3)-3=813] [S 44px gap 4] [M 44px]
@@ -1497,8 +1497,8 @@ void ui_create_sequencer_screen() {
     int solo_w  = 44;
     int mute_x  = solo_x + solo_w + 4; // 953
     int mute_w  = 44;
-    int step_label_y = 82;
-    int grid_y       = 106;
+    int step_label_y = 4;
+    int grid_y       = 28;
     int row_pitch    = cell_h + gap;  // 51
 #endif
 
@@ -2018,8 +2018,8 @@ void ui_create_volumes_screen() {
     // Portrait: 2 rows of 8 strips — account for footer at UI_H - 52
     int strip_w = 64;
     int gap_h = (UI_W - 8 * strip_w) / 9;       // ~7px margins
-    int y_top = 68;
-    int y_bottom = UI_H - 60;                     // stop above footer
+    int y_top = 6;
+    int y_bottom = UI_H - 72;                     // stop above footer
     int total_h = y_bottom - y_top;
     int row_gap = 14;
     int strip_h = (total_h - row_gap) / 2;        // ~426 each
@@ -2034,8 +2034,8 @@ void ui_create_volumes_screen() {
 #else
     int strip_w = 56;
     int gap = (1024 - 16 * strip_w) / 17;  // equal margins
-    int y_top = 78;         // just below the header
-    int y_bottom = 590;     // near screen bottom
+    int y_top = 4;
+    int y_bottom = 508;
     int strip_h = y_bottom - y_top;
     int slider_h = strip_h - 40;  // room for value label at bottom
     int y_slider = y_top + 4;
@@ -2402,9 +2402,9 @@ void ui_create_filters_screen() {
     ui_create_header(scr_filters);
 
 #if PORTRAIT_MODE
-    lv_obj_t* shell = create_section_shell(scr_filters, 12, 65, UI_W - 24, UI_H - 130);
+    lv_obj_t* shell = create_section_shell(scr_filters, 12, 4, UI_W - 24, UI_H - 78);
 #else
-    lv_obj_t* shell = create_section_shell(scr_filters, 18, 78, 988, 500);
+    lv_obj_t* shell = create_section_shell(scr_filters, 18, 4, 988, 500);
 #endif
 
     lv_obj_t* title = lv_label_create(shell);
@@ -2438,7 +2438,7 @@ void ui_create_filters_screen() {
        cell dimensions and invisible widgets.                           */
 #if PORTRAIT_MODE
     const int shellW = UI_W - 24;
-    const int shellH = UI_H - 130;
+    const int shellH = UI_H - 78;
 #else
     const int shellW = 988;
     const int shellH = 500;
@@ -3026,10 +3026,10 @@ void ui_create_settings_screen() {
     lv_obj_t* net_card = lv_obj_create(scr_settings);
 #if PORTRAIT_MODE
     lv_obj_set_size(net_card, UI_W - 40, 160);
-    lv_obj_set_pos(net_card, 20, 65);
+    lv_obj_set_pos(net_card, 20, 4);
 #else
     lv_obj_set_size(net_card, 970, 130);
-    lv_obj_set_pos(net_card, 30, 75);
+    lv_obj_set_pos(net_card, 30, 4);
 #endif
     lv_obj_clear_flag(net_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(net_card, RED808_PANEL, 0);
@@ -3077,10 +3077,10 @@ void ui_create_settings_screen() {
     lv_obj_t* usb_card = lv_obj_create(scr_settings);
 #if PORTRAIT_MODE
     lv_obj_set_size(usb_card, UI_W - 40, 120);
-    lv_obj_set_pos(usb_card, 20, 65);
+    lv_obj_set_pos(usb_card, 20, 4);
 #else
     lv_obj_set_size(usb_card, 970, 100);
-    lv_obj_set_pos(usb_card, 30, 75);
+    lv_obj_set_pos(usb_card, 30, 4);
 #endif
     lv_obj_clear_flag(usb_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(usb_card, RED808_PANEL, 0);
@@ -3116,16 +3116,16 @@ void ui_create_settings_screen() {
 #if PORTRAIT_MODE
     lv_obj_set_size(theme_card, UI_W - 40, 740);
 #if S3_WIFI_ENABLED
-    lv_obj_set_pos(theme_card, 20, 240);
+    lv_obj_set_pos(theme_card, 20, 178);
 #else
-    lv_obj_set_pos(theme_card, 20, 200);
+    lv_obj_set_pos(theme_card, 20, 138);
 #endif
 #else
     lv_obj_set_size(theme_card, 970, 340);
 #if S3_WIFI_ENABLED
-    lv_obj_set_pos(theme_card, 30, 220);
+    lv_obj_set_pos(theme_card, 30, 148);
 #else
-    lv_obj_set_pos(theme_card, 30, 190);
+    lv_obj_set_pos(theme_card, 30, 118);
 #endif
 #endif
     lv_obj_clear_flag(theme_card, LV_OBJ_FLAG_SCROLLABLE);
@@ -3271,7 +3271,7 @@ void ui_create_diagnostics_screen() {
     lv_label_set_text(title, LV_SYMBOL_EYE_OPEN " STATUS CENTER");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 72);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
     static const char* row_names[DIAG_ROWS] = {
         "WiFi", "UDP", "Touch GT911", "LCD RGB",
@@ -3281,9 +3281,9 @@ void ui_create_diagnostics_screen() {
 
 #if PORTRAIT_MODE
     int card_w = UI_W - 32;
-    lv_obj_t* health_card = create_section_shell(scr_diagnostics, 16, 100, card_w, 390);
+    lv_obj_t* health_card = create_section_shell(scr_diagnostics, 16, 32, card_w, 390);
 #else
-    lv_obj_t* health_card = create_section_shell(scr_diagnostics, 24, 104, 300, 348);
+    lv_obj_t* health_card = create_section_shell(scr_diagnostics, 24, 32, 300, 348);
 #endif
     lv_obj_t* health_title = lv_label_create(health_card);
     lv_label_set_text(health_title, LV_SYMBOL_OK "  HARDWARE LINKS");
@@ -3314,9 +3314,9 @@ void ui_create_diagnostics_screen() {
     }
 
 #if PORTRAIT_MODE
-    lv_obj_t* runtime_card = create_section_shell(scr_diagnostics, 16, 520, card_w, 440);
+    lv_obj_t* runtime_card = create_section_shell(scr_diagnostics, 16, 452, card_w, 440);
 #else
-    lv_obj_t* runtime_card = create_section_shell(scr_diagnostics, 340, 104, 322, 452);
+    lv_obj_t* runtime_card = create_section_shell(scr_diagnostics, 340, 32, 322, 470);
 #endif
     lv_obj_t* runtime_title = lv_label_create(runtime_card);
     lv_label_set_text(runtime_title, LV_SYMBOL_EYE_OPEN "  LIVE TELEMETRY");
@@ -3609,9 +3609,9 @@ void ui_create_patterns_screen() {
     ui_create_header(scr_patterns);
 
 #if PORTRAIT_MODE
-    lv_obj_t* shell = create_section_shell(scr_patterns, 12, 65, UI_W - 24, UI_H - 78);
+    lv_obj_t* shell = create_section_shell(scr_patterns, 12, 4, UI_W - 24, UI_H - 72);
 #else
-    lv_obj_t* shell = create_section_shell(scr_patterns, 18, 78, 988, 500);
+    lv_obj_t* shell = create_section_shell(scr_patterns, 18, 4, 988, 500);
 #endif
 
     lv_obj_t* title = lv_label_create(shell);
@@ -3754,14 +3754,14 @@ void ui_update_patterns() {
 #if PORTRAIT_MODE
 static constexpr int SD_LEFT_W  = 576;   // file browser panel width
 static constexpr int SD_RIGHT_W = 576;   // pad assignment panel width
-static constexpr int SD_TOP     = 54;    // below header
+static constexpr int SD_TOP     = 4;
 static constexpr int SD_H       = 440;   // panel height
-static constexpr int SD_R_TOP   = 504;   // right panel y
+static constexpr int SD_R_TOP   = 454;   // right panel y
 #else
 static constexpr int SD_LEFT_W  = 580;   // file browser panel width
 static constexpr int SD_RIGHT_W = 420;   // pad assignment panel width
-static constexpr int SD_TOP     = 60;    // below header
-static constexpr int SD_H       = 540;   // panel height
+static constexpr int SD_TOP     = 4;
+static constexpr int SD_H       = 500;   // panel height
 static constexpr int SD_R_TOP   = SD_TOP;
 #endif
 
@@ -4214,9 +4214,9 @@ void ui_create_performance_screen() {
     lv_label_set_text(title, LV_SYMBOL_SETTINGS "  BUTTONS & CONTROL MAP");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 52);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
-    int y = 86;
+    int y = 30;
     int col1_x = 24, col2_x = 300;
     int section_gap = 8;
 
@@ -4469,25 +4469,25 @@ void ui_create_samples_screen() {
     lv_label_set_text(title, "SAMPLES");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 52);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
     lv_obj_t* hint = lv_label_create(scr_samples);
     lv_label_set_text(hint, "Selecciona pad, luego toca el encoder para cargar sample");
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(hint, RED808_TEXT_DIM, 0);
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 78);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 28);
 
     // Pad grid
 #if PORTRAIT_MODE
     int btn_w = 260, btn_h = 85, gap = 12;
     int cols = 2;
     int x_start = (UI_W - 2 * btn_w - gap) / 2;
-    int y_start = 108;
+    int y_start = 52;
 #else
     int btn_w = 220, btn_h = 105, gap = 16;
     int cols = 4;
     int x_start = (1024 - 4 * btn_w - 3 * gap) / 2;
-    int y_start = 108;
+    int y_start = 52;
 #endif
 
     for (int i = 0; i < Config::MAX_SAMPLES; i++) {

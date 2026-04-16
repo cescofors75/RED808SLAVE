@@ -57,5 +57,5 @@ void ui_sdcard_send_load_sample(int pad, const char* family, const char* filenam
 void ui_update_patterns();
 int ui_live_pad_hit_test(int x, int y);
 
-// Header bar (shared across screens)
+// Footer bar (shared across screens)
 void ui_create_header(lv_obj_t* parent);
