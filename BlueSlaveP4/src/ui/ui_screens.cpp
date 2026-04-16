@@ -637,7 +637,7 @@ static void update_live_screen(void) {
 
 // =============================================================================
 // FX LAB SCREEN — 2 pages × 3 circles
-//   Page 0: FLANGER (enc0) | CHORUS (enc1) | TREMOLO (enc2)
+//   Page 0: FLANGER (enc0) | DELAY (enc1) | REVERB (enc2)
 //   Page 1: DRIVE (pot3)   | CUTOFF (pot1) | RESONANCE (pot2)
 // =============================================================================
 static int fx_page = 0;   // 0 or 1
@@ -652,7 +652,7 @@ static lv_obj_t* fx_page_dot[2]    = {};  // page indicator dots
 static lv_obj_t* fx_page_lbl       = NULL;
 
 // FX metadata (page × 3)
-static const char*    fx_names[6]  = {"FLANGER","CHORUS","TREMOLO","DRIVE","CUTOFF","RESONANCE"};
+static const char*    fx_names[6]  = {"FLANGER","DELAY","REVERB","DRIVE","CUTOFF","RESONANCE"};
 static const uint32_t fx_colors[6] = {0x58A6FF, 0xB58BFF, 0x39D2C0,
                                        0xFF6B35, 0xFFD700, 0xFF8F5A};
 static const char*    fx_src[6]    = {"ENC 1","ENC 2","ENC 3","POT","POT","POT"};
@@ -662,7 +662,7 @@ static void fx_toggle_cb(lv_event_t* e) {
     int cell = (int)(intptr_t)lv_event_get_user_data(e);
     if (cell < 0 || cell > 5) return;
     if (cell < 3) {
-        // Encoder FX (0=Flanger, 1=Chorus, 2=Tremolo)
+        // Encoder FX (0=Flanger, 1=Delay, 2=Reverb)
         int enc_id = cell;  // direct 1:1 mapping
         p4.enc_muted[enc_id] = !p4.enc_muted[enc_id];
         bool m = p4.enc_muted[enc_id];
@@ -713,7 +713,7 @@ static void create_fx_screen(void) {
     lv_obj_set_style_text_color(title, RED808_ACCENT, 0);
     lv_obj_set_pos(title, 60, 10);
 
-    // ── 3 FX cards (single page: Flanger, Chorus, Tremolo) ──
+    // ── 3 FX cards (single page: Flanger, Delay, Reverb) ──
     // Canvas: 1024×600, title row ~50px
     const int CARD_Y   = 50;
     const int CARD_H   = LCD_V_RES - CARD_Y - 8;   // ~542px
@@ -826,7 +826,7 @@ static void create_fx_screen(void) {
 }
 
 static void update_fx_screen(void) {
-    // cell0=Flanger(enc0), cell1=Chorus(enc1), cell2=Tremolo(enc2)
+    // cell0=Flanger(enc0), cell1=Delay(enc1), cell2=Reverb(enc2)
     static const int enc_map[3] = {0, 1, 2};
 
     for (int cell = 0; cell < 3; cell++) {

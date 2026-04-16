@@ -33,8 +33,8 @@
 // ENCODER IDs (MSG_ENCODER, Byte 2)
 // =============================================================================
 #define ENC_FLANGER     0x00    // DFRobot encoder #0 — Flanger mix 0-127
-#define ENC_CHORUS      0x01    // DFRobot encoder #1 — Chorus mix 0-127
-#define ENC_TREMOLO     0x02    // DFRobot encoder #2 — Tremolo depth 0-127
+#define ENC_DELAY       0x01    // DFRobot encoder #1 — Delay mix 0-127
+#define ENC_REVERB      0x02    // DFRobot encoder #2 — Reverb mix 0-127
 #define ENC_BPM         0x03    // DFRobot encoder #3 — BPM (delta)
 
 // =============================================================================
@@ -65,8 +65,8 @@
 // FX IDs (MSG_FX, Byte 2)
 // =============================================================================
 #define FX_ENC0_MUTE    0x00    // Encoder 0 (Flanger) mute: value 0/1
-#define FX_ENC1_MUTE    0x01    // Encoder 1 (Chorus) mute:  value 0/1
-#define FX_ENC2_MUTE    0x02    // Encoder 2 (Tremolo) mute:  value 0/1
+#define FX_ENC1_MUTE    0x01    // Encoder 1 (Delay) mute:  value 0/1
+#define FX_ENC2_MUTE    0x02    // Encoder 2 (Reverb) mute:  value 0/1
 #define FX_POT0_MUTE    0x03    // Pot P2 mute: value 0/1
 #define FX_POT1_MUTE    0x04    // Pot P3 (Res) mute: value 0/1
 #define FX_POT2_MUTE    0x05    // Pot P4 (Drive) mute: value 0/1

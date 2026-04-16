@@ -189,39 +189,43 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
                   enc_id, value, muted, active, mix, fullSend);
 
     switch (enc_id) {
-        case 0: // Flanger
+        case 0: // Flanger — slow sweep, classic jet sound
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
                 if (fullSend) {
-                    sendJson("{\"cmd\":\"setFlangerRate\",\"value\":0.4}");
-                    sendJson("{\"cmd\":\"setFlangerDepth\",\"value\":0.8}");
-                    sendJson("{\"cmd\":\"setFlangerFeedback\",\"value\":0.7}");
+                    sendJson("{\"cmd\":\"setFlangerRate\",\"value\":0.2}");
+                    sendJson("{\"cmd\":\"setFlangerDepth\",\"value\":0.7}");
+                    sendJson("{\"cmd\":\"setFlangerFeedback\",\"value\":0.6}");
                 }
                 snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerMix\",\"value\":%.3f}", mix);
                 sendJson(buf);
             }
             break;
-        case 1: // Chorus
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusActive\",\"value\":%d}", active ? 1 : 0);
+        case 1: // Delay — unmistakable echo effect
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setDelayActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
                 if (fullSend) {
-                    sendJson("{\"cmd\":\"setChorusRate\",\"value\":1.5}");
-                    sendJson("{\"cmd\":\"setChorusDepth\",\"value\":0.6}");
-                    sendJson("{\"cmd\":\"setChorusStereo\",\"value\":1}");
+                    sendJson("{\"cmd\":\"setDelayTime\",\"value\":300}");
+                    sendJson("{\"cmd\":\"setDelayFeedback\",\"value\":0.45}");
+                    sendJson("{\"cmd\":\"setDelayStereo\",\"value\":1}");
                 }
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusMix\",\"value\":%.3f}", mix);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setDelayMix\",\"value\":%.3f}", mix);
                 sendJson(buf);
             }
             break;
-        case 2: // Tremolo
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloActive\",\"value\":%d}", active ? 1 : 0);
+        case 2: // Reverb — unmistakable room/hall effect
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setReverbActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloDepth\",\"value\":%.3f}", mix);
-                sendJson(buf);
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloRate\",\"value\":%.1f}", 3.0f + mix * 7.0f);
+                if (fullSend) {
+                    sendJson("{\"cmd\":\"setReverbFeedback\",\"value\":0.7}");
+                    sendJson("{\"cmd\":\"setReverbLpFreq\",\"value\":5000}");
+                    sendJson("{\"cmd\":\"setEarlyRefActive\",\"value\":1}");
+                    sendJson("{\"cmd\":\"setEarlyRefMix\",\"value\":0.3}");
+                }
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setReverbMix\",\"value\":%.3f}", mix);
                 sendJson(buf);
             }
             break;
@@ -259,8 +263,10 @@ void udp_request_master_sync(void) {
     udp_send_get_pattern(p4.current_pattern);
     sendJson("{\"cmd\":\"getTrackVolumes\"}");
 
-    // Reset FX to safe defaults
+    // Reset ALL FX to safe defaults
     sendJson("{\"cmd\":\"setFlangerActive\",\"value\":0}");
+    sendJson("{\"cmd\":\"setDelayActive\",\"value\":0}");
+    sendJson("{\"cmd\":\"setReverbActive\",\"value\":0}");
     sendJson("{\"cmd\":\"setChorusActive\",\"value\":0}");
     sendJson("{\"cmd\":\"setTremoloActive\",\"value\":0}");
     sendJson("{\"cmd\":\"setFilter\",\"value\":0}");

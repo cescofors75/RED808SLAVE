@@ -205,8 +205,8 @@ const char* const byteButtonActionNames[] = {
     "Go BUTTONS",        // BB_ACTION_SCREEN_PERFORMANCE
     "Go Volumes",        // BB_ACTION_SCREEN_VOLUMES
     "FX Mute FLANGER",   // BB_ACTION_FX_CLEAN
-    "FX Mute CHORUS",    // BB_ACTION_FX_SPACE
-    "FX Mute TREMOLO",   // BB_ACTION_FX_ACID
+    "FX Mute DELAY",     // BB_ACTION_FX_SPACE
+    "FX Mute REVERB",    // BB_ACTION_FX_ACID
     "FX Mute ALL",       // BB_ACTION_FX_DESTROY
     "FX Target --",      // BB_ACTION_FX_TARGET_PREV
     "FX Target ++",      // BB_ACTION_FX_TARGET_NEXT
@@ -227,8 +227,8 @@ uint8_t byteButtonActionMap[BYTEBUTTON_TOTAL_BUTTONS] = {
     BB_ACTION_PATTERN_PREV,
     BB_ACTION_PATTERN_NEXT,
     BB_ACTION_FX_CLEAN,       // 1-5: FX Mute FLANGER
-    BB_ACTION_FX_SPACE,       // 1-6: FX Mute CHORUS
-    BB_ACTION_FX_ACID,        // 1-7: FX Mute TREMOLO
+    BB_ACTION_FX_SPACE,       // 1-6: FX Mute DELAY
+    BB_ACTION_FX_ACID,        // 1-7: FX Mute REVERB
     BB_ACTION_FX_DESTROY,     // 1-8: FX Mute ALL
     // BB2 buttons 1-8 (navigation + BPM)
     BB_ACTION_SCREEN_LIVE,
@@ -554,8 +554,8 @@ static void requestMasterSync(bool requestState) {
 
         // Reset all encoder FX to OFF on connection (clean slate)
         { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerActive"; d["value"] = 0; sendUDPCommand(d); }
-        { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusActive";  d["value"] = 0; sendUDPCommand(d); }
-        { JsonDocument d(&sramAllocator); d["cmd"] = "setTremoloActive"; d["value"] = 0; sendUDPCommand(d); }
+        { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayActive";   d["value"] = 0; sendUDPCommand(d); }
+        { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbActive";  d["value"] = 0; sendUDPCommand(d); }
         { JsonDocument d(&sramAllocator); d["cmd"] = "setFilter";        d["value"] = 0; sendUDPCommand(d); }
         { JsonDocument d(&sramAllocator); d["cmd"] = "setDistortion";    d["value"] = 0.0f; sendUDPCommand(d); }
         // Also reset via UART bridge (works when S3_WIFI_ENABLED=0)
@@ -1298,25 +1298,26 @@ void sendFilterUDP(int track, int fxType) {
             }
             break;
         }
-        case FILTER_CHORUS: {
-            mix = (float)f.delayAmount / 127.0f;   // reuse delayAmount for Chorus
+        case FILTER_DELAY: {
+            mix = (float)f.delayAmount / 127.0f;   // reuse delayAmount for Delay
             activating = (f.delayAmount > 0);
-            { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
+            { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
             if (activating) {
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusRate";   d["value"] = 1.5f;  sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusDepth";  d["value"] = 0.5f;  sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusMix";    d["value"] = mix;   sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusStereo"; d["value"] = 1;     sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayTime";    d["value"] = 300;   sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayFeedback";d["value"] = 0.45f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayMix";     d["value"] = mix;   sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayStereo";  d["value"] = 1;     sendUDPCommand(d); }
             }
             break;
         }
-        case FILTER_TREMOLO: {
-            mix = (float)f.compAmount / 127.0f;     // reuse compAmount for Tremolo
+        case FILTER_REVERB: {
+            mix = (float)f.compAmount / 127.0f;     // reuse compAmount for Reverb
             activating = (f.compAmount > 0);
-            { JsonDocument d(&sramAllocator); d["cmd"] = "setTremoloActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
+            { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
             if (activating) {
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setTremoloDepth"; d["value"] = mix;                    sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setTremoloRate";  d["value"] = 2.0f + mix * 6.0f;      sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbFeedback"; d["value"] = 0.7f;   sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbLpFreq";   d["value"] = 5000;   sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbMix";      d["value"] = mix;    sendUDPCommand(d); }
             }
             break;
         }
@@ -2098,7 +2099,7 @@ static void syncFxEncoderLED(int lane) {
 
 // =============================================================================
 // FX LANE MUTE TOGGLE (used by ByteButton + can be called from anywhere)
-// lane: 0=Flanger, 1=Chorus, 2=Tremolo
+// lane: 0=Flanger, 1=Delay, 2=Reverb
 // =============================================================================
 static void toggleDfFxMute(int lane) {
     if (lane < 0 || lane > 2) return;
@@ -2120,7 +2121,7 @@ static void toggleDfFxMute(int lane) {
     uart_bridge_send_encoder_mute(lane, muted);
     syncFxEncoderLED(lane);
     RED808_LOG_PRINTF("[FX] Lane %d (%s) %s\n", lane,
-        lane==0?"Flanger":lane==1?"Chorus":"Tremolo", muted?"MUTED":"UNMUTED");
+        lane==0?"Flanger":lane==1?"Delay":"Reverb", muted?"MUTED":"UNMUTED");
 }
 
 // =============================================================================
@@ -2131,12 +2132,12 @@ void handleDFRobotEncoders() {
     static unsigned long lastBtnMs[DFROBOT_ENCODER_COUNT] = {};
     static int laneStoredValue[3] = {0, 0, 0};
 
-    // Maps DFRobot encoder index → FX lane: enc1→Flanger(0), enc2→Chorus(1), enc3→Tremolo(2)
+    // Maps DFRobot encoder index → FX lane: enc1→Flanger(0), enc2→Delay(1), enc3→Reverb(2)
     // Encoder 0 is BPM (no lane).
     auto encToLane = [](int enc) -> int {
         if (enc == 1) return 0;  // Flanger
-        if (enc == 2) return 1;  // Chorus
-        if (enc == 3) return 2;  // Tremolo
+        if (enc == 2) return 1;  // Delay
+        if (enc == 3) return 2;  // Reverb
         return -1;
     };
 
@@ -2149,10 +2150,10 @@ void handleDFRobotEncoders() {
     auto sendFxLane = [&](int lane, int value, bool muted) {
         int effective = muted ? 0 : constrain(value, 0, 127);
 
-        // Update local state: lane 0=Flanger, 1=Chorus, 2=Tremolo
+        // Update local state: lane 0=Flanger, 1=Delay, 2=Reverb
         if (lane == 0)      masterFilter.flangerAmount = (uint8_t)effective;
-        else if (lane == 1) masterFilter.delayAmount   = (uint8_t)effective;  // reuse delayAmount for Chorus
-        else                masterFilter.compAmount    = (uint8_t)effective;  // reuse compAmount for Tremolo
+        else if (lane == 1) masterFilter.delayAmount   = (uint8_t)effective;  // reuse delayAmount for Delay
+        else                masterFilter.compAmount    = (uint8_t)effective;  // reuse compAmount for Reverb
 
         syncMasterEnabled();
         dfFxParamMode[lane] = 0;
@@ -2210,7 +2211,7 @@ void handleDFRobotEncoders() {
             }
         }
         else {
-            // DFRobot #1/#2/#3: FX lanes (Flanger / Chorus / Tremolo)
+            // DFRobot #1/#2/#3: FX lanes (Flanger / Delay / Reverb)
             int lane = encToLane(i);
             if (lane < 0) continue;
 
@@ -2349,10 +2350,10 @@ static void runByteButtonAction(uint8_t action, int moduleIdx) {
             toggleDfFxMute(0);  // Flanger
             break;
         case BB_ACTION_FX_SPACE:
-            toggleDfFxMute(2);  // Tremolo
+            toggleDfFxMute(1);  // Delay
             break;
         case BB_ACTION_FX_ACID:
-            toggleDfFxMute(1);  // Chorus
+            toggleDfFxMute(2);  // Reverb
             break;
         case BB_ACTION_FX_DESTROY:
             {
@@ -2721,6 +2722,15 @@ static void encoder_task(void* arg) {
     (void)arg;
     TickType_t last_wake = xTaskGetTickCount();
     while (true) {
+        // Periodic alive check
+        {
+            static uint32_t encLoops = 0;
+            encLoops++;
+            if (encLoops % 500 == 0) {
+                RED808_LOG_PRINTF("[ENC_TASK] alive loops=%u stack=%u\n",
+                    encLoops, (unsigned)uxTaskGetStackHighWaterMark(NULL));
+            }
+        }
         handleM5Encoders();
         taskYIELD();  // let loop() process touch triggers between I2C batches
         handleDFRobotEncoders();

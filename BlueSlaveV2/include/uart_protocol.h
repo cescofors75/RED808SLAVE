@@ -31,8 +31,8 @@
 
 // ENCODER IDs
 #define ENC_FLANGER     0x00
-#define ENC_CHORUS      0x01
-#define ENC_TREMOLO     0x02
+#define ENC_DELAY       0x01
+#define ENC_REVERB      0x02
 #define ENC_BPM         0x03
 
 // POT IDs

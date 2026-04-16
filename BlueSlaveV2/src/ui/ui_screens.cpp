@@ -2213,8 +2213,8 @@ void ui_update_filters() {}
 static uint8_t filter_get_amount(const TrackFilter& filter, int fxIndex) {
     switch (fxIndex) {
         case FILTER_FLANGER: return filter.delayAmount;
-        case FILTER_CHORUS: return filter.delayAmount;   // reuse for Chorus
-        case FILTER_TREMOLO: return filter.compAmount;    // reuse for Tremolo
+        case FILTER_DELAY: return filter.delayAmount;   // reuse for Delay
+        case FILTER_REVERB: return filter.compAmount;    // reuse for Reverb
         default: return 0;
     }
 }
@@ -2222,8 +2222,8 @@ static uint8_t filter_get_amount(const TrackFilter& filter, int fxIndex) {
 static void filter_set_amount(TrackFilter& filter, int fxIndex, uint8_t value) {
     switch (fxIndex) {
         case FILTER_FLANGER: filter.delayAmount = value; break;
-        case FILTER_CHORUS: filter.delayAmount = value; break;   // reuse for Chorus
-        case FILTER_TREMOLO: filter.compAmount = value; break;    // reuse for Tremolo
+        case FILTER_DELAY: filter.delayAmount = value; break;   // reuse for Delay
+        case FILTER_REVERB: filter.compAmount = value; break;    // reuse for Reverb
         default: break;
     }
 }
@@ -2387,7 +2387,7 @@ static void filter_response_mode_cb(lv_event_t* e) {
 }
 
 void ui_create_filters_screen() {
-    static const char* fx_names[] = {"FLANGER", "CHORUS", "TREMOLO"};
+    static const char* fx_names[] = {"FLANGER", "DELAY", "REVERB"};
     static const lv_color_t fx_colors[] = {
         lv_color_hex(0x58A6FF),
         lv_color_hex(0x39D2C0),
@@ -2461,7 +2461,7 @@ void ui_create_filters_screen() {
     lv_obj_set_style_pad_all(compact_panel, 0, 0);
     lv_obj_move_foreground(compact_panel);
 
-    static const char* laneNames[] = {"FLANGER", "CHORUS", "TREMOLO", "---", "RESONANCE", "DRIVE"};
+    static const char* laneNames[] = {"FLANGER", "DELAY", "REVERB", "---", "RESONANCE", "DRIVE"};
     static const char* laneSources[] = {"DF-1", "DF-2", "DF-3", "P2", "P3", "P4"};
     static const lv_color_t laneColors[] = {
         lv_color_hex(0x58A6FF),

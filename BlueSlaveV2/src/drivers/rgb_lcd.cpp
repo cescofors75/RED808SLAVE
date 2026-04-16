@@ -78,6 +78,12 @@ esp_lcd_panel_handle_t rgb_lcd_init() {
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
 
+    // Fix horizontal shift: let panel PLL lock onto HSYNC/VSYNC, then restart
+    // RGB transmission so the pixel counter is guaranteed to be in sync.
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_lcd_rgb_panel_restart(panel_handle);
+    vTaskDelay(pdMS_TO_TICKS(20));
+
     ESP_LOGI(TAG, "RGB LCD initialized: %dx%d @ %dMHz, bounce=%d px",
              SCREEN_WIDTH, SCREEN_HEIGHT, LCD_PCLK_HZ / 1000000, LCD_BOUNCE_BUF);
 
