@@ -305,6 +305,8 @@ static void grid_theme_cb(lv_event_t* e) {
     int next = ((int)currentTheme + 1) % THEME_COUNT;
     p4.theme = next;
     ui_theme_apply((VisualTheme)next);
+    // Sync theme to S3
+    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_THEME_NEXT, (uint8_t)next);
 }
 
 // Helper: styled control button
@@ -893,7 +895,6 @@ static lv_obj_t* seq_step_btns[16][16]  = {};
 static lv_obj_t* seq_track_labels[16]   = {};
 static lv_obj_t* seq_mute_btns[16]      = {};
 static lv_obj_t* seq_solo_btns[16]      = {};
-static lv_obj_t* seq_mute_labels[16]    = {};  // unused but kept for compat
 static lv_obj_t* seq_solo_labels[16]    = {};
 static lv_obj_t* seq_ruler_labels[16]   = {};  // beat/step number ruler
 static lv_obj_t* seq_beat_bg[4]         = {};  // beat group shading panels
@@ -919,8 +920,6 @@ static const int SEQ_SOLO_X     = 960;  // solo button X
 static const int SEQ_SOLO_W     = 32;   // solo button width
 static const int SEQ_STATUS_Y   = 586;  // bottom status bar Y
 static const int SEQ_STATUS_H   = 14;   // bottom status bar height
-// Derived: grid ends at 62 + 16*54 + 15*1 + 3*5 = 62+864+15+15 = 956
-static const int SEQ_Y_END      = 596;  // legacy alias (unused)
 
 static void seq_step_cb(lv_event_t* e) {
     int data = (int)(intptr_t)lv_event_get_user_data(e);
@@ -1072,7 +1071,6 @@ static void create_sequencer_screen(void) {
         lv_obj_set_style_text_align(seq_track_labels[t], LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_line_space(seq_track_labels[t], 1, 0);
         lv_obj_center(seq_track_labels[t]);
-        seq_mute_labels[t] = NULL;
 
         // ── 16 step cells ──
         for (int s = 0; s < 16; s++) {
@@ -1775,7 +1773,7 @@ static void ui_reload_themed_screens(void) {
     for (int i = 0; i < 16; i++) {
         for (int j = 0; j < 16; j++) seq_step_btns[i][j] = NULL;
         seq_track_labels[i] = NULL; seq_mute_btns[i] = NULL;
-        seq_solo_btns[i] = NULL; seq_mute_labels[i] = NULL;
+        seq_solo_btns[i] = NULL;
         seq_solo_labels[i] = NULL;
         seq_ruler_labels[i] = NULL;
     }
@@ -1837,10 +1835,11 @@ void ui_process_pad_queue(void) {
     while (t != h) {
         uint8_t pad = s_pad_q[t & 0x1F];
         t++;
+        // Notify S3 via UART first (fast, 5 bytes)
+        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_PAD_TAP, pad);
+        // Then send UDP to master if connected
         if (p4.wifi_connected || p4.master_connected) {
             udp_send_trigger(pad, 127);
-        } else {
-            uart_send_to_s3(MSG_TOUCH_CMD, TCMD_PAD_TAP, pad);
         }
     }
     s_pad_qt.store(t, std::memory_order_relaxed);

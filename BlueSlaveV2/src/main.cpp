@@ -171,7 +171,7 @@ unsigned long liveScreenEnteredMs = 0;
 static constexpr unsigned long LIVE_TOUCH_GUARD_MS = 150;
 static constexpr unsigned long TOUCH_RELEASE_DEBOUNCE_MS = 16;  // avoid false releases on fast GT911 cache gaps
 static constexpr unsigned long LIVE_PAD_REPEAT_INTERVAL_MS = 75;
-static constexpr unsigned long LIVE_PAD_FLASH_MS = 25;
+static constexpr unsigned long LIVE_PAD_FLASH_MS = 120;
 static unsigned long livePadReleaseMs[Config::MAX_SAMPLES] = {}; // when each pad last went untouched
 
 // Timing
@@ -467,6 +467,7 @@ void handleP4TouchCommand(uint8_t cmdId, uint8_t value) {
     switch (cmdId) {
         case TCMD_PAD_TAP:
             if (value < Config::MAX_SAMPLES) {
+                livePadFlashUntilMs[value] = millis() + LIVE_PAD_FLASH_MS;
                 sendLivePadTrigger(value, 100);
             }
             break;
@@ -480,7 +481,7 @@ void handleP4TouchCommand(uint8_t cmdId, uint8_t value) {
             navigateToScreen((Screen)value);
             break;
         case TCMD_THEME_NEXT:
-            pendingThemeIdx = (currentTheme + 1) % THEME_COUNT;
+            pendingThemeIdx = (value < THEME_COUNT) ? value : ((currentTheme + 1) % THEME_COUNT);
             break;
         case TCMD_SD_MOUNT:
             handleP4SdMount();
