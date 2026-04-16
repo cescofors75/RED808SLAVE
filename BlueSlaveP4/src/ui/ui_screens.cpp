@@ -33,7 +33,7 @@ lv_obj_t* scr_live = NULL;
 lv_obj_t* scr_sequencer = NULL;
 lv_obj_t* scr_fx = NULL;
 lv_obj_t* scr_volumes = NULL;
-lv_obj_t* scr_settings = NULL;
+lv_obj_t* scr_sdcard = NULL;
 lv_obj_t* scr_performance = NULL;
 
 // Header widgets
@@ -1414,145 +1414,257 @@ static void update_volumes_screen(void) {
 }
 
 // =============================================================================
-// SETTINGS SCREEN — Device info + Visual Theme selector (syncs with S3)
+// SD CARD SCREEN — Remote browse S3's SD card via UART
 // =============================================================================
-static void settings_theme_cb(lv_event_t* e) {
+
+// SD screen widgets
+static lv_obj_t* sd_left_panel  = NULL;
+static lv_obj_t* sd_right_panel = NULL;
+static lv_obj_t* sd_status_lbl  = NULL;
+static lv_obj_t* sd_path_lbl    = NULL;
+static lv_obj_t* sd_file_list   = NULL;
+static lv_obj_t* sd_selected_lbl = NULL;
+static lv_obj_t* sd_pad_btns[16] = {};
+static lv_obj_t* sd_load_btn    = NULL;
+static lv_obj_t* sd_load_lbl    = NULL;
+
+// Forward declarations
+static void sd_refresh_ui(void);
+
+static void sd_file_btn_cb(lv_event_t* e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx < 0 || idx >= THEME_COUNT) return;
-    p4.theme = idx;
-    ui_theme_apply((VisualTheme)idx);
-    // Sync theme to S3
-    uart_send_to_s3(MSG_SYSTEM, SYS_THEME, (uint8_t)idx);
+    if (idx < 0 || idx >= p4sd.entry_count) return;
+    uart_send_sd_select((uint8_t)idx);
 }
 
-static void create_settings_screen(void) {
-    scr_settings = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr_settings, RED808_BG, 0);
-    lv_obj_clear_flag(scr_settings, LV_OBJ_FLAG_SCROLLABLE);
-    ui_create_header(scr_settings);
+static void sd_back_btn_cb(lv_event_t* e) {
+    (void)e;
+    uart_send_sd_back();
+}
 
-    // ── DEVICE INFO Card ──
-    lv_obj_t* info_card = lv_obj_create(scr_settings);
-    lv_obj_set_size(info_card, UI_W - 24, 96);
-    lv_obj_set_pos(info_card, 12, 50);
-    lv_obj_clear_flag(info_card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(info_card, RED808_PANEL, 0);
-    lv_obj_set_style_bg_opa(info_card, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(info_card, 12, 0);
-    lv_obj_set_style_border_color(info_card, RED808_BORDER, 0);
-    lv_obj_set_style_border_width(info_card, 1, 0);
-    lv_obj_set_style_pad_all(info_card, 14, 0);
-
-    lv_obj_t* info_icon = lv_label_create(info_card);
-    lv_label_set_text(info_icon, LV_SYMBOL_SETTINGS " DEVICE");
-    lv_obj_set_style_text_font(info_icon, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(info_icon, RED808_INFO, 0);
-    lv_obj_set_pos(info_icon, 0, 0);
-
-    lv_obj_t* info_left = lv_label_create(info_card);
-    lv_label_set_text(info_left,
-        "RED808 V6 — P4 Visual Beast\n"
-        "Guition ESP32-P4 JC1060P470C");
-    lv_obj_set_style_text_font(info_left, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(info_left, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(info_left, 16, 32);
-    lv_obj_set_style_text_line_space(info_left, 6, 0);
-
-    lv_obj_t* info_right = lv_label_create(info_card);
-    lv_label_set_text(info_right,
-        "1024x600 MIPI-DSI\n"
-        "WiFi via ESP32-C6 SDIO");
-    lv_obj_set_style_text_font(info_right, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(info_right, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(info_right, UI_W / 2 - 12, 32);
-    lv_obj_set_style_text_line_space(info_right, 6, 0);
-
-    // ── VISUAL THEME SELECTOR ──
-    lv_obj_t* theme_card = lv_obj_create(scr_settings);
-    lv_obj_set_size(theme_card, UI_W - 24, UI_H - 162);
-    lv_obj_set_pos(theme_card, 12, 156);
-    lv_obj_clear_flag(theme_card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(theme_card, RED808_PANEL, 0);
-    lv_obj_set_style_bg_opa(theme_card, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(theme_card, 12, 0);
-    lv_obj_set_style_border_color(theme_card, RED808_BORDER, 0);
-    lv_obj_set_style_border_width(theme_card, 1, 0);
-    lv_obj_set_style_pad_all(theme_card, 14, 0);
-
-    lv_obj_t* theme_title = lv_label_create(theme_card);
-    lv_label_set_text(theme_title, LV_SYMBOL_EYE_OPEN " VISUAL THEME");
-    lv_obj_set_style_text_font(theme_title, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(theme_title, RED808_ACCENT, 0);
-    lv_obj_set_pos(theme_title, 0, 0);
-
-    // Theme buttons — 3 per row × 2 rows (portrait: 6 themes en 2 filas)
-    static const uint32_t btn_colors[THEME_COUNT] = {
-        0xFF4444, 0x4A9EFF, 0x39FF14, 0xFF6B35, 0xFF00AA, 0x999999
-    };
-    static const int BTN_COLS = 3;
-    static const int BTN_ROWS = (THEME_COUNT + BTN_COLS - 1) / BTN_COLS;
-    int card_inner_w = UI_W - 24 - 28;
-    int card_inner_h = UI_H - 162 - 28;
-    int btn_gap = 10;
-    int btn_w = (card_inner_w - (BTN_COLS - 1) * btn_gap) / BTN_COLS;
-    int btn_h = (card_inner_h - 40 - (BTN_ROWS - 1) * btn_gap) / BTN_ROWS;
-    if (btn_h > 200) btn_h = 200;
-
-    for (int i = 0; i < THEME_COUNT; i++) {
-        int col = i % BTN_COLS;
-        int row = i / BTN_COLS;
-        lv_obj_t* btn = lv_btn_create(theme_card);
-        lv_obj_set_size(btn, btn_w, btn_h);
-        lv_obj_set_pos(btn, col * (btn_w + btn_gap), 36 + row * (btn_h + btn_gap));
-        lv_obj_set_style_bg_color(btn, lv_color_hex(theme_presets[i].bg), 0);
-        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(btn, 12, 0);
-        lv_obj_set_style_border_width(btn, (i == currentTheme) ? 3 : 1, 0);
-        lv_obj_set_style_border_color(btn, lv_color_hex(btn_colors[i]), 0);
-        lv_obj_set_style_shadow_width(btn, 12, 0);
-        lv_obj_set_style_shadow_color(btn, lv_color_hex(btn_colors[i]), 0);
-        lv_obj_set_style_shadow_opa(btn, (i == currentTheme) ? LV_OPA_80 : LV_OPA_30, 0);
-
-        // Color stripe at top
-        lv_obj_t* stripe = lv_obj_create(btn);
-        lv_obj_set_size(stripe, btn_w - 16, 6);
-        lv_obj_align(stripe, LV_ALIGN_TOP_MID, 0, 8);
-        lv_obj_clear_flag(stripe, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(stripe, lv_color_hex(btn_colors[i]), 0);
-        lv_obj_set_style_bg_opa(stripe, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(stripe, 3, 0);
-        lv_obj_set_style_border_width(stripe, 0, 0);
-
-        // 4 track color dots
-        for (int c = 0; c < 4; c++) {
-            lv_obj_t* dot = lv_obj_create(btn);
-            lv_obj_set_size(dot, 18, 18);
-            lv_obj_set_pos(dot, (btn_w - 4 * 22) / 2 + c * 22, 28);
-            lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_set_style_bg_color(dot, lv_color_hex(theme_presets[i].track_colors[c * 4]), 0);
-            lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-            lv_obj_set_style_border_width(dot, 0, 0);
+static void sd_pad_btn_cb(lv_event_t* e) {
+    int pad = (int)(intptr_t)lv_event_get_user_data(e);
+    if (pad < 0 || pad >= 16) return;
+    p4sd.selected_pad = pad;
+    // Update pad button highlights
+    for (int i = 0; i < 16; i++) {
+        if (sd_pad_btns[i]) {
+            lv_obj_set_style_bg_color(sd_pad_btns[i],
+                i == pad ? RED808_ACCENT : lv_color_hex(0x222233), 0);
         }
-
-        // Theme name
-        lv_obj_t* lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, theme_presets[i].name);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(theme_presets[i].text), 0);
-        lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -10);
-
-        // Active indicator
-        if (i == currentTheme) {
-            lv_obj_t* check = lv_label_create(btn);
-            lv_label_set_text(check, LV_SYMBOL_OK);
-            lv_obj_set_style_text_font(check, &lv_font_montserrat_20, 0);
-            lv_obj_set_style_text_color(check, lv_color_hex(btn_colors[i]), 0);
-            lv_obj_align(check, LV_ALIGN_BOTTOM_MID, 0, -30);
-        }
-
-        lv_obj_add_event_cb(btn, settings_theme_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
     }
+}
+
+static void sd_load_btn_cb(lv_event_t* e) {
+    (void)e;
+    if (p4sd.selected_file[0] == '\0') return;
+    uart_send_sd_load((uint8_t)p4sd.selected_pad);
+}
+
+static void sd_refresh_ui(void) {
+    if (!sd_file_list) return;
+    lv_obj_clean(sd_file_list);
+
+    // Update status
+    if (sd_status_lbl) {
+        lv_label_set_text(sd_status_lbl, p4sd.mounted ? "READY" : "NO SD CARD");
+        lv_obj_set_style_text_color(sd_status_lbl,
+            p4sd.mounted ? RED808_SUCCESS : RED808_WARNING, 0);
+    }
+    // Update path
+    if (sd_path_lbl) lv_label_set_text(sd_path_lbl, p4sd.path);
+
+    // Update selected file
+    if (sd_selected_lbl) {
+        if (p4sd.selected_file[0])
+            lv_label_set_text(sd_selected_lbl, p4sd.selected_file);
+        else
+            lv_label_set_text(sd_selected_lbl, "");
+    }
+    // Enable/disable LOAD button
+    if (sd_load_btn) {
+        if (p4sd.selected_file[0])
+            lv_obj_clear_state(sd_load_btn, LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(sd_load_btn, LV_STATE_DISABLED);
+    }
+
+    if (!p4sd.mounted) {
+        lv_obj_t* lbl = lv_label_create(sd_file_list);
+        lv_label_set_text(lbl, "SD NOT MOUNTED");
+        lv_obj_set_style_text_color(lbl, RED808_ACCENT, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_20, 0);
+        return;
+    }
+
+    // "Back" button if not root
+    if (strcmp(p4sd.path, "/") != 0 && p4sd.path[0] != '\0') {
+        lv_obj_t* back_btn = lv_btn_create(sd_file_list);
+        lv_obj_set_size(back_btn, UI_W - 60, 44);
+        lv_obj_set_style_bg_color(back_btn, lv_color_hex(0x333344), 0);
+        lv_obj_set_style_radius(back_btn, 6, 0);
+        lv_obj_t* back_lbl = lv_label_create(back_btn);
+        lv_label_set_text(back_lbl, LV_SYMBOL_LEFT "  .. (back)");
+        lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(back_lbl, lv_color_hex(0xCCCCCC), 0);
+        lv_obj_center(back_lbl);
+        lv_obj_add_event_cb(back_btn, sd_back_btn_cb, LV_EVENT_CLICKED, NULL);
+    }
+
+    // File/directory entries
+    for (int i = 0; i < p4sd.entry_count; i++) {
+        lv_obj_t* btn = lv_btn_create(sd_file_list);
+        lv_obj_set_size(btn, UI_W - 60, 44);
+        lv_obj_set_style_radius(btn, 6, 0);
+
+        bool is_dir = p4sd.entries[i].is_dir;
+        lv_obj_set_style_bg_color(btn, is_dir ? lv_color_hex(0x1A3A5C) : lv_color_hex(0x1A2A1A), 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x446688), LV_STATE_PRESSED);
+
+        lv_obj_t* lbl = lv_label_create(btn);
+        char display[64];
+        snprintf(display, sizeof(display), is_dir ? LV_SYMBOL_DIRECTORY "  %s" : LV_SYMBOL_AUDIO "  %s",
+                 p4sd.entries[i].name);
+        lv_label_set_text(lbl, display);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(lbl, is_dir ? RED808_CYAN : RED808_SUCCESS, 0);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
+
+        lv_obj_add_event_cb(btn, sd_file_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    }
+
+    if (p4sd.list_complete && p4sd.entry_count == 0) {
+        lv_obj_t* lbl = lv_label_create(sd_file_list);
+        lv_label_set_text(lbl, "No files found (.wav)");
+        lv_obj_set_style_text_color(lbl, RED808_TEXT_DIM, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+    }
+}
+
+static void create_sdcard_screen(void) {
+    scr_sdcard = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr_sdcard, RED808_BG, 0);
+    lv_obj_clear_flag(scr_sdcard, LV_OBJ_FLAG_SCROLLABLE);
+    ui_create_header(scr_sdcard);
+
+    // ── Left Panel: file browser ──
+    sd_left_panel = lv_obj_create(scr_sdcard);
+    lv_obj_set_size(sd_left_panel, UI_W - 24, 440);
+    lv_obj_set_pos(sd_left_panel, 12, 54);
+    lv_obj_set_style_bg_color(sd_left_panel, lv_color_hex(0x0D1520), 0);
+    lv_obj_set_style_border_color(sd_left_panel, RED808_INFO, 0);
+    lv_obj_set_style_border_width(sd_left_panel, 1, 0);
+    lv_obj_set_style_radius(sd_left_panel, 8, 0);
+    lv_obj_set_style_pad_all(sd_left_panel, 8, 0);
+    lv_obj_clear_flag(sd_left_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Title
+    lv_obj_t* title_lbl = lv_label_create(sd_left_panel);
+    lv_label_set_text(title_lbl, LV_SYMBOL_DRIVE "  SD CARD BROWSER");
+    lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(title_lbl, RED808_CYAN, 0);
+    lv_obj_set_pos(title_lbl, 8, 4);
+
+    // Status label
+    sd_status_lbl = lv_label_create(sd_left_panel);
+    lv_label_set_text(sd_status_lbl, "CONNECTING...");
+    lv_obj_set_style_text_font(sd_status_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(sd_status_lbl, RED808_WARNING, 0);
+    lv_obj_set_pos(sd_status_lbl, 300, 8);
+
+    // Path label
+    sd_path_lbl = lv_label_create(sd_left_panel);
+    lv_label_set_text(sd_path_lbl, "/");
+    lv_obj_set_style_text_font(sd_path_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(sd_path_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(sd_path_lbl, 8, 30);
+
+    // Scrollable file list
+    sd_file_list = lv_obj_create(sd_left_panel);
+    lv_obj_set_size(sd_file_list, UI_W - 48, 350);
+    lv_obj_set_pos(sd_file_list, 4, 54);
+    lv_obj_set_style_bg_opa(sd_file_list, LV_OPA_0, 0);
+    lv_obj_set_style_border_width(sd_file_list, 0, 0);
+    lv_obj_set_style_pad_row(sd_file_list, 4, 0);
+    lv_obj_set_style_pad_all(sd_file_list, 2, 0);
+    lv_obj_set_flex_flow(sd_file_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(sd_file_list, LV_DIR_VER);
+    lv_obj_add_flag(sd_file_list, LV_OBJ_FLAG_SCROLLABLE);
+
+    // ── Right Panel: pad assignment ──
+    sd_right_panel = lv_obj_create(scr_sdcard);
+    lv_obj_set_size(sd_right_panel, UI_W - 24, 440);
+    lv_obj_set_pos(sd_right_panel, 12, 504);
+    lv_obj_set_style_bg_color(sd_right_panel, lv_color_hex(0x0D1520), 0);
+    lv_obj_set_style_border_color(sd_right_panel, RED808_ACCENT, 0);
+    lv_obj_set_style_border_width(sd_right_panel, 1, 0);
+    lv_obj_set_style_radius(sd_right_panel, 8, 0);
+    lv_obj_set_style_pad_all(sd_right_panel, 8, 0);
+    lv_obj_clear_flag(sd_right_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    // "ASSIGN TO PAD" title
+    lv_obj_t* assign_lbl = lv_label_create(sd_right_panel);
+    lv_label_set_text(assign_lbl, "ASSIGN TO PAD");
+    lv_obj_set_style_text_font(assign_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(assign_lbl, RED808_ACCENT, 0);
+    lv_obj_set_pos(assign_lbl, 8, 4);
+
+    // 4x4 pad grid
+    int pad_w = (UI_W - 24 - 16 - 3 * 6) / 4;  // fit 4 cols
+    int pad_h = 50, pad_gap = 6;
+    int px_start = 16, py_start = 36;
+    for (int i = 0; i < 16; i++) {
+        int col = i % 4;
+        int row = i / 4;
+        int px = px_start + col * (pad_w + pad_gap);
+        int py = py_start + row * (pad_h + pad_gap);
+
+        lv_obj_t* btn = lv_btn_create(sd_right_panel);
+        lv_obj_set_size(btn, pad_w, pad_h);
+        lv_obj_set_pos(btn, px, py);
+        lv_obj_set_style_bg_color(btn, i == 0 ? RED808_ACCENT : lv_color_hex(0x222233), 0);
+        lv_obj_set_style_radius(btn, 6, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0x444466), 0);
+
+        lv_obj_t* num_lbl = lv_label_create(btn);
+        char num_str[12];
+        snprintf(num_str, sizeof(num_str), "%s\n%d", trackNames[i], i);
+        lv_label_set_text(num_lbl, num_str);
+        lv_obj_set_style_text_font(num_lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(num_lbl, lv_color_hex(theme_presets[currentTheme].track_colors[i]), 0);
+        lv_obj_set_style_text_align(num_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(num_lbl);
+
+        sd_pad_btns[i] = btn;
+        lv_obj_add_event_cb(btn, sd_pad_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    }
+
+    // Selected file label
+    sd_selected_lbl = lv_label_create(sd_right_panel);
+    lv_label_set_text(sd_selected_lbl, "");
+    lv_obj_set_width(sd_selected_lbl, UI_W - 60);
+    lv_obj_set_style_text_font(sd_selected_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(sd_selected_lbl, RED808_SUCCESS, 0);
+    lv_obj_set_style_text_align(sd_selected_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(sd_selected_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(sd_selected_lbl, 12, 280);
+
+    // LOAD button
+    sd_load_btn = lv_btn_create(sd_right_panel);
+    lv_obj_set_size(sd_load_btn, UI_W - 60, 60);
+    lv_obj_set_pos(sd_load_btn, 16, 330);
+    lv_obj_set_style_bg_color(sd_load_btn, RED808_ACCENT, 0);
+    lv_obj_set_style_bg_color(sd_load_btn, lv_color_hex(0x882200), LV_STATE_DISABLED);
+    lv_obj_set_style_radius(sd_load_btn, 10, 0);
+    lv_obj_add_state(sd_load_btn, LV_STATE_DISABLED);
+
+    sd_load_lbl = lv_label_create(sd_load_btn);
+    lv_label_set_text(sd_load_lbl, LV_SYMBOL_UPLOAD "  LOAD TO PAD");
+    lv_obj_set_style_text_font(sd_load_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(sd_load_lbl, lv_color_white(), 0);
+    lv_obj_center(sd_load_lbl);
+    lv_obj_add_event_cb(sd_load_btn, sd_load_btn_cb, LV_EVENT_CLICKED, NULL);
 }
 
 // =============================================================================
@@ -1571,7 +1683,7 @@ void ui_create_all_screens(void) {
     create_sequencer_screen();
     create_fx_screen();
     create_volumes_screen();
-    create_settings_screen();
+    create_sdcard_screen();
     create_performance_screen();
 
     // Start on boot screen
@@ -1593,7 +1705,7 @@ static void ui_reload_themed_screens(void) {
     if (scr_sequencer)   { lv_obj_del(scr_sequencer);   scr_sequencer   = NULL; }
     if (scr_fx)          { lv_obj_del(scr_fx);          scr_fx          = NULL; }
     if (scr_volumes)     { lv_obj_del(scr_volumes);     scr_volumes     = NULL; }
-    if (scr_settings)    { lv_obj_del(scr_settings);    scr_settings    = NULL; }
+    if (scr_sdcard)      { lv_obj_del(scr_sdcard);      scr_sdcard      = NULL; }
     // scr_performance is NULL (stubbed)
 
     // Clear widget pointers (prevent stale access in update functions)
@@ -1633,16 +1745,22 @@ static void ui_reload_themed_screens(void) {
         vol_strip_panels[i] = NULL;
     }
 
+    // Clear SD screen widgets
+    sd_left_panel = NULL; sd_right_panel = NULL; sd_status_lbl = NULL;
+    sd_path_lbl = NULL; sd_file_list = NULL; sd_selected_lbl = NULL;
+    sd_load_btn = NULL; sd_load_lbl = NULL;
+    for (int i = 0; i < 16; i++) sd_pad_btns[i] = NULL;
+
     // Recreate with new theme colors
     create_live_screen();
     create_sequencer_screen();
     create_fx_screen();
     create_volumes_screen();
-    create_settings_screen();
+    create_sdcard_screen();
     create_performance_screen();
 
-    // Restore navigation to the screen we were on (go to live if it was settings/boot)
-    int nav_to = (saved_screen == 4) ? 4 : 2;  // stay in settings if we were there
+    // Restore navigation (go to live if was on unknown screen)
+    int nav_to = (saved_screen == 9) ? 9 : 2;  // stay in sdcard if we were there
     if (saved_screen == 3) nav_to = 3;
     if (saved_screen == 7) nav_to = 7;
     if (saved_screen == 8) nav_to = 8;
@@ -1651,14 +1769,16 @@ static void ui_reload_themed_screens(void) {
 
 void ui_navigate_to(int screen_id) {
     lv_obj_t* targets[] = {
-        scr_boot, NULL, scr_live, scr_sequencer, scr_settings,
-        NULL, NULL, scr_volumes, scr_fx, NULL, scr_performance
+        scr_boot, NULL, scr_live, scr_sequencer, NULL,
+        NULL, NULL, scr_volumes, scr_fx, scr_sdcard, scr_performance
     };
     int count = sizeof(targets) / sizeof(targets[0]);
     if (screen_id >= 0 && screen_id < count && targets[screen_id]) {
         lv_scr_load_anim(targets[screen_id], LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, false);
         prev_active_screen = active_screen;
         active_screen = screen_id;
+        // Request SD listing when entering SD screen
+        if (screen_id == 9) uart_send_sd_mount();
     }
     // Enable/disable direct touch bypass for live pads
     g_live_screen_active.store(screen_id == 2, std::memory_order_release);
@@ -1748,4 +1868,8 @@ void ui_update_current_screen(void) {
     else if (active == scr_sequencer) update_sequencer_screen();
     else if (active == scr_fx) update_fx_screen();
     else if (active == scr_volumes) update_volumes_screen();
+    else if (active == scr_sdcard && p4sd.needs_refresh) {
+        p4sd.needs_refresh = false;
+        sd_refresh_ui();
+    }
 }

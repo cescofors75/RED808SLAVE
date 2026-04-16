@@ -28,6 +28,7 @@
 #define MSG_TOUCH_CMD   0x08
 #define MSG_DIAG        0x09
 #define MSG_PATTERN_DATA 0x0A
+#define MSG_SD_DATA     0x0B    // S3→P4: SD card data (extended packets)
 
 // ENCODER IDs
 #define ENC_FLANGER     0x00
@@ -87,8 +88,19 @@
 #define TCMD_FX_TOGGLE     0x03
 #define TCMD_THEME_NEXT    0x04
 #define TCMD_SCREEN_NAV    0x05
-#define TCMD_STEP_TOGGLE   0x06 // S3→P4: toggle step. value=(track<<4)|step
-#define TCMD_STEP_TOGGLE   0x06  // S3→P4: toggle step. id=cmdId, value=(track<<4)|step
+#define TCMD_STEP_TOGGLE   0x06  // S3→P4: toggle step. value=(track<<4)|step
+#define TCMD_SD_MOUNT      0x07  // P4→S3: mount SD + list root dir
+#define TCMD_SD_SELECT     0x08  // P4→S3: select entry N (0-based index)
+#define TCMD_SD_BACK       0x09  // P4→S3: go to parent directory
+#define TCMD_SD_LOAD       0x0A  // P4→S3: load selected file to pad N
+
+// SD DATA sub-IDs (MSG_SD_DATA extended, Byte 2)
+#define SD_RESP_STATUS     0x00
+#define SD_RESP_ENTRY      0x01
+#define SD_RESP_LIST_END   0x02
+#define SD_RESP_PATH       0x03
+#define SD_RESP_SELECTED   0x04
+#define SD_RESP_LOAD_OK    0x05
 
 // =============================================================================
 // PACKET STRUCTURES

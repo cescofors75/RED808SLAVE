@@ -17,6 +17,7 @@
 #include "esp_heap_caps.h"
 #include <M5ROTATE8.h>
 #include <DFRobot_VisualRotaryEncoder.h>
+#include <SD_MMC.h>
 #include "lvgl.h"
 
 #include "../include/system_state.h"
@@ -215,6 +216,7 @@ const char* const byteButtonActionNames[] = {
     "Play/Pause",        // BB_ACTION_PLAY_PAUSE
     "Go Patterns",       // BB_ACTION_SCREEN_PATTERNS
     "Go Settings",       // BB_ACTION_SCREEN_SETTINGS
+    "Go SD Card",        // BB_ACTION_SCREEN_SDCARD
     "BPM +1",            // BB_ACTION_BPM_UP
     "BPM -1",            // BB_ACTION_BPM_DOWN
 };
@@ -235,7 +237,7 @@ uint8_t byteButtonActionMap[BYTEBUTTON_TOTAL_BUTTONS] = {
     BB_ACTION_SCREEN_SEQUENCER,
     BB_ACTION_SCREEN_VOLUMES,
     BB_ACTION_SCREEN_PATTERNS,
-    BB_ACTION_SCREEN_SETTINGS,
+    BB_ACTION_SCREEN_SDCARD,
     BB_ACTION_BPM_DOWN,
     BB_ACTION_BPM_UP,
     BB_ACTION_MENU,            // 2-8: Go MENU PRINCIPAL
@@ -350,6 +352,113 @@ static void touch_task(void* arg);
 static void pad_trigger_task(void* arg);
 
 // =============================================================================
+// P4 REMOTE SD BROWSE (S3 mounts/reads SD, sends entries to P4 via UART)
+// =============================================================================
+extern bool sd_mounted;                // defined in ui_screens.cpp
+extern bool sd_try_mount();            // defined in ui_screens.cpp
+
+static char p4sd_dir[128] = "/";
+static char p4sd_selected[64] = "";
+static char p4sd_family[32] = "";
+struct P4SdDirEntry { char name[48]; bool is_dir; };
+static P4SdDirEntry p4sd_entries[64];
+static int p4sd_count = 0;
+
+static void p4sd_send_listing() {
+    // Status
+    uint8_t status = sd_mounted ? 1 : 0;
+    uart_bridge_send_extended(MSG_SD_DATA, SD_RESP_STATUS, &status, 1);
+    // Path
+    uart_bridge_send_extended(MSG_SD_DATA, SD_RESP_PATH,
+                              (const uint8_t*)p4sd_dir, strlen(p4sd_dir));
+    if (!sd_mounted) {
+        uint8_t zero = 0;
+        uart_bridge_send_extended(MSG_SD_DATA, SD_RESP_LIST_END, &zero, 1);
+        return;
+    }
+    // Read directory
+    p4sd_count = 0;
+    File dir = SD_MMC.open(p4sd_dir);
+    if (!dir || !dir.isDirectory()) {
+        uint8_t zero = 0;
+        uart_bridge_send_extended(MSG_SD_DATA, SD_RESP_LIST_END, &zero, 1);
+        return;
+    }
+    File entry = dir.openNextFile();
+    while (entry && p4sd_count < 64) {
+        const char* name = entry.name();
+        bool isDir = entry.isDirectory();
+        if (name[0] == '.') { entry.close(); entry = dir.openNextFile(); continue; }
+        if (!isDir) {
+            size_t nlen = strlen(name);
+            if (nlen <= 4 || strcasecmp(name + nlen - 4, ".wav") != 0) {
+                entry.close(); entry = dir.openNextFile(); continue;
+            }
+        }
+        strncpy(p4sd_entries[p4sd_count].name, name, 47);
+        p4sd_entries[p4sd_count].name[47] = '\0';
+        p4sd_entries[p4sd_count].is_dir = isDir;
+        // Send entry: [index, type, name...]
+        uint8_t buf[50];
+        buf[0] = (uint8_t)p4sd_count;
+        buf[1] = isDir ? 'D' : 'F';
+        int nameLen = strlen(name);
+        if (nameLen > 47) nameLen = 47;
+        memcpy(&buf[2], name, nameLen);
+        uart_bridge_send_extended(MSG_SD_DATA, SD_RESP_ENTRY, buf, 2 + nameLen);
+        p4sd_count++;
+        entry.close();
+        entry = dir.openNextFile();
+    }
+    dir.close();
+    uint8_t total = (uint8_t)p4sd_count;
+    uart_bridge_send_extended(MSG_SD_DATA, SD_RESP_LIST_END, &total, 1);
+}
+
+static void handleP4SdMount() {
+    sd_try_mount();
+    strcpy(p4sd_dir, "/");
+    p4sd_selected[0] = '\0';
+    p4sd_family[0] = '\0';
+    p4sd_send_listing();
+}
+
+static void handleP4SdSelect(uint8_t idx) {
+    if (idx >= p4sd_count) return;
+    if (p4sd_entries[idx].is_dir) {
+        if (strcmp(p4sd_dir, "/") == 0)
+            snprintf(p4sd_dir, sizeof(p4sd_dir), "/%s", p4sd_entries[idx].name);
+        else {
+            char tmp[128];
+            snprintf(tmp, sizeof(tmp), "%s/%s", p4sd_dir, p4sd_entries[idx].name);
+            strncpy(p4sd_dir, tmp, sizeof(p4sd_dir) - 1);
+        }
+        strncpy(p4sd_family, p4sd_entries[idx].name, sizeof(p4sd_family) - 1);
+        p4sd_selected[0] = '\0';
+        p4sd_send_listing();
+    } else {
+        strncpy(p4sd_selected, p4sd_entries[idx].name, sizeof(p4sd_selected) - 1);
+        uart_bridge_send_extended(MSG_SD_DATA, SD_RESP_SELECTED,
+                                  (const uint8_t*)p4sd_selected, strlen(p4sd_selected));
+    }
+}
+
+static void handleP4SdBack() {
+    char* last = strrchr(p4sd_dir, '/');
+    if (last && last != p4sd_dir) *last = '\0';
+    else strcpy(p4sd_dir, "/");
+    p4sd_selected[0] = '\0';
+    p4sd_send_listing();
+}
+
+static void handleP4SdLoad(uint8_t pad) {
+    if (pad >= Config::MAX_TRACKS || p4sd_selected[0] == '\0') return;
+    ui_sdcard_send_load_sample(pad, p4sd_family, p4sd_selected);
+    uint8_t ok = pad;
+    uart_bridge_send_extended(MSG_SD_DATA, SD_RESP_LOAD_OK, &ok, 1);
+}
+
+// =============================================================================
 // P4 TOUCH COMMAND HANDLER (called from uart_bridge_receive)
 // =============================================================================
 static bool navigateToScreen(Screen screen);  // forward decl
@@ -372,6 +481,18 @@ void handleP4TouchCommand(uint8_t cmdId, uint8_t value) {
             break;
         case TCMD_THEME_NEXT:
             pendingThemeIdx = (currentTheme + 1) % THEME_COUNT;
+            break;
+        case TCMD_SD_MOUNT:
+            handleP4SdMount();
+            break;
+        case TCMD_SD_SELECT:
+            handleP4SdSelect(value);
+            break;
+        case TCMD_SD_BACK:
+            handleP4SdBack();
+            break;
+        case TCMD_SD_LOAD:
+            handleP4SdLoad(value);
             break;
         default:
             break;
@@ -435,6 +556,8 @@ static void nvs_load_settings() {
 
     if (nvs_get_u8(h, "theme", &val8) == ESP_OK && val8 < THEME_COUNT)
         currentTheme = (VisualTheme)val8;
+    // Force OCEAN as default regardless of NVS
+    currentTheme = THEME_OCEAN;
     if (nvs_get_i32(h, "masterVol", &val32) == ESP_OK) {
         masterVolume = constrain((int)val32, 0, Config::MAX_VOLUME);
         hasMasterVol = true;
@@ -2393,6 +2516,9 @@ static void runByteButtonAction(uint8_t action, int moduleIdx) {
             break;
         case BB_ACTION_SCREEN_SETTINGS:
             navigateToScreen(SCREEN_SETTINGS);
+            break;
+        case BB_ACTION_SCREEN_SDCARD:
+            navigateToScreen(SCREEN_SDCARD);
             break;
         case BB_ACTION_BPM_UP:
             applyBPMPrecise(currentBPMPrecise + 1.0f, true);

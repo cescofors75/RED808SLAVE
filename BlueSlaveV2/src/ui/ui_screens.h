@@ -48,6 +48,10 @@ void ui_update_live_pads();
 void ui_live_pads_invalidate();
 void ui_volumes_retheme();
 void ui_update_sdcard();
+
+// SD card helpers (used by main.cpp for P4 remote browse)
+bool sd_try_mount();
+void ui_sdcard_send_load_sample(int pad, const char* family, const char* filename);
 void ui_refresh_theme_buttons();  // refreshes active indicator on settings theme selector
 void ui_sdcard_send_load_sample(int pad, const char* family, const char* filename);
 void ui_update_patterns();

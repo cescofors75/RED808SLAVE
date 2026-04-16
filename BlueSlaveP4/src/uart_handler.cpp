@@ -14,6 +14,9 @@
 // P4 local state — single source of truth for UI rendering
 P4State p4 = {};
 
+// P4 SD remote browse state
+P4SdState p4sd = {};
+
 // UART instance
 static HardwareSerial UartS3(UART_S3_PORT);
 
@@ -101,6 +104,31 @@ void uart_send_pattern_to_s3(int pattern, const bool steps[16][16]) {
 
 bool uart_s3_alive(void) {
     return p4.s3_connected;
+}
+
+// =============================================================================
+// SD REMOTE BROWSE — send commands to S3
+// =============================================================================
+void uart_send_sd_mount(void) {
+    p4sd.entry_count = 0;
+    p4sd.list_complete = false;
+    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SD_MOUNT, 0);
+}
+
+void uart_send_sd_select(uint8_t index) {
+    p4sd.entry_count = 0;
+    p4sd.list_complete = false;
+    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SD_SELECT, index);
+}
+
+void uart_send_sd_back(void) {
+    p4sd.entry_count = 0;
+    p4sd.list_complete = false;
+    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SD_BACK, 0);
+}
+
+void uart_send_sd_load(uint8_t pad) {
+    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SD_LOAD, pad);
 }
 
 // =============================================================================
@@ -278,6 +306,44 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
             for (int step = 0; step < 16; step++) {
                 p4.steps[track][step] = (row >> step) & 1;
             }
+        }
+    }
+    else if (type == MSG_SD_DATA) {
+        switch (id) {
+            case SD_RESP_STATUS:
+                if (len >= 1) p4sd.mounted = (payload[0] != 0);
+                p4sd.needs_refresh = true;
+                break;
+            case SD_RESP_ENTRY:
+                if (len >= 3 && p4sd.entry_count < P4_SD_MAX_ENTRIES) {
+                    int idx = p4sd.entry_count++;
+                    p4sd.entries[idx].is_dir = (payload[1] == 'D');
+                    int nameLen = len - 2;
+                    if (nameLen > 47) nameLen = 47;
+                    memcpy(p4sd.entries[idx].name, &payload[2], nameLen);
+                    p4sd.entries[idx].name[nameLen] = '\0';
+                }
+                break;
+            case SD_RESP_LIST_END:
+                p4sd.list_complete = true;
+                p4sd.needs_refresh = true;
+                break;
+            case SD_RESP_PATH:
+                if (len > 0 && len < (int)sizeof(p4sd.path) - 1) {
+                    memcpy(p4sd.path, payload, len);
+                    p4sd.path[len] = '\0';
+                }
+                break;
+            case SD_RESP_SELECTED:
+                if (len > 0 && len < (int)sizeof(p4sd.selected_file) - 1) {
+                    memcpy(p4sd.selected_file, payload, len);
+                    p4sd.selected_file[len] = '\0';
+                    p4sd.needs_refresh = true;
+                }
+                break;
+            case SD_RESP_LOAD_OK:
+                p4sd.needs_refresh = true;
+                break;
         }
     }
 }

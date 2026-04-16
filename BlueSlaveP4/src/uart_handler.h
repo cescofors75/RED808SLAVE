@@ -17,6 +17,12 @@ int uart_handler_process(void);
 // Send a basic command to S3 (P4→S3 touch commands)
 void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value);
 
+// SD remote browse commands (P4→S3)
+void uart_send_sd_mount(void);
+void uart_send_sd_select(uint8_t index);
+void uart_send_sd_back(void);
+void uart_send_sd_load(uint8_t pad);
+
 // Send full pattern step data to S3 as MSG_PATTERN_DATA extended packet
 void uart_send_pattern_to_s3(int pattern, const bool steps[16][16]);
 
@@ -79,3 +85,26 @@ struct P4State {
 };
 
 extern P4State p4;
+
+// =============================================================================
+// SD REMOTE BROWSE STATE — populated by S3 via MSG_SD_DATA
+// =============================================================================
+#define P4_SD_MAX_ENTRIES 64
+
+struct P4SdEntry {
+    char name[48];
+    bool is_dir;
+};
+
+struct P4SdState {
+    bool mounted;
+    char path[128];
+    char selected_file[64];
+    int  selected_pad;
+    P4SdEntry entries[P4_SD_MAX_ENTRIES];
+    int  entry_count;
+    bool list_complete;
+    volatile bool needs_refresh;
+};
+
+extern P4SdState p4sd;

@@ -70,6 +70,7 @@ enum ByteButtonAction {
     BB_ACTION_PLAY_PAUSE,
     BB_ACTION_SCREEN_PATTERNS,     // BB2: go to Patterns screen
     BB_ACTION_SCREEN_SETTINGS,     // BB2: go to Settings screen
+    BB_ACTION_SCREEN_SDCARD,       // BB2: go to SD Card screen
     BB_ACTION_BPM_UP,              // BB2: BPM +1
     BB_ACTION_BPM_DOWN,            // BB2: BPM -1
     BB_ACTION_COUNT

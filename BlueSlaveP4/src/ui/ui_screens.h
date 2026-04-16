@@ -11,7 +11,7 @@ extern lv_obj_t* scr_live;
 extern lv_obj_t* scr_sequencer;
 extern lv_obj_t* scr_fx;
 extern lv_obj_t* scr_volumes;
-extern lv_obj_t* scr_settings;
+extern lv_obj_t* scr_sdcard;
 extern lv_obj_t* scr_performance;
 
 // Create all screens (call once after LVGL init)

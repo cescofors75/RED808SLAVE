@@ -3809,7 +3809,7 @@ void ui_sdcard_send_load_sample(int pad, const char* family, const char* filenam
 }
 
 // Mount SD card via SD_MMC (1-bit mode)
-static bool sd_try_mount() {
+bool sd_try_mount() {
     if (sd_mounted) return true;
     // Drive EXIO4 (D3/CS) HIGH so the card enters SDMMC mode (not SPI)
     io_ext_sd_disable();  // EXIO4=1 → D3 pulled high
