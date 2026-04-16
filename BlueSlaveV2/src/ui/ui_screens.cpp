@@ -1406,9 +1406,9 @@ static void seq_mute_cb(lv_event_t* e) {
 static void seq_play_pause_cb(lv_event_t* e) {
     (void)e;
     isPlaying = !isPlaying;
-    JsonDocument doc(sramAllocatorPtr);
-    doc["cmd"] = isPlaying ? "start" : "stop";
-    sendUDPCommand(doc);
+    // Send play state via UART → P4 → Master
+    uart_bridge_send(MSG_SYSTEM, SYS_PLAY_STATE, isPlaying ? 1 : 0);
+    sendUDPCommand(isPlaying ? "{\"cmd\":\"start\"}" : "{\"cmd\":\"stop\"}");
     if (seq_play_lbl) {
         lv_label_set_text(seq_play_lbl, isPlaying ? LV_SYMBOL_PAUSE " PAUSE" : LV_SYMBOL_PLAY " PLAY");
     }
@@ -2994,6 +2994,30 @@ void ui_update_filters() {
 // ============================================================================
 // SETTINGS SCREEN
 // ============================================================================
+
+// Pointers published by ui_create_settings_screen for runtime refresh
+lv_obj_t** ui_theme_btns_ptr   = nullptr;
+lv_obj_t** ui_theme_checks_ptr = nullptr;
+
+static const uint32_t _s_btn_colors[THEME_COUNT] = {
+    0xFF4444, 0x4A9EFF, 0x39FF14, 0xFF6B35, 0xFF00AA, 0x999999
+};
+
+void ui_refresh_theme_buttons() {
+    if (!ui_theme_btns_ptr || !ui_theme_checks_ptr) return;
+    for (int i = 0; i < THEME_COUNT; i++) {
+        lv_obj_t* btn   = ui_theme_btns_ptr[i];
+        lv_obj_t* check = ui_theme_checks_ptr[i];
+        if (!btn) continue;
+        bool active = (i == (int)currentTheme);
+        lv_obj_set_style_border_width(btn, active ? 3 : 1, 0);
+        lv_obj_set_style_shadow_opa(btn, active ? LV_OPA_80 : LV_OPA_30, 0);
+        if (check) {
+            lv_label_set_text(check, active ? LV_SYMBOL_OK : "");
+        }
+    }
+}
+
 void ui_create_settings_screen() {
     scr_settings = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_settings, RED808_BG, 0);
@@ -3085,6 +3109,11 @@ void ui_create_settings_screen() {
 #endif  // !S3_WIFI_ENABLED
 
     // ── THEME SELECTOR Section ──
+    // Statics to allow refresh without screen rebuild
+    static lv_obj_t* s_theme_btns[THEME_COUNT]  = {};
+    static lv_obj_t* s_theme_checks[THEME_COUNT] = {};
+    for (int x = 0; x < THEME_COUNT; x++) { s_theme_btns[x] = NULL; s_theme_checks[x] = NULL; }
+
     lv_obj_t* theme_card = lv_obj_create(scr_settings);
 #if PORTRAIT_MODE
     lv_obj_set_size(theme_card, UI_W - 40, 740);
@@ -3145,6 +3174,7 @@ void ui_create_settings_screen() {
         lv_obj_set_pos(btn, btn_x_start + i * (btn_w + btn_gap), 45);
 #endif
         lv_obj_add_flag(btn, LV_OBJ_FLAG_USER_1);  // protect from theme restyling
+        s_theme_btns[i] = btn;
         lv_obj_set_style_bg_color(btn, lv_color_hex(theme_presets[i].bg), 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(btn, 12, 0);
@@ -3200,13 +3230,14 @@ void ui_create_settings_screen() {
         lv_obj_add_flag(lbl, LV_OBJ_FLAG_USER_1);
 
         // Active indicator
-        if (i == currentTheme) {
+        {
             lv_obj_t* check = lv_label_create(btn);
-            lv_label_set_text(check, LV_SYMBOL_OK);
+            lv_label_set_text(check, (i == (int)currentTheme) ? LV_SYMBOL_OK : "");
             lv_obj_set_style_text_font(check, &lv_font_montserrat_22, 0);
             lv_obj_set_style_text_color(check, lv_color_hex(btn_colors[i]), 0);
             lv_obj_align(check, LV_ALIGN_BOTTOM_MID, 0, -38);
             lv_obj_add_flag(check, LV_OBJ_FLAG_USER_1);
+            s_theme_checks[i] = check;
         }
 
         lv_obj_add_event_cb(btn, [](lv_event_t* e) {
@@ -3216,6 +3247,12 @@ void ui_create_settings_screen() {
             themeJustChanged = true;
         }, LV_EVENT_CLICKED, (void*)(intptr_t)i);
     }
+
+    // Publish pointers for runtime refresh
+    extern lv_obj_t** ui_theme_btns_ptr;
+    extern lv_obj_t** ui_theme_checks_ptr;
+    ui_theme_btns_ptr   = s_theme_btns;
+    ui_theme_checks_ptr = s_theme_checks;
 }
 
 // ============================================================================
@@ -3541,8 +3578,10 @@ static void pattern_apply_page() {
         }
         lv_obj_clear_flag(pattern_btns[i], LV_OBJ_FLAG_HIDDEN);
         bool active = (patternIndex == currentPattern);
-        lv_obj_set_style_bg_color(pattern_btns[i], active ? RED808_ACCENT : RED808_SURFACE, 0);
-        lv_obj_set_style_border_color(pattern_btns[i], active ? lv_color_white() : RED808_BORDER, 0);
+        // FIX: apply_stable_button_style overrides ALL LVGL states — use it for active/inactive
+        apply_stable_button_style(pattern_btns[i],
+            active ? RED808_ACCENT : RED808_SURFACE,
+            active ? lv_color_white() : RED808_BORDER);
         lv_obj_set_style_border_width(pattern_btns[i], active ? 3 : 1, 0);
         if (pattern_labels[i]) {
             lv_label_set_text_fmt(pattern_labels[i], "PATTERN %02d", patternIndex + 1);
@@ -3560,12 +3599,8 @@ static void pattern_select_cb(lv_event_t* e) {
     if (idx < 0 || idx >= VISIBLE_PATTERNS) return;
     int patternIndex = pattern_page * VISIBLE_PATTERNS + idx;
     if (patternIndex < 0 || patternIndex >= Config::MAX_PATTERNS) return;
-    currentPattern = patternIndex;
-
-    // Send selectPattern to master (pre-formatted to avoid PSRAM contention)
-    char buf[48];
-    snprintf(buf, sizeof(buf), "{\"cmd\":\"selectPattern\",\"index\":%d}", patternIndex);
-    sendUDPCommand(buf);
+    extern void selectPatternOnMaster(int patternIndex);
+    selectPatternOnMaster(patternIndex);  // FIX: sends UART to P4 + UDP to master
     pattern_apply_page();
 }
 

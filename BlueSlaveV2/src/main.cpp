@@ -2084,29 +2084,17 @@ static void toggleDfFxMute(int lane) {
     bool muted = dfFxMuted[lane];
     int storedVal = dfFxParamValue[lane];
     int effective = muted ? 0 : constrain(storedVal, 0, 127);
-    float mix = (float)effective / 127.0f;
-    bool activating = (effective > 0);
 
-    JsonDocument d(&sramAllocator);
-    if (lane == 0) {
-        d["cmd"] = "setFlangerActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d);
-        if (activating) {
-            { JsonDocument d2(&sramAllocator); d2["cmd"] = "setFlangerMix"; d2["value"] = mix; sendUDPCommand(d2); }
-        }
-        masterFilter.delayAmount = (uint8_t)effective;
-    } else if (lane == 1) {
-        d["cmd"] = "setReverbActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d);
-        if (activating) {
-            { JsonDocument d2(&sramAllocator); d2["cmd"] = "setReverbMix"; d2["value"] = mix; sendUDPCommand(d2); }
-        }
-        masterFilter.flangerAmount = (uint8_t)effective;
-    } else {
-        d["cmd"] = "setPhaserActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d);
-        masterFilter.compAmount = (uint8_t)effective;
-    }
-    masterFilter.enabled = (masterFilter.delayAmount > 0 ||
-                            masterFilter.flangerAmount > 0 ||
+    // Update local state
+    if (lane == 0)      masterFilter.flangerAmount = (uint8_t)effective;
+    else if (lane == 1) masterFilter.delayAmount   = (uint8_t)effective;
+    else                masterFilter.compAmount    = (uint8_t)effective;
+    masterFilter.enabled = (masterFilter.flangerAmount > 0 ||
+                            masterFilter.delayAmount > 0 ||
                             masterFilter.compAmount > 0);
+
+    // Send via UART → P4 → Master
+    uart_bridge_send_encoder(lane, (uint8_t)effective);
     uart_bridge_send_encoder_mute(lane, muted);
     RED808_LOG_PRINTF("[FX] Lane %d (%s) %s\n", lane,
         lane==0?"Flanger":lane==1?"Reverb":"Phaser", muted?"MUTED":"UNMUTED");
@@ -2120,50 +2108,35 @@ void handleDFRobotEncoders() {
     static unsigned long lastBtnMs[DFROBOT_ENCODER_COUNT] = {};
     static int laneStoredValue[3] = {0, 0, 0};
 
+    // Maps DFRobot encoder index → FX lane: enc1→Flanger(0), enc2→Phaser(2), enc3→Reverb(1)
+    // Encoder 0 is BPM (no lane).
+    auto encToLane = [](int enc) -> int {
+        if (enc == 1) return 0;  // Flanger
+        if (enc == 2) return 2;  // Phaser
+        if (enc == 3) return 1;  // Reverb
+        return -1;
+    };
+
     auto syncMasterEnabled = [&]() {
-        masterFilter.enabled = (masterFilter.delayAmount > 0 ||
-                                masterFilter.flangerAmount > 0 ||
+        masterFilter.enabled = (masterFilter.flangerAmount > 0 ||
+                                masterFilter.delayAmount > 0 ||
                                 masterFilter.compAmount > 0);
     };
 
     auto sendFxLane = [&](int lane, int value, bool muted) {
         int effective = muted ? 0 : constrain(value, 0, 127);
-        float mix = (float)effective / 127.0f;
-        bool activating = (effective > 0);
 
-        if (lane == 0) {
-            // Encoder 0 → Flanger
-            { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
-            if (activating) {
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerRate";     d["value"] = 0.3f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerDepth";    d["value"] = 0.7f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerFeedback"; d["value"] = 0.5f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerMix";      d["value"] = mix;  sendUDPCommand(d); }
-            }
-            masterFilter.delayAmount = (uint8_t)effective;
-        } else if (lane == 1) {
-            // Encoder 1 → Reverb
-            { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
-            if (activating) {
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbFeedback"; d["value"] = 0.6f;  sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbLpFreq";   d["value"] = 5000;  sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbMix";      d["value"] = mix;   sendUDPCommand(d); }
-            }
-            masterFilter.flangerAmount = (uint8_t)effective;
-        } else {
-            // Encoder 2 → Phaser
-            { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
-            if (activating) {
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserRate";     d["value"] = 0.8f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserDepth";    d["value"] = 0.6f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserFeedback"; d["value"] = 0.5f; sendUDPCommand(d); }
-            }
-            masterFilter.compAmount = (uint8_t)effective;
-        }
+        // Update local state
+        if (lane == 0)      masterFilter.flangerAmount = (uint8_t)effective;
+        else if (lane == 1) masterFilter.delayAmount   = (uint8_t)effective;
+        else                masterFilter.compAmount    = (uint8_t)effective;
 
         syncMasterEnabled();
         dfFxParamMode[lane] = 0;
         dfFxParamValue[lane] = laneStoredValue[lane];
+
+        // Send via UART → P4 → Master (primary path when S3_WIFI_ENABLED=0)
+        uart_bridge_send_encoder(lane, (uint8_t)effective);
     };
 
     for (int i = 0; i < DFROBOT_ENCODER_COUNT; i++) {
@@ -2197,43 +2170,37 @@ void handleDFRobotEncoders() {
         i2c_hub_deselect_raw();
         i2c_unlock();
 
-        // Process results outside of I2C lock
-        if (i < 3) {
-            // DFRobot #0/#1/#2: FX lanes (Flanger/Reverb/Phaser). Button toggles mute.
-            static const char* laneNames[] = {"Flanger", "Reverb", "Phaser"};
-            int lane = i;
+        // ── Process results outside of I2C lock ──
+        if (i == 0) {
+            // DFRobot #0 (CH2): BPM coarse control. Button resets to default BPM.
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
-                int accel = (abs(logical_delta) >= fxp().accel_threshold) ? fxp().accel_mult : 1;
-                int newVal = constrain(laneStoredValue[lane] + logical_delta * fxp().df_step * accel, 0, 127);
-                if (newVal != laneStoredValue[lane]) {
-                    laneStoredValue[lane] = newVal;
-                    if (!dfFxMuted[lane]) sendFxLane(lane, laneStoredValue[lane], false);
-                    dfFxParamValue[lane] = laneStoredValue[lane];
-                    uart_bridge_send_encoder(lane, (uint8_t)laneStoredValue[lane]);
-                }
-            }
-            if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
-                lastBtnMs[i] = millis();
-                dfFxMuted[lane] = !dfFxMuted[lane];
-                sendFxLane(lane, laneStoredValue[lane], dfFxMuted[lane]);
-                uart_bridge_send_encoder_mute(lane, dfFxMuted[lane]);
-                RED808_LOG_PRINTF("[DFRobot] %s lane %s\n", laneNames[lane], dfFxMuted[lane] ? "MUTED" : "UNMUTED");
-            }
-        }
-        else if (i == 3) {
-            // DFRobot #3: BPM control (coarse). Button resets to default BPM.
-            // Unit Fader handles fine 0.1 tuning; rotary uses 1 BPM steps + acceleration.
-            int logical_delta = quantizeDFDelta(i, delta);
-            if (logical_delta != 0) {
-                // Each logical step = 1 BPM (gain=10, COUNTS_PER_STEP=2 → ~5 BPM/click).
                 float newBpm = currentBPMPrecise + (float)logical_delta;
                 applyBPMPrecise(newBpm, true);
+                RED808_LOG_PRINTF("[DFRobot] BPM %.1f (delta=%d)\n", currentBPMPrecise, logical_delta);
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();
                 applyBPMPrecise((float)Config::DEFAULT_BPM, true);
                 RED808_LOG_PRINTF("[DFRobot] BPM reset to %.1f\n", currentBPMPrecise);
+            }
+        }
+        else {
+            // DFRobot #1/#2/#3: FX lanes (Flanger / Phaser / Reverb)
+            int lane = encToLane(i);
+            if (lane < 0) continue;
+
+            int logical_delta = quantizeDFDelta(i, delta);
+            if (logical_delta != 0) {
+                int step = Config::DF_FX_STEP;
+                laneStoredValue[lane] = constrain(laneStoredValue[lane] + logical_delta * step, 0, 127);
+                sendFxLane(lane, laneStoredValue[lane], dfFxMuted[lane]);
+                RED808_LOG_PRINTF("[DFRobot] FX lane %d val=%d (delta=%d)\n", lane, laneStoredValue[lane], logical_delta);
+            }
+            if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
+                lastBtnMs[i] = millis();
+                toggleDfFxMute(lane);
+                RED808_LOG_PRINTF("[DFRobot] FX lane %d mute toggle → %s\n", lane, dfFxMuted[lane] ? "MUTED" : "UNMUTED");
             }
         }
     }
@@ -2447,6 +2414,12 @@ void updateUI() {
         // Invalidate ByteButton LED cache and immediately push new colors
         memset(byteButtonLedCache, 0xFF, sizeof(byteButtonLedCache));
         updateByteButtonLeds();
+
+        // Update active indicator on settings theme buttons (inside LVGL lock below)
+        if (lvgl_port_lock(15)) {
+            ui_refresh_theme_buttons();
+            lvgl_port_unlock();
+        }
     }
 
     if (!lvgl_port_lock(15)) return;  // 15ms: give LVGL task time to finish

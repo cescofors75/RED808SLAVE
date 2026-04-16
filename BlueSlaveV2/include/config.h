@@ -130,12 +130,12 @@
 #define M5_ENCODER_ADDR        0x41  // Both modules, separated by hub
 
 // DFRobot SEN0502 Visual Rotary Encoders (4x)
-#define DFROBOT_ENCODER_COUNT  4
-#define DFROBOT_ENCODER_ADDR   0x54  // Both encoders, separated by hub
-// DFRobot #1: Sequencer/Live volume (button=Play/Stop)
-// DFRobot #2: BPM (button=reset BPM)
-// DFRobot #3: Master volume (button=toggle volume mode)
-// DFRobot #4: Pattern select (button=request pattern sync)
+#define DFROBOT_ENCODER_COUNT  4    // 4 DFRobot ring-LED rotaries via PCA9548A
+#define DFROBOT_ENCODER_ADDR   0x54  // All encoders same addr, separated by hub
+// DFRobot #1 (CH2): BPM coarse      (button = reset to default BPM)
+// DFRobot #2 (CH3): FX Flanger      (button = mute/unmute Flanger)
+// DFRobot #3 (CH4): FX Phaser       (button = mute/unmute Phaser)
+// DFRobot #4 (CH5): FX Reverb       (button = mute/unmute Reverb)
 
 // M5 Unit ByteButton (up to 2x via hub channels)
 #define BYTEBUTTON_COUNT       2

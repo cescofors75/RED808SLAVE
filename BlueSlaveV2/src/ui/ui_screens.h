@@ -48,6 +48,7 @@ void ui_update_live_pads();
 void ui_live_pads_invalidate();
 void ui_volumes_retheme();
 void ui_update_sdcard();
+void ui_refresh_theme_buttons();  // refreshes active indicator on settings theme selector
 void ui_sdcard_send_load_sample(int pad, const char* family, const char* filename);
 void ui_update_patterns();
 int ui_live_pad_hit_test(int x, int y);
