@@ -87,6 +87,12 @@ int uart_bridge_receive(void) {
                 extern void handleP4TouchCommand(uint8_t cmdId, uint8_t value);
                 handleP4TouchCommand(pkt->id, pkt->value);
                 count++;
+            } else if (pkt->type == MSG_SYSTEM && pkt->id == SYS_HEARTBEAT) {
+                // P4 heartbeat echo — mark link alive
+                extern bool masterConnected;
+                extern unsigned long lastMasterPacketMs;
+                masterConnected = true;
+                lastMasterPacketMs = millis();
             }
 
         } else if (peek == UART_START_EXTENDED) {

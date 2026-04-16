@@ -191,6 +191,8 @@ static void process_basic(const UartBasicPacket* pkt) {
                 case SYS_HEARTBEAT:
                     p4.last_heartbeat_ms = millis();
                     p4.s3_connected = true;
+                    // Echo heartbeat back so S3 knows P4 is alive
+                    uart_send_to_s3(MSG_SYSTEM, SYS_HEARTBEAT, 0x01);
                     break;
             }
             break;

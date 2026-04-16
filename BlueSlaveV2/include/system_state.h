@@ -30,8 +30,8 @@ enum Screen {
 
 enum FilterType {
     FILTER_FLANGER = 0,
-    FILTER_REVERB,
-    FILTER_PHASER,
+    FILTER_CHORUS,
+    FILTER_TREMOLO,
     FILTER_COUNT = 3
 };
 

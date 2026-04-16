@@ -205,8 +205,8 @@ const char* const byteButtonActionNames[] = {
     "Go BUTTONS",        // BB_ACTION_SCREEN_PERFORMANCE
     "Go Volumes",        // BB_ACTION_SCREEN_VOLUMES
     "FX Mute FLANGER",   // BB_ACTION_FX_CLEAN
-    "FX Mute PHASER",    // BB_ACTION_FX_SPACE
-    "FX Mute REVERB",    // BB_ACTION_FX_ACID
+    "FX Mute CHORUS",    // BB_ACTION_FX_SPACE
+    "FX Mute TREMOLO",   // BB_ACTION_FX_ACID
     "FX Mute ALL",       // BB_ACTION_FX_DESTROY
     "FX Target --",      // BB_ACTION_FX_TARGET_PREV
     "FX Target ++",      // BB_ACTION_FX_TARGET_NEXT
@@ -227,8 +227,8 @@ uint8_t byteButtonActionMap[BYTEBUTTON_TOTAL_BUTTONS] = {
     BB_ACTION_PATTERN_PREV,
     BB_ACTION_PATTERN_NEXT,
     BB_ACTION_FX_CLEAN,       // 1-5: FX Mute FLANGER
-    BB_ACTION_FX_SPACE,       // 1-6: FX Mute PHASER
-    BB_ACTION_FX_ACID,        // 1-7: FX Mute REVERB
+    BB_ACTION_FX_SPACE,       // 1-6: FX Mute CHORUS
+    BB_ACTION_FX_ACID,        // 1-7: FX Mute TREMOLO
     BB_ACTION_FX_DESTROY,     // 1-8: FX Mute ALL
     // BB2 buttons 1-8 (navigation + BPM)
     BB_ACTION_SCREEN_LIVE,
@@ -554,12 +554,15 @@ static void requestMasterSync(bool requestState) {
 
         // Reset all encoder FX to OFF on connection (clean slate)
         { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerActive"; d["value"] = 0; sendUDPCommand(d); }
-        { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbActive";  d["value"] = 0; sendUDPCommand(d); }
-        { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserActive";  d["value"] = 0; sendUDPCommand(d); }
-        { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayActive";   d["value"] = 0; sendUDPCommand(d); }
         { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusActive";  d["value"] = 0; sendUDPCommand(d); }
+        { JsonDocument d(&sramAllocator); d["cmd"] = "setTremoloActive"; d["value"] = 0; sendUDPCommand(d); }
         { JsonDocument d(&sramAllocator); d["cmd"] = "setFilter";        d["value"] = 0; sendUDPCommand(d); }
         { JsonDocument d(&sramAllocator); d["cmd"] = "setDistortion";    d["value"] = 0.0f; sendUDPCommand(d); }
+        // Also reset via UART bridge (works when S3_WIFI_ENABLED=0)
+        for (int lane = 0; lane < 3; lane++) {
+            uart_bridge_send_encoder(lane, 0);
+            uart_bridge_send_encoder_mute(lane, false);
+        }
         RED808_LOG_PRINTLN("[FX] All effects reset to OFF on connection");
     }
 }
@@ -1295,25 +1298,25 @@ void sendFilterUDP(int track, int fxType) {
             }
             break;
         }
-        case FILTER_REVERB: {
-            mix = (float)f.flangerAmount / 127.0f;
-            activating = (f.flangerAmount > 0);
-            { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
+        case FILTER_CHORUS: {
+            mix = (float)f.delayAmount / 127.0f;   // reuse delayAmount for Chorus
+            activating = (f.delayAmount > 0);
+            { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
             if (activating) {
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbFeedback"; d["value"] = 0.6f;  sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbLpFreq";   d["value"] = 5000;  sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbMix";      d["value"] = mix;   sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusRate";   d["value"] = 1.5f;  sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusDepth";  d["value"] = 0.5f;  sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusMix";    d["value"] = mix;   sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusStereo"; d["value"] = 1;     sendUDPCommand(d); }
             }
             break;
         }
-        case FILTER_PHASER: {
-            mix = (float)f.compAmount / 127.0f;
+        case FILTER_TREMOLO: {
+            mix = (float)f.compAmount / 127.0f;     // reuse compAmount for Tremolo
             activating = (f.compAmount > 0);
-            { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
+            { JsonDocument d(&sramAllocator); d["cmd"] = "setTremoloActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
             if (activating) {
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserRate";     d["value"] = 0.8f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserDepth";    d["value"] = 0.6f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setPhaserFeedback"; d["value"] = 0.5f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setTremoloDepth"; d["value"] = mix;                    sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setTremoloRate";  d["value"] = 2.0f + mix * 6.0f;      sendUDPCommand(d); }
             }
             break;
         }
@@ -2075,8 +2078,27 @@ void handleM5Encoders() {
 }
 
 // =============================================================================
+// FX ENCODER LED SYNC — write clamped value back to DFRobot hardware ring
+// =============================================================================
+static void syncFxEncoderLED(int lane) {
+    int enc = lane + 1;  // lane 0→enc 1, lane 1→enc 2, lane 2→enc 3
+    if (enc >= DFROBOT_ENCODER_COUNT || !dfEncoderConnected[enc]) return;
+    int ch = dfRobotHubChannel[enc];
+    if (ch < 0) return;
+    int ledVal = dfFxMuted[lane] ? 0 : constrain(dfFxParamValue[lane], 0, 127);
+    uint16_t mapped = (uint16_t)(ledVal * 1023 / 127);
+    if (i2c_lock(8)) {
+        i2c_hub_select_raw(ch);
+        dfEncoders[enc]->setEncoderValue(mapped);
+        prevDFValue[enc] = mapped;
+        i2c_hub_deselect_raw();
+        i2c_unlock();
+    }
+}
+
+// =============================================================================
 // FX LANE MUTE TOGGLE (used by ByteButton + can be called from anywhere)
-// lane: 0=Flanger, 1=Reverb, 2=Phaser
+// lane: 0=Flanger, 1=Chorus, 2=Tremolo
 // =============================================================================
 static void toggleDfFxMute(int lane) {
     if (lane < 0 || lane > 2) return;
@@ -2096,8 +2118,9 @@ static void toggleDfFxMute(int lane) {
     // Send via UART → P4 → Master
     uart_bridge_send_encoder(lane, (uint8_t)effective);
     uart_bridge_send_encoder_mute(lane, muted);
+    syncFxEncoderLED(lane);
     RED808_LOG_PRINTF("[FX] Lane %d (%s) %s\n", lane,
-        lane==0?"Flanger":lane==1?"Reverb":"Phaser", muted?"MUTED":"UNMUTED");
+        lane==0?"Flanger":lane==1?"Chorus":"Tremolo", muted?"MUTED":"UNMUTED");
 }
 
 // =============================================================================
@@ -2108,12 +2131,12 @@ void handleDFRobotEncoders() {
     static unsigned long lastBtnMs[DFROBOT_ENCODER_COUNT] = {};
     static int laneStoredValue[3] = {0, 0, 0};
 
-    // Maps DFRobot encoder index → FX lane: enc1→Flanger(0), enc2→Phaser(2), enc3→Reverb(1)
+    // Maps DFRobot encoder index → FX lane: enc1→Flanger(0), enc2→Chorus(1), enc3→Tremolo(2)
     // Encoder 0 is BPM (no lane).
     auto encToLane = [](int enc) -> int {
         if (enc == 1) return 0;  // Flanger
-        if (enc == 2) return 2;  // Phaser
-        if (enc == 3) return 1;  // Reverb
+        if (enc == 2) return 1;  // Chorus
+        if (enc == 3) return 2;  // Tremolo
         return -1;
     };
 
@@ -2126,10 +2149,10 @@ void handleDFRobotEncoders() {
     auto sendFxLane = [&](int lane, int value, bool muted) {
         int effective = muted ? 0 : constrain(value, 0, 127);
 
-        // Update local state
+        // Update local state: lane 0=Flanger, 1=Chorus, 2=Tremolo
         if (lane == 0)      masterFilter.flangerAmount = (uint8_t)effective;
-        else if (lane == 1) masterFilter.delayAmount   = (uint8_t)effective;
-        else                masterFilter.compAmount    = (uint8_t)effective;
+        else if (lane == 1) masterFilter.delayAmount   = (uint8_t)effective;  // reuse delayAmount for Chorus
+        else                masterFilter.compAmount    = (uint8_t)effective;  // reuse compAmount for Tremolo
 
         syncMasterEnabled();
         dfFxParamMode[lane] = 0;
@@ -2137,6 +2160,7 @@ void handleDFRobotEncoders() {
 
         // Send via UART → P4 → Master (primary path when S3_WIFI_ENABLED=0)
         uart_bridge_send_encoder(lane, (uint8_t)effective);
+        uart_bridge_send_encoder_mute(lane, muted);  // always sync mute state to P4
     };
 
     for (int i = 0; i < DFROBOT_ENCODER_COUNT; i++) {
@@ -2186,7 +2210,7 @@ void handleDFRobotEncoders() {
             }
         }
         else {
-            // DFRobot #1/#2/#3: FX lanes (Flanger / Phaser / Reverb)
+            // DFRobot #1/#2/#3: FX lanes (Flanger / Chorus / Tremolo)
             int lane = encToLane(i);
             if (lane < 0) continue;
 
@@ -2195,6 +2219,18 @@ void handleDFRobotEncoders() {
                 int step = Config::DF_FX_STEP;
                 laneStoredValue[lane] = constrain(laneStoredValue[lane] + logical_delta * step, 0, 127);
                 sendFxLane(lane, laneStoredValue[lane], dfFxMuted[lane]);
+
+                // Sync LED ring to clamped value (write back to DFRobot hardware)
+                int ledVal = dfFxMuted[lane] ? 0 : laneStoredValue[lane];
+                uint16_t mapped = (uint16_t)(ledVal * 1023 / 127);
+                if (i2c_lock(8)) {
+                    i2c_hub_select_raw(ch);
+                    dfEncoders[i]->setEncoderValue(mapped);
+                    prevDFValue[i] = mapped;
+                    i2c_hub_deselect_raw();
+                    i2c_unlock();
+                }
+
                 RED808_LOG_PRINTF("[DFRobot] FX lane %d val=%d (delta=%d)\n", lane, laneStoredValue[lane], logical_delta);
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
@@ -2313,10 +2349,10 @@ static void runByteButtonAction(uint8_t action, int moduleIdx) {
             toggleDfFxMute(0);  // Flanger
             break;
         case BB_ACTION_FX_SPACE:
-            toggleDfFxMute(2);  // Phaser
+            toggleDfFxMute(2);  // Tremolo
             break;
         case BB_ACTION_FX_ACID:
-            toggleDfFxMute(1);  // Reverb
+            toggleDfFxMute(1);  // Chorus
             break;
         case BB_ACTION_FX_DESTROY:
             {

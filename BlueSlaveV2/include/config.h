@@ -134,8 +134,8 @@
 #define DFROBOT_ENCODER_ADDR   0x54  // All encoders same addr, separated by hub
 // DFRobot #1 (CH2): BPM coarse      (button = reset to default BPM)
 // DFRobot #2 (CH3): FX Flanger      (button = mute/unmute Flanger)
-// DFRobot #3 (CH4): FX Phaser       (button = mute/unmute Phaser)
-// DFRobot #4 (CH5): FX Reverb       (button = mute/unmute Reverb)
+// DFRobot #3 (CH4): FX Chorus       (button = mute/unmute Chorus)
+// DFRobot #4 (CH5): FX Tremolo      (button = mute/unmute Tremolo)
 
 // M5 Unit ByteButton (up to 2x via hub channels)
 #define BYTEBUTTON_COUNT       2
@@ -245,7 +245,7 @@ namespace Config {
     constexpr int DF_BPM_STEP = 1;      // BPM change per encoder step
     constexpr int DF_FX_STEP_FINE = 4;  // DF1-DF3 sensitivity (fine)
     constexpr int DF_FX_STEP_AGGR = 8;  // DF1-DF3 sensitivity (aggressive)
-    constexpr int DF_FX_STEP = DF_FX_STEP_AGGR;
+    constexpr int DF_FX_STEP = 2;       // ~10 per click (gain10/2=5 logical × 2), ~13 clicks full range
     constexpr uint32_t DF_BUTTON_GUARD_MS = 250;
     constexpr uint32_t DF_POT_READ_MS = 10;           // 100Hz poll for fast live response
     constexpr uint8_t DF_POT_MIDI_DEADBAND = 2;       // ignore ±1 MIDI noise, send on ±2 change

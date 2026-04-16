@@ -165,18 +165,61 @@ void udp_send_set_distortion(float val) {
 void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
     if (!udpStarted) return;
     if (enc_id < 0 || enc_id > 2) return;
-    static const char* fx_names[] = {"Flanger", "Reverb", "Phaser"};
+
+    static bool prev_active[3] = {false, false, false};
     char buf[96];
-    int active = (!muted && value > 0) ? 1 : 0;
+    bool active = (!muted && value > 0);
     float norm = (float)value / 127.0f;
-    // Send active state
-    snprintf(buf, sizeof(buf), "{\"cmd\":\"set%sActive\",\"value\":%d}",
-             fx_names[enc_id], active);
-    sendJson(buf);
-    // Send amount
-    snprintf(buf, sizeof(buf), "{\"cmd\":\"set%sAmount\",\"value\":%.3f}",
-             fx_names[enc_id], norm);
-    sendJson(buf);
+    bool justActivated = (active && !prev_active[enc_id]);
+    bool justDeactivated = (!active && prev_active[enc_id]);
+    prev_active[enc_id] = active;
+
+    switch (enc_id) {
+        case 0: // Flanger
+            if (justActivated) {
+                sendJson("{\"cmd\":\"setFlangerActive\",\"value\":1}");
+                sendJson("{\"cmd\":\"setFlangerRate\",\"value\":0.5}");
+                sendJson("{\"cmd\":\"setFlangerDepth\",\"value\":0.8}");
+                sendJson("{\"cmd\":\"setFlangerFeedback\",\"value\":0.6}");
+            }
+            if (justDeactivated) {
+                sendJson("{\"cmd\":\"setFlangerActive\",\"value\":0}");
+            }
+            if (active) {
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerMix\",\"value\":%.3f}", norm);
+                sendJson(buf);
+            }
+            break;
+        case 1: // Chorus
+            if (justActivated) {
+                sendJson("{\"cmd\":\"setChorusActive\",\"value\":1}");
+                sendJson("{\"cmd\":\"setChorusRate\",\"value\":1.5}");
+                sendJson("{\"cmd\":\"setChorusDepth\",\"value\":0.5}");
+                sendJson("{\"cmd\":\"setChorusStereo\",\"value\":1}");
+            }
+            if (justDeactivated) {
+                sendJson("{\"cmd\":\"setChorusActive\",\"value\":0}");
+            }
+            if (active) {
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusMix\",\"value\":%.3f}", norm);
+                sendJson(buf);
+            }
+            break;
+        case 2: // Tremolo
+            if (justActivated) {
+                sendJson("{\"cmd\":\"setTremoloActive\",\"value\":1}");
+            }
+            if (justDeactivated) {
+                sendJson("{\"cmd\":\"setTremoloActive\",\"value\":0}");
+            }
+            if (active) {
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloDepth\",\"value\":%.3f}", norm);
+                sendJson(buf);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloRate\",\"value\":%.1f}", 2.0f + norm * 6.0f);
+                sendJson(buf);
+            }
+            break;
+    }
 }
 
 void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
@@ -212,10 +255,8 @@ void udp_request_master_sync(void) {
 
     // Reset FX to safe defaults
     sendJson("{\"cmd\":\"setFlangerActive\",\"value\":0}");
-    sendJson("{\"cmd\":\"setReverbActive\",\"value\":0}");
-    sendJson("{\"cmd\":\"setPhaserActive\",\"value\":0}");
-    sendJson("{\"cmd\":\"setDelayActive\",\"value\":0}");
     sendJson("{\"cmd\":\"setChorusActive\",\"value\":0}");
+    sendJson("{\"cmd\":\"setTremoloActive\",\"value\":0}");
     sendJson("{\"cmd\":\"setFilter\",\"value\":0}");
     sendJson("{\"cmd\":\"setDistortion\",\"value\":0.0}");
 
