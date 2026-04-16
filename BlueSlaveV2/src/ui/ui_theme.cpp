@@ -28,21 +28,21 @@ const ThemeColors theme_presets[THEME_COUNT] = {
         },
         .name = "RED808"
     },
-    // ── THEME_OCEAN — all blues (high contrast) ──
+    // ── THEME_OCEAN — all blues (high contrast, bright) ──
     {
-        .bg = 0x060E1C, .panel = 0x0B1828, .surface = 0x122640, .border = 0x1A3A5E,
-        .text = 0xE8F0FF, .text_dim = 0x8CB8E0,
-        .accent = 0x5AB0FF, .accent2 = 0x80C8FF,
-        .success = 0x50D4BA, .warning = 0xF0C060, .error = 0xF07070, .info = 0x5AB0FF, .cyan = 0x50D4FF,
-        .led_uniform = 0x4A9EFF,
-        .nav_colors = {0x2288EE, 0x3399FF, 0x44AAFF, 0x55BBFF, 0x66CCFF, 0x3377CC, 0x5599EE},
-        .pad_colors = {0x1166DD, 0x2277EE, 0x3388FF, 0x4499FF, 0x2266CC, 0x3377DD, 0x4488EE, 0x5599FF},
-        .encoder_rgb = {30, 100, 255},
+        .bg = 0x081424, .panel = 0x0E1E32, .surface = 0x163050, .border = 0x224870,
+        .text = 0xF0F6FF, .text_dim = 0xA0D0F0,
+        .accent = 0x6CC0FF, .accent2 = 0x90D8FF,
+        .success = 0x60E8D0, .warning = 0xF0C860, .error = 0xF08080, .info = 0x6CC0FF, .cyan = 0x60E0FF,
+        .led_uniform = 0x5AB0FF,
+        .nav_colors = {0x33A0FF, 0x44BBFF, 0x55CCFF, 0x66DDFF, 0x77EEFF, 0x4488DD, 0x66AAFF},
+        .pad_colors = {0x2288FF, 0x3399FF, 0x44AAFF, 0x55BBFF, 0x3388EE, 0x4499FF, 0x55AAFF, 0x66BBFF},
+        .encoder_rgb = {40, 120, 255},
         .track_colors = {
-            0x1155DD, 0x2266EE, 0x3377FF, 0x4488FF,
-            0x1177EE, 0x2288FF, 0x3399FF, 0x0066CC,
-            0x1188DD, 0x2299EE, 0x33AAFF, 0x44BBFF,
-            0x0055BB, 0x1166CC, 0x2277DD, 0x3388EE
+            0x2277FF, 0x3388FF, 0x4499FF, 0x55AAFF,
+            0x2299FF, 0x33AAFF, 0x44BBFF, 0x1188EE,
+            0x22AAFF, 0x33BBFF, 0x44CCFF, 0x55DDFF,
+            0x1177EE, 0x2288FF, 0x3399FF, 0x44AAFF
         },
         .name = "OCEAN"
     },

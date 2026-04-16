@@ -1085,10 +1085,9 @@ void ui_create_live_screen() {
         lv_obj_set_style_radius(pad, 14, 0);
         lv_obj_set_style_border_width(pad, 3, 0);
         lv_obj_set_style_border_color(pad, inst_colors[i], 0);
-        lv_obj_set_style_border_opa(pad, LV_OPA_70, 0);
         lv_obj_set_style_outline_width(pad, 3, 0);
         lv_obj_set_style_outline_color(pad, inst_colors[i], 0);
-        lv_obj_set_style_outline_opa(pad, LV_OPA_40, 0);
+        lv_obj_set_style_outline_opa(pad, LV_OPA_60, 0);
         lv_obj_set_style_outline_pad(pad, 2, 0);
         lv_obj_set_style_shadow_width(pad, 0, 0);
         lv_obj_set_style_shadow_opa(pad, LV_OPA_TRANSP, 0);
@@ -1262,11 +1261,11 @@ void ui_update_live_pads() {
             if (live_pad_names[pad])
                 lv_obj_set_style_text_color(live_pad_names[pad], lv_color_white(), 0);
         } else {
-            // === NEON RING IDLE — dim border, track color text ===
+            // === NEON RING IDLE — bright border, track color text ===
             lv_obj_set_style_border_width(live_pads[pad], 3, 0);
             lv_obj_set_style_border_color(live_pads[pad], inst_colors[pad], 0);
-            lv_obj_set_style_border_opa(live_pads[pad], LV_OPA_70, 0);
-            lv_obj_set_style_outline_opa(live_pads[pad], LV_OPA_40, 0);
+            lv_obj_set_style_border_opa(live_pads[pad], LV_OPA_COVER, 0);
+            lv_obj_set_style_outline_opa(live_pads[pad], LV_OPA_60, 0);
             if (live_pad_names[pad])
                 lv_obj_set_style_text_color(live_pad_names[pad], inst_colors[pad], 0);
         }
