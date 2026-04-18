@@ -8,10 +8,27 @@
 #include "../udp_handler.h"
 #include "../uart_handler.h"
 #include "../dsp_task.h"
-#include "../include/config.h"
+#include "config.h"
 #include <Arduino.h>
 #include <atomic>
 #include <math.h>
+
+// ── IntelliSense fallbacks ───────────────────────────────────────────────────
+// The real values are provided via -D flags in platformio.ini and via
+// config.h / lv_conf.h. These fallbacks only kick in for editor analysis
+// when IntelliSense can't resolve the build system's include/define graph.
+#ifndef LCD_H_RES
+#define LCD_H_RES 1024
+#endif
+#ifndef LCD_V_RES
+#define LCD_V_RES 600
+#endif
+#ifndef UI_H
+#define UI_H LCD_V_RES
+#endif
+#if defined(__INTELLISENSE__)
+LV_FONT_DECLARE(lv_font_montserrat_10)
+#endif
 
 // ── Pad event queue: touch_task (Core 0) → loop (Core 1) ──
 // Each entry packs (velocity << 8) | pad to carry MPC-style velocity all the
@@ -773,7 +790,7 @@ static void update_live_screen(void) {
         if (sync_pads_active && p4.is_playing && p4.steps[i][p4.current_step]) {
             if (band < 4) band = 4;
         }
-        if (band == pad_prev_band[i] && !step_changed) continue;
+        if (band == pad_prev_band[i]) continue;
         pad_prev_band[i] = band;
 
         lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[i]);
@@ -1093,13 +1110,22 @@ static void create_fx_screen(void) {
 }
 
 static void update_fx_screen(void) {
-    // cell0=Flanger(enc0), cell1=Delay(enc1), cell2=Reverb(enc2)
-    static const int enc_map[3] = {0, 1, 2};
+    // Page 0 cells 0..2: encoders (Flanger, Delay, Reverb)
+    // Page 1 cells 3..5: pots — cell3=DRIVE(pot3), cell4=CUTOFF(pot1), cell5=RESONANCE(pot2)
+    // Map each card to its underlying raw value + mute flag.
+    struct CellSrc { int val; bool muted; };
+    CellSrc src[6] = {
+        { p4.enc_value[0], p4.enc_muted[0] },  // Flanger
+        { p4.enc_value[1], p4.enc_muted[1] },  // Delay
+        { p4.enc_value[2], p4.enc_muted[2] },  // Reverb
+        { p4.pot_value[3], p4.pot_muted[0] },  // Drive (S3 pot3 → pot_muted[0])
+        { p4.pot_value[1], p4.pot_muted[1] },  // Cutoff (disabled, pot1 unused)
+        { p4.pot_value[2], p4.pot_muted[2] },  // Resonance (S3 pot2)
+    };
 
-    for (int cell = 0; cell < 3; cell++) {
-        int ei   = enc_map[cell];
-        int val  = p4.enc_value[ei];
-        bool muted = p4.enc_muted[ei];
+    for (int cell = 0; cell < 6; cell++) {
+        int val   = src[cell].val;
+        bool muted = src[cell].muted;
 
         int display_val = muted ? 0 : val;
         int pct = (int)((float)display_val / 127.0f * 100.0f + 0.5f);

@@ -191,7 +191,6 @@ static void process_basic(const UartBasicPacket* pkt) {
                 }
             }
             break;
-            break;
 
         case MSG_SYSTEM:
             switch (id) {

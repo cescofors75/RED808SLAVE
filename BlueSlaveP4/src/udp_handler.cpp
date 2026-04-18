@@ -246,7 +246,13 @@ void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterCutoff\",\"value\":%d}", hz);
             sendJson(buf); break;
         }
-        case 2: {  // Resonance (1.0-10.0 Q)
+        case 2: {  // Resonance (1.0-10.0 Q) — LP filter must be active to hear it.
+            // Mirror S3 behaviour: auto-enable LowPass so the Q is audible.
+            static bool filter_enabled = false;
+            if (!filter_enabled) {
+                sendJson("{\"cmd\":\"setFilter\",\"type\":1}");
+                filter_enabled = true;
+            }
             float q = 1.0f + norm * 9.0f;
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterResonance\",\"value\":%.2f}", q);
             sendJson(buf); break;
