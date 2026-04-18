@@ -201,9 +201,10 @@ static void lvgl_task(void* arg) {
             lv_timer_handler();
             lvgl_port_unlock();
         }
-        // 16ms matches the DPI panel 60Hz refresh — rendering faster only wastes
-        // CPU (full_refresh always repaints the whole 600x1024 framebuffer).
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(16));
+        // 8ms (125Hz tick) lets pad flashes appear on the very next vsync
+        // after a touch. The actual paint cost is now tiny (partial refresh),
+        // so the CPU spends most of the 8ms idle waiting for vsync.
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(8));
     }
 }
 
@@ -234,15 +235,17 @@ void lvgl_port_init(void) {
     lv_disp_draw_buf_init(&draw_buf, fb0, fb1, LVGL_BUF_PIXELS);
 
     // Display driver — zero-copy with dual PSRAM framebuffers + vsync.
-    // full_refresh=1 is REQUIRED with the dual-FB pointer-swap pattern: partial
-    // refresh would show tearing because the two FBs diverge on each swap.
+    // direct_mode=1 + 2 FBs + full_refresh=0 → LVGL renders only dirty areas
+    // and internally merges the previous frame's invalid area so both FBs stay
+    // consistent (standard LVGL 8.x dual-buffer direct_mode pattern).
+    // Cost per frame drops from 1.2 MB (full 1024×600) to just the dirty rect.
     lv_disp_drv_init(&disp_drv);
     disp_drv.hor_res      = LCD_H_RES;
     disp_drv.ver_res      = LCD_V_RES;
     disp_drv.flush_cb     = disp_flush_cb;
     disp_drv.draw_buf     = &draw_buf;
     disp_drv.direct_mode  = 1;
-    disp_drv.full_refresh = 1;
+    disp_drv.full_refresh = 0;
     lv_disp_drv_register(&disp_drv);
 
     // Touch — init GT911, then spawn polling task on Core 0

@@ -270,6 +270,12 @@ struct RippleState {
 static RippleState ripples[RIPPLE_POOL];
 
 static void ripple_spawn(int pad) {
+    // DISABLED — ripple overlay forced LVGL to invalidate a large expanding
+    // area every frame for 200ms per tap. On the live screen this stacks up
+    // when tapping fast and drowns the render task. The pad border already
+    // flashes on press, which is enough feedback.
+    (void)pad;
+    return;
     if (pad < 0 || pad >= 16 || !live_pad_btns[pad] || !scr_live) return;
     // Calculate pad center in screen coordinates
     lv_coord_t px = lv_obj_get_x(live_pad_btns[pad]);
@@ -339,11 +345,9 @@ static void pad_touch_cb(lv_event_t* e) {
     if (pad < 0 || pad > 15) return;
     // Dedup: skip if direct touch bypass already handled this pad recently
     unsigned long now = millis();
-    if (now - pad_last_direct[pad] < 100) return;
+    if (now - pad_last_direct[pad] < 30) return;
     // Immediate visual flash (local, no I/O)
-    p4.pad_flash_until[pad] = now + 120;
-    // Ripple effect
-    ripple_spawn(pad);
+    p4.pad_flash_until[pad] = now + 80;
     // Queue for UDP/UART send on Core 1 (outside LVGL mutex)
     enqueue_pad_event((uint8_t)pad);
 }
@@ -475,20 +479,14 @@ static void create_live_screen(void) {
         // Dark interior
         lv_obj_set_style_radius(live_pad_btns[i], 16, 0);
         lv_obj_set_style_bg_color(live_pad_btns[i], lv_color_black(), 0);
-        lv_obj_set_style_bg_opa(live_pad_btns[i], LV_OPA_80, 0);
-        // Neon ring border
+        lv_obj_set_style_bg_opa(live_pad_btns[i], LV_OPA_COVER, 0);
+        // Simple flat ring — no outline, no shadow (alpha blending + blur are
+        // the most expensive ops in LVGL software renderer and were repainted
+        // on every frame under full_refresh).
         lv_obj_set_style_border_width(live_pad_btns[i], 3, 0);
         lv_obj_set_style_border_color(live_pad_btns[i], tc, 0);
-        // Outer neon outline
-        lv_obj_set_style_outline_width(live_pad_btns[i], 3, 0);
-        lv_obj_set_style_outline_color(live_pad_btns[i], tc, 0);
-        lv_obj_set_style_outline_opa(live_pad_btns[i], LV_OPA_40, 0);
-        lv_obj_set_style_outline_pad(live_pad_btns[i], 2, 0);
-        // Neon glow shadow — OFF by default (too expensive with full_refresh)
+        lv_obj_set_style_outline_width(live_pad_btns[i], 0, 0);
         lv_obj_set_style_shadow_width(live_pad_btns[i], 0, 0);
-        lv_obj_set_style_shadow_color(live_pad_btns[i], tc, 0);
-        lv_obj_set_style_shadow_opa(live_pad_btns[i], LV_OPA_0, 0);
-        lv_obj_set_style_shadow_spread(live_pad_btns[i], 0, 0);
         lv_obj_add_event_cb(live_pad_btns[i], pad_touch_cb, LV_EVENT_PRESSED, (void*)(intptr_t)i);
 
         live_pad_labels[i] = lv_label_create(live_pad_btns[i]);
@@ -2168,13 +2166,13 @@ void ui_direct_touch_check(uint16_t x, uint16_t y) {
 
     int pad = row * 4 + col;
 
-    // Debounce: don't re-trigger same pad within 100ms
+    // Debounce: don't re-trigger same pad within 30ms (allows ~33 Hz rapid-fire)
     unsigned long now = millis();
-    if (now - pad_last_direct[pad] < 100) return;
+    if (now - pad_last_direct[pad] < 30) return;
     pad_last_direct[pad] = now;
 
     // Visual flash (direct, no LVGL needed)
-    p4.pad_flash_until[pad] = now + 120;
+    p4.pad_flash_until[pad] = now + 80;
 
     // Enqueue for UDP send on Core 1
     enqueue_pad_event((uint8_t)pad);
