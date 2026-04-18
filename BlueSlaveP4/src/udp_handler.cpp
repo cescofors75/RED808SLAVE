@@ -520,9 +520,12 @@ void udp_handler_process(void) {
         }
     }
 
-    // --- Receive UDP packets ---
+    // --- Receive UDP packets (bounded) ---
+    // Cap packets per loop iteration to avoid starving ui_process_pad_queue()
+    // under master-sync floods. Pad taps have priority over sync processing.
     int packetSize = udp.parsePacket();
-    while (packetSize > 0) {
+    int pkt_budget = 4;
+    while (packetSize > 0 && pkt_budget-- > 0) {
         int len = udp.read(rxBuf, sizeof(rxBuf) - 1);
         if (len > 0) {
             rxBuf[len] = '\0';
@@ -543,6 +546,11 @@ void udp_handler_process(void) {
                 processJson(rxBuf, len);
             }
         }
+
+        // Drain pad queue between packets — ensures taps go out even under
+        // heavy inbound UDP traffic from the master.
+        extern void ui_process_pad_queue(void);
+        ui_process_pad_queue();
 
         packetSize = udp.parsePacket();
     }

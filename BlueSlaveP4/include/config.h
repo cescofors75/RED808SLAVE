@@ -138,7 +138,10 @@ namespace Config {
     constexpr int DEFAULT_BPM   = 120;
 
     // UI timing
-    constexpr uint32_t SCREEN_UPDATE_MS = 10;   // 100Hz — P4 can handle it
+    // 30Hz: reduces LVGL mutex contention on Core1 so the render task (Core0)
+    // and the touch task have lower latency. State-only updates (labels, pad
+    // colors) don't need 100Hz — hit flashes are driven by the 60Hz render loop.
+    constexpr uint32_t SCREEN_UPDATE_MS = 33;
     constexpr uint32_t UART_RX_TIMEOUT_MS = 50;
     constexpr uint32_t HEARTBEAT_TIMEOUT_MS = 3000;
 }

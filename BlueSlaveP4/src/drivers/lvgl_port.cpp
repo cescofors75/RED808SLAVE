@@ -58,16 +58,26 @@ static bool IRAM_ATTR dpi_on_refresh_done(esp_lcd_panel_handle_t panel,
 #define LVGL_BUF_PIXELS   (LCD_H_RES * LCD_V_RES)
 
 // =============================================================================
-// DISPLAY FLUSH — zero-copy swap + vsync-gated completion
-// draw_bitmap with internal FB pointer → pointer swap (no memcpy!)
+// DISPLAY FLUSH \u2014 zero-copy swap + vsync-gated completion
+// draw_bitmap with internal FB pointer \u2192 pointer swap (no memcpy!)
+// In direct_mode + partial refresh, LVGL may call this multiple times per
+// frame (one per dirty area). Only the LAST call actually swaps + waits vsync.
 // =============================================================================
 static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
+    (void)area;
+    // Intermediate dirty regions \u2014 LVGL is still composing the frame.
+    // In direct_mode the whole FB pointer is valid, so we just ack.
+    if (!lv_disp_flush_is_last(drv)) {
+        lv_disp_flush_ready(drv);
+        return;
+    }
+
     esp_lcd_panel_handle_t panel = display_get_panel();
 
-    // Step 1: swap active FB (DPI recognises internal pointer → zero-copy)
+    // Step 1: swap active FB (DPI recognises internal pointer \u2192 zero-copy)
     esp_lcd_panel_draw_bitmap(panel, 0, 0, LCD_H_RES, LCD_V_RES, color_p);
 
-    // Step 2: arm handshake — must come AFTER draw_bitmap
+    // Step 2: arm handshake \u2014 must come AFTER draw_bitmap
     xSemaphoreGive(sem_gui_ready);
 
     // Step 3: wait for next frame refresh (vsync ACK)
@@ -187,11 +197,13 @@ static void lvgl_task(void* arg) {
 
     TickType_t last_wake = xTaskGetTickCount();
     while (true) {
-        if (lvgl_port_lock(15)) {
+        if (lvgl_port_lock(5)) {
             lv_timer_handler();
             lvgl_port_unlock();
         }
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(5));  // 200Hz LVGL tick
+        // 16ms matches the DPI panel 60Hz refresh — rendering faster only wastes
+        // CPU (full_refresh always repaints the whole 600x1024 framebuffer).
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(16));
     }
 }
 
@@ -221,7 +233,9 @@ void lvgl_port_init(void) {
 
     lv_disp_draw_buf_init(&draw_buf, fb0, fb1, LVGL_BUF_PIXELS);
 
-    // Display driver — zero-copy requires direct_mode + full_refresh
+    // Display driver — zero-copy with dual PSRAM framebuffers + vsync.
+    // full_refresh=1 is REQUIRED with the dual-FB pointer-swap pattern: partial
+    // refresh would show tearing because the two FBs diverge on each swap.
     lv_disp_drv_init(&disp_drv);
     disp_drv.hor_res      = LCD_H_RES;
     disp_drv.ver_res      = LCD_V_RES;
@@ -232,8 +246,10 @@ void lvgl_port_init(void) {
     lv_disp_drv_register(&disp_drv);
 
     // Touch — init GT911, then spawn polling task on Core 0
+    // Higher priority than LVGL render (5) so pad taps are detected immediately
+    // even when LVGL is flushing a frame.
     gt911_init();
-    xTaskCreatePinnedToCore(touch_task, "touch", 4096, NULL, 3, NULL, 0);
+    xTaskCreatePinnedToCore(touch_task, "touch", 4096, NULL, 6, NULL, 0);
 
     // Register 5 LVGL input devices (read from cached touch_data — instant)
     for (int i = 0; i < MAX_TOUCH_POINTS; i++) {

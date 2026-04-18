@@ -89,7 +89,9 @@ void loop() {
     unsigned long now = millis();
     if (now - lastScreenUpdate >= Config::SCREEN_UPDATE_MS) {
         lastScreenUpdate = now;
-        if (lvgl_port_lock(15)) {
+        // Short timeout: if render task is mid-frame, skip this update cycle
+        // instead of stalling Core1 (which must keep WiFi/UART responsive).
+        if (lvgl_port_lock(3)) {
             ui_update_current_screen();
             lvgl_port_unlock();
         }
