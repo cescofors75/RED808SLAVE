@@ -122,7 +122,7 @@
 #define UART_S3_RX_PIN  33      // P4 RX ← S3 TX (GPIO16)
 #endif
 #define UART_S3_PORT    1       // UART1 (UART0 used for USB debug)
-#define UART_RX_BUF     512
+#define UART_RX_BUF     1024    // Was 512: ~9ms of 921600-baud headroom so LVGL flush stalls don't overflow
 #define UART_TX_BUF     256
 
 // =============================================================================

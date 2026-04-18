@@ -194,7 +194,8 @@ namespace WiFiConfig {
 // SEQUENCER
 // =============================================================================
 namespace Config {
-    constexpr int MAX_STEPS     = 16;
+    constexpr int MAX_STEPS     = 64;  // max steps per pattern (4 bars × 16 steps)
+    constexpr int STEPS_PER_BANK = 16; // steps visible in the UI at once (1 bar)
     constexpr int MAX_TRACKS    = 16;
     constexpr int TRACKS_PER_PAGE = 8;
     constexpr int MAX_PATTERNS  = 16;

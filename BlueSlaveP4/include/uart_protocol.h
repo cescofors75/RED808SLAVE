@@ -15,6 +15,13 @@
 #define UART_START_EXTENDED 0xAB    // Variable-length packet marker
 #define UART_EXT_HEADER_LEN 5      // Header before payload
 
+// Maximum payload size for an extended packet. Validated on RX to drop
+// malformed/oversized frames early. Must accommodate:
+//   - MSG_PATTERN_DATA: 16 tracks * 64 steps = 1024 bits = 128 bytes (current = 32B for 16 steps)
+//   - MSG_SD_DATA entries: index(1) + type(1) + name(32) ~= 34B
+// 128 leaves comfortable headroom; do NOT exceed UART_RX_BUF / 2.
+#define UART_EXT_MAX_PAYLOAD 128
+
 // =============================================================================
 // MESSAGE TYPES (Byte 1)
 // =============================================================================
@@ -166,4 +173,55 @@ static inline void uart_build_basic(UartBasicPacket* pkt, uint8_t type, uint8_t 
 static inline bool uart_validate_basic(const UartBasicPacket* pkt) {
     return (pkt->start == UART_START_BASIC) &&
            (pkt->checksum == uart_checksum_basic(pkt->start, pkt->type, pkt->id, pkt->value));
+}
+
+// Strict validator: checksum + type + per-type id/value range checks.
+// Returns false for any out-of-spec field so corrupt-but-checksum-valid
+// packets (rare but possible with single-bit flips on multiple fields)
+// are dropped before they reach the state machine.
+static inline bool uart_validate_packet(const UartBasicPacket* pkt) {
+    if (!uart_validate_basic(pkt)) return false;
+    switch (pkt->type) {
+        case MSG_ENCODER:
+            return pkt->id <= ENC_BPM;                  // 0..3
+        case MSG_PAD:
+            return pkt->id < 16;                        // 0..15, value=velocity 0..127 also OK >=128 release
+        case MSG_POT:
+            return pkt->id <= POT_DRIVE && pkt->value <= 127;
+        case MSG_SYSTEM:
+            switch (pkt->id) {
+                case SYS_PLAY_STATE:    return pkt->value <= 1;
+                case SYS_WIFI_STATE:    return pkt->value <= 1;
+                case SYS_MASTER_CONN:   return pkt->value <= 1;
+                case SYS_THEME:         return pkt->value <= 5;
+                case SYS_PATTERN:       return pkt->value < 16;
+                case SYS_STEP:          return pkt->value < 64;
+                case SYS_BPM_INT:       return pkt->value >= 40 && pkt->value <= 240;
+                case SYS_BPM_FRAC:      return pkt->value <= 9;
+                case SYS_VOLUME:
+                case SYS_SEQ_VOL:
+                case SYS_LIVE_VOL:      return pkt->value <= 150;
+                case SYS_HEARTBEAT:     return true;
+                default: return false;
+            }
+        case MSG_FX:
+            return pkt->id <= FX_RESP_MODE;
+        case MSG_TRACK: {
+            uint8_t sub = pkt->id & 0xF0;
+            uint8_t trk = pkt->id & 0x0F;
+            if (trk >= 16) return false;
+            if (sub == TRK_MUTE_BIT || sub == TRK_SOLO_BIT) return pkt->value <= 1;
+            if (sub == TRK_VOLUME)                          return pkt->value <= 100;
+            return false;
+        }
+        case MSG_SCREEN:
+            return pkt->id == SCR_NAVIGATE;
+        case MSG_TOUCH_CMD:
+            return pkt->id <= TCMD_SD_LOAD_MIDI;
+        case MSG_PATTERN_DATA:
+        case MSG_SD_DATA:
+            return false;                                // not a basic packet
+        default:
+            return false;                                // unknown type
+    }
 }

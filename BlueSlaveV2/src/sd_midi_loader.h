@@ -1,7 +1,7 @@
 // =============================================================================
 // sd_midi_loader.h — Minimal MIDI file parser for drum patterns
-// Reads Standard MIDI Format (.mid) from SD_MMC and extracts a 16×16 step grid
-// based on GM channel 10 (channel index 9) drum note assignments.
+// Reads Standard MIDI Format (.mid) from SD_MMC and extracts a step grid
+// of up to MAX_STEPS 16th-note steps (up to 4 bars) per pattern.
 //
 // Track mapping (GM standard drums):
 //   0=Kick  1=Snare  2=Closed HH  3=Pedal HH  4=Open HH  5=Crash
@@ -10,14 +10,25 @@
 // =============================================================================
 #pragma once
 #include <cstdint>
+#include "config.h"
 
 // Parse MIDI file at `path` (SD_MMC).
-// Fills steps[track][step] for the first 16 steps (one bar of 16th notes).
-// Notes beyond one bar are wrapped modulo 16.
+// Fills steps[track][step] collecting all matching MIDI events.
 // name_out receives filename without extension (max name_max chars).
+// bpm_out  receives the tempo from the first Set Tempo meta-event (0 if none).
+// length_out receives the actual pattern length (16/32/48/64 steps = 1-4 bars).
+//
+// midi_channel:
+//   9    (default) — GM drum mode: channel 10 only, uses GM drum note map
+//  -1              — all channels: ch.10 uses GM map, others use note%16
+//   0-15           — one specific channel only, notes mapped via note%16
+//
 // Returns true if at least one drum step was found.
 bool midi_load_pattern(const char* path,
-                       bool        steps[16][16],
+                       bool        steps[Config::MAX_TRACKS][Config::MAX_STEPS],
                        char*       name_out,
                        int         name_max,
-                       int*        steps_found_out = nullptr);
+                       int*        steps_found_out = nullptr,
+                       float*      bpm_out         = nullptr,
+                       int         midi_channel    = 9,
+                       int*        length_out      = nullptr);

@@ -423,8 +423,10 @@ static void feed_byte(uint8_t b) {
         int payload_len = ((int)hdr->len_h << 8) | hdr->len_l;
         int total = UART_EXT_HEADER_LEN + payload_len + 1; // +1 for checksum
 
-        if (total > (int)sizeof(rxBuf)) {
-            // Packet too large — discard
+        // Reject oversized payload up front (also catches garbage in len bytes)
+        if (payload_len > UART_EXT_MAX_PAYLOAD || total > (int)sizeof(rxBuf)) {
+            // Packet too large — discard and resync
+            uart_stats.rx_checksum_errors++;
             rxHead = 0;
             return;
         }

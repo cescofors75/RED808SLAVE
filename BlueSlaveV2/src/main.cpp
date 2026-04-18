@@ -329,7 +329,7 @@ static void requestMasterSync(bool requestState);
 void sendUDPCommand(const char* cmd);
 void sendUDPCommand(JsonDocument& doc);
 static void applyUnifiedMasterVolume(int value, bool sendToMaster);
-static void applyBPMPrecise(float bpm, bool sendToMaster);
+void applyBPMPrecise(float bpm, bool sendToMaster);
 #if S3_WIFI_ENABLED
 void receiveUDPData();
 #endif
@@ -474,13 +474,21 @@ static void handleP4SdLoadMidi(uint8_t slot) {
     else
         snprintf(path, sizeof(path), "%s/%s", p4sd_dir, p4sd_selected);
     // Parse MIDI
-    bool steps[16][16] = {};
+    bool steps[Config::MAX_TRACKS][Config::MAX_STEPS] = {};
     char name[12] = "";
-    int found = 0;
-    bool ok = midi_load_pattern(path, steps, name, sizeof(name), &found);
+    int   found = 0;
+    float midi_bpm = 0.0f;
+    int   plen = Config::STEPS_PER_BANK;
+    bool ok = midi_load_pattern(path, steps, name, sizeof(name), &found, &midi_bpm, 9, &plen);
     uint8_t resp = ok ? slot : 0xFF;
     uart_bridge_send_extended(MSG_SD_DATA, SD_RESP_LOAD_OK, &resp, 1);
-    if (ok) handleMidiPatternLoaded(slot, steps, name);
+    if (ok) {
+        if (midi_bpm > 0.0f) {
+            RED808_LOG_PRINTF("[MIDI] Tempo from file: %.1f BPM\n", midi_bpm);
+            applyBPMPrecise(midi_bpm, true);
+        }
+        handleMidiPatternLoaded(slot, steps, name, plen);
+    }
 }
 
 // =============================================================================
@@ -536,9 +544,11 @@ void handleP4TouchCommand(uint8_t cmdId, uint8_t value) {
 // =============================================================================
 void handleP4PatternData(int pat, const bool steps[16][16]) {
     if (pat < 0 || pat >= Config::MAX_PATTERNS) return;
-    for (int t = 0; t < Config::MAX_TRACKS; t++)
+    for (int t = 0; t < Config::MAX_TRACKS; t++) {
         for (int s = 0; s < Config::MAX_STEPS; s++)
-            patterns[pat].steps[t][s] = steps[t][s];
+            patterns[pat].steps[t][s] = (s < 16) ? steps[t][s] : false;
+    }
+    patterns[pat].length = Config::STEPS_PER_BANK;  // P4 always sends 16 steps
     // Update current pattern number
     if (currentPattern != pat) {
         currentPattern = pat;
@@ -554,24 +564,30 @@ void handleP4PatternData(int pat, const bool steps[16][16]) {
 // sends pattern data + selection to P4 via UART, then navigates to sequencer.
 // NOTE: called from within LVGL callback — no delay() allowed, no lvgl_port_lock.
 // =============================================================================
-void handleMidiPatternLoaded(int slot, const bool steps[16][16], const char* name) {
+void handleMidiPatternLoaded(int slot, const bool steps[16][64], const char* name, int patternLength) {
     if (slot < 0 || slot >= Config::MAX_PATTERNS) return;
 
     // Copy steps into local pattern array
+    int len = (patternLength > 0 && patternLength <= Config::MAX_STEPS) ? patternLength : Config::STEPS_PER_BANK;
     for (int t = 0; t < Config::MAX_TRACKS; t++)
         for (int s = 0; s < Config::MAX_STEPS; s++)
             patterns[slot].steps[t][s] = steps[t][s];
     patterns[slot].name = name;
+    patterns[slot].length = len;
 
     // Select this pattern locally
     currentPattern = slot;
     needsFullRedraw = true;
 
-    // Send to Master via UDP: selectPattern + all active steps (no delays)
+    // Send to Master via UDP: selectPattern + all active steps + pattern length
     selectPatternOnMaster(slot);
     if (udpConnected) {
+        // Notify master of actual pattern length
+        char lbuf[64];
+        snprintf(lbuf, sizeof(lbuf), "{\"cmd\":\"setPatternLength\",\"length\":%d}", len);
+        sendUDPCommand(lbuf);
         for (int t = 0; t < Config::MAX_TRACKS; t++) {
-            for (int s = 0; s < Config::MAX_STEPS; s++) {
+            for (int s = 0; s < len; s++) {
                 if (steps[t][s]) {
                     char buf[80];
                     snprintf(buf, sizeof(buf),
@@ -582,12 +598,11 @@ void handleMidiPatternLoaded(int slot, const bool steps[16][16], const char* nam
         }
     }
 
-    // Send to P4 via UART: pattern select FIRST so P4→master selectPattern
-    // arrives before the setStep commands (extended packet arrives after)
+    // Send to P4 via UART: only first STEPS_PER_BANK steps (P4 protocol fixed at 16)
     uart_bridge_send_pattern(slot);
     uart_bridge_send_pattern_data(slot, patterns[slot].steps, Config::MAX_TRACKS);
 
-    RED808_LOG_PRINTF("[MIDI] Loaded pattern %d '%s' → Master + P4\n", slot + 1, name);
+    RED808_LOG_PRINTF("[MIDI] Loaded pattern %d '%s' len=%d → Master + P4\n", slot + 1, name, len);
 }
 
 // =============================================================================
@@ -599,7 +614,7 @@ static constexpr const char* NVS_NAMESPACE = "red808";
 static unsigned long nvs_last_save_ms = 0;
 static bool nvs_dirty = false;
 
-static void applyBPMPrecise(float bpm, bool sendToMaster) {
+void applyBPMPrecise(float bpm, bool sendToMaster) {
     float clamped = constrain(bpm, (float)Config::MIN_BPM, (float)Config::MAX_BPM);
     currentBPMPrecise = clamped;
     currentBPM = (int)lroundf(clamped);
@@ -1148,6 +1163,14 @@ void sendUDPCommand(const char* cmd) {
     udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
     udp.write((const uint8_t*)cmd, strlen(cmd));
     udp.endPacket();
+#if RED808_ENABLE_DEBUG_LOG
+    if (cmd && (strstr(cmd, "Filter") || strstr(cmd, "Distortion") ||
+                strstr(cmd, "Delay") || strstr(cmd, "Reverb") ||
+                strstr(cmd, "Chorus") || strstr(cmd, "BitCrush") ||
+                strstr(cmd, "SampleRate"))) {
+        Serial.print("[FX-TX] "); Serial.println(cmd);
+    }
+#endif
 #endif
 }
 
@@ -1160,6 +1183,15 @@ void sendUDPCommand(JsonDocument& doc) {
         udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
         udp.write((const uint8_t*)buf, len);
         udp.endPacket();
+#if RED808_ENABLE_DEBUG_LOG
+        const char* cmd = doc["cmd"] | (const char*)nullptr;
+        if (cmd && (strstr(cmd, "Filter") || strstr(cmd, "Distortion") ||
+                    strstr(cmd, "Delay") || strstr(cmd, "Reverb") ||
+                    strstr(cmd, "Chorus") || strstr(cmd, "BitCrush") ||
+                    strstr(cmd, "SampleRate"))) {
+            Serial.print("[FX-TX] "); Serial.write((const uint8_t*)buf, len); Serial.println();
+        }
+#endif
     }
 #endif
 }
@@ -1369,10 +1401,27 @@ void receiveUDPData() {
         }
     }
     else if (strcmp(cmd, "step_update") == 0 || strcmp(cmd, "step_sync") == 0) {
-        // Visual step is driven by local clock — ignore master step position
-        // (UDP packet loss causes jumps: e.g. 1,3,6,8 instead of smooth 0,1,2,3)
-        // Only track that master is alive for connection status
+        // Local clock drives currentStep for smooth visuals (no UDP jitter).
+        // But if the master's position drifts more than 1 step from local,
+        // snap the local clock to re-sync — prevents permanent visual offset.
         lastStepUpdateMs = millis();
+        if (isPlaying) {
+            int masterStep = doc["step"] | -1;
+            int patLen = patterns[currentPattern].length;
+            if (masterStep >= 0 && masterStep < patLen) {
+                // Circular distance (handles wrap correctly)
+                int diff = masterStep - (int)currentStep;
+                if (diff < -(patLen / 2)) diff += patLen;
+                if (diff >  (patLen / 2)) diff -= patLen;
+                if (diff < 0) diff = -diff;
+                if (diff > 1) {
+                    // Clocks have drifted — re-anchor to master position
+                    currentStep = masterStep;
+                    lastLocalStepUs = micros();
+                    lastLocalStepMs = millis();
+                }
+            }
+        }
     }
     else if (strcmp(cmd, "play_state") == 0) {
         bool playing = doc["playing"] | false;
@@ -1837,6 +1886,36 @@ void scanI2CHub() {
     }
 
     int byteButtonFoundCount = byteButtonsFound;
+
+    // ── ByteButton direct-bus fallback ────────────────────────────────────
+    // If not all ByteButtons were found on hub channels, try the direct bus
+    // (hub fully deselected). Useful when a unit is connected upstream of
+    // the hub or behind a passive splitter.
+    if (byteButtonsFound < BYTEBUTTON_COUNT) {
+        i2c_hub_deselect();
+        delay(5);
+        if (i2c_device_present(BYTEBUTTON_ADDR)) {
+            // Find next unassigned slot
+            int moduleIdx = -1;
+            for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
+                if (!byteButtonConnected[m]) { moduleIdx = m; break; }
+            }
+            if (moduleIdx >= 0) {
+                byteButtonHubChannel[moduleIdx] = -2;  // -2 = direct bus (no hub)
+                byteButtonConnected[moduleIdx] = true;
+                prevByteButtonState[moduleIdx] = 0;
+                byteButtonsFound++;
+                byteButtonFoundCount = byteButtonsFound;
+                RED808_LOG_PRINTF("[I2C] ByteButton #%d found on DIRECT bus (no hub)\n", moduleIdx + 1);
+                if (i2c_lock(50)) {
+                    // hub is already deselected
+                    byteButtonLedInitialized[moduleIdx] = byteButtonApplyLedConfigLocked();
+                    i2c_unlock();
+                }
+            }
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
         if (!byteButtonConnected[m]) {
@@ -3018,7 +3097,7 @@ void loop() {
         if ((uint32_t)(nowUs - lastLocalStepUs) >= step_us) {
             lastLocalStepUs = nowUs;  // snap to now — NEVER accumulate, NEVER catch up
             lastLocalStepMs = now;
-            currentStep = (currentStep + 1) % Config::MAX_STEPS;
+            currentStep = (currentStep + 1) % patterns[currentPattern].length;
             uart_bridge_send_step(currentStep);
 
             // ── Sequencer triggers: flash pads always; send UDP only when connected ──

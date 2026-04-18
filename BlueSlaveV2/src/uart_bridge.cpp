@@ -37,7 +37,7 @@ void uart_bridge_init(void) {
     RED808_LOG_PRINTLN("[UART] Bridge: UART0 → CH343 → USB-C → P4");
 #else
     P4Serial.begin(UART_BAUD_RATE, SERIAL_8N1, Config::UART_P4_RX_PIN, Config::UART_P4_TX_PIN);
-    P4Serial.setRxBufferSize(512);
+    P4Serial.setRxBufferSize(1024);  // Was 512: ~9ms of headroom at 921600 baud absorbs LVGL stalls
     P4Serial.setTxBufferSize(256);
     RED808_LOG_PRINTF("[UART] Bridge init: TX=%d RX=%d @ %d baud\n",
                       Config::UART_P4_TX_PIN, Config::UART_P4_RX_PIN, UART_BAUD_RATE);
@@ -106,12 +106,12 @@ int uart_bridge_receive(void) {
             uint8_t hdr[UART_EXT_HEADER_LEN];
             P4Serial.readBytes(hdr, UART_EXT_HEADER_LEN);
             uint16_t payloadLen = ((uint16_t)hdr[3] << 8) | hdr[4];
-            if (payloadLen > 64) continue;  // sanity check
+            if (payloadLen > UART_EXT_MAX_PAYLOAD) continue;  // sanity check (was hardcoded 64)
             // Wait briefly for payload + checksum to arrive (~0.4ms at 921600)
             unsigned long t0 = millis();
             while (P4Serial.available() < (int)(payloadLen + 1) && (millis() - t0) < 5) {}
             if (P4Serial.available() < (int)(payloadLen + 1)) continue;
-            uint8_t payload[64];
+            uint8_t payload[UART_EXT_MAX_PAYLOAD];
             P4Serial.readBytes(payload, (int)payloadLen);
             uint8_t cs_rx = (uint8_t)P4Serial.read();
             // Validate checksum
@@ -225,8 +225,8 @@ void uart_bridge_send_pad_trigger(int pad, uint8_t velocity) {
     uart_bridge_send(MSG_PAD, (uint8_t)constrain(pad, 0, 15), velocity);
 }
 
-void uart_bridge_send_pattern_data(int pattern, const bool steps[][16], int numTracks) {
-    // Pack 16 tracks × 16 steps into 32 bytes (1 bit per step, 2 bytes per track)
+void uart_bridge_send_pattern_data(int pattern, const bool steps[][64], int numTracks) {
+    // Pack first 16 steps × 16 tracks into 32 bytes (P4 protocol fixed at 16 steps)
     uint8_t packed[32];
     memset(packed, 0, sizeof(packed));
     int tracks = constrain(numTracks, 0, 16);

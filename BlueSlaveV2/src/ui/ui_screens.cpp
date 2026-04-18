@@ -68,24 +68,25 @@ static lv_obj_t* perf_bb_action_labels[BYTEBUTTON_TOTAL_BUTTONS] = {};
 
 // diag_event_log removed (EVENT LOG disabled)
 
-// Sequencer grid buttons
-static lv_obj_t* seq_grid[Config::MAX_TRACKS][Config::MAX_STEPS];
+// Sequencer grid buttons — sized to STEPS_PER_BANK (16 visible cols at once)
+static lv_obj_t* seq_grid[Config::MAX_TRACKS][Config::STEPS_PER_BANK];
 static lv_obj_t* seq_track_labels[Config::MAX_TRACKS];
 static lv_obj_t* seq_track_panels[Config::MAX_TRACKS];
 static lv_obj_t* seq_solo_btns[Config::MAX_TRACKS];
 static lv_obj_t* seq_mute_btns[Config::MAX_TRACKS];
 static lv_obj_t* lbl_step_indicator = NULL;
-static lv_obj_t* seq_step_labels[Config::MAX_STEPS] = {};
+static lv_obj_t* seq_step_labels[Config::STEPS_PER_BANK] = {};
 static lv_obj_t* seq_track_meta_labels[Config::MAX_TRACKS] = {};
 static lv_obj_t* seq_track_volume_labels[Config::MAX_TRACKS] = {};
 static lv_obj_t* seq_info_pattern = NULL;
 static lv_obj_t* seq_info_track = NULL;
 static lv_obj_t* seq_info_transport = NULL;
 static lv_obj_t* seq_info_page = NULL;
-static lv_obj_t* seq_column_highlights[Config::MAX_STEPS];
-static lv_obj_t* seq_step_leds[Config::MAX_STEPS];
+static lv_obj_t* seq_column_highlights[Config::STEPS_PER_BANK];
+static lv_obj_t* seq_step_leds[Config::STEPS_PER_BANK];
 static lv_obj_t* seq_playhead_line = NULL;   // Lightweight moving line indicator
 static int seq_page = 0;
+static int seq_step_bank = 0;  // which 16-step bank is visible (0=steps 0-15, 1=16-31, ...)
 // Cached grid geometry for playhead positioning
 static int seq_cached_grid_x = 0;
 static int seq_cached_grid_y = 0;
@@ -97,6 +98,9 @@ static lv_obj_t* seq_page_btn = NULL;
 static lv_obj_t* seq_page_lbl = NULL;
 static lv_obj_t* seq_page_prev_btn = NULL;
 static lv_obj_t* seq_page_next_btn = NULL;
+static lv_obj_t* seq_bank_lbl = NULL;       // "BAR 1/2" label
+static lv_obj_t* seq_bank_prev_btn = NULL;
+static lv_obj_t* seq_bank_next_btn = NULL;
 static lv_obj_t* seq_play_btn = NULL;
 static lv_obj_t* seq_play_lbl = NULL;
 static lv_obj_t* seq_unmute_btn = NULL;
@@ -379,15 +383,15 @@ static const char* const kBootLines[] = {
 };
 
 // ============================================================================
-// CIRCULAR SEQUENCER
+// CIRCULAR SEQUENCER — always shows STEPS_PER_BANK (16) steps
 // ============================================================================
-static lv_obj_t* circ_step_btns[Config::MAX_STEPS] = {};
+static lv_obj_t* circ_step_btns[Config::STEPS_PER_BANK] = {};
 static lv_obj_t* circ_playhead = NULL;
 static lv_obj_t* circ_track_name_lbl = NULL;
 static lv_obj_t* circ_track_btns[Config::MAX_TRACKS] = {};
 static lv_obj_t* lbl_circ_info = NULL;
-static int circ_step_cx[Config::MAX_STEPS];
-static int circ_step_cy[Config::MAX_STEPS];
+static int circ_step_cx[Config::STEPS_PER_BANK];
+static int circ_step_cy[Config::STEPS_PER_BANK];
 #if PORTRAIT_MODE
 static constexpr int CIRC_CX = UI_W / 2;       // 300
 static constexpr int CIRC_CY = 340;
@@ -1289,20 +1293,22 @@ void ui_update_live_pads() {
 // ============================================================================
 static void seq_step_cb(lv_event_t* e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    int track = idx / Config::MAX_STEPS;
-    int step = idx % Config::MAX_STEPS;
+    int track = idx / Config::STEPS_PER_BANK;
+    int rel_s = idx % Config::STEPS_PER_BANK;
+    int abs_s = seq_step_bank * Config::STEPS_PER_BANK + rel_s;
+    if (abs_s >= Config::MAX_STEPS) return;
     selectedTrack = track;
-    patterns[currentPattern].steps[track][step] = !patterns[currentPattern].steps[track][step];
-    bool active = patterns[currentPattern].steps[track][step];
+    patterns[currentPattern].steps[track][abs_s] = !patterns[currentPattern].steps[track][abs_s];
+    bool active = patterns[currentPattern].steps[track][abs_s];
     lv_obj_set_style_bg_color(lv_event_get_target(e),
         active ? inst_colors[track] : RED808_SURFACE, 0);
     // Send step update to master
     char buf[80];
     snprintf(buf, sizeof(buf), "{\"cmd\":\"setStep\",\"track\":%d,\"step\":%d,\"active\":%s}",
-        track, step, active ? "true" : "false");
+        track, abs_s, active ? "true" : "false");
     sendUDPCommand(buf);
     // Relay to P4 when WiFi is off (P4 forwards to Master via its own WiFi)
-    uart_bridge_send(MSG_TOUCH_CMD, TCMD_STEP_TOGGLE, (uint8_t)((track << 4) | step));
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_STEP_TOGGLE, (uint8_t)((track << 4) | rel_s));
 }
 
 // Is track effectively silent? (muted directly, or muted by another track's solo)
@@ -1355,7 +1361,7 @@ static void seq_update_solo_mute_visuals(int track) {
             effMuted ? LV_OPA_40 : LV_OPA_COVER, 0);
     }
     // Grid cells: dim when effectively muted
-    for (int s = 0; s < Config::MAX_STEPS; s++) {
+    for (int s = 0; s < Config::STEPS_PER_BANK; s++) {
         if (seq_grid[track][s]) {
             lv_obj_set_style_bg_opa(seq_grid[track][s],
                 effMuted ? LV_OPA_30 : LV_OPA_COVER, 0);
@@ -1458,7 +1464,7 @@ static void seq_apply_page() {
             if (visible) lv_obj_clear_flag(seq_mute_btns[t], LV_OBJ_FLAG_HIDDEN);
             else         lv_obj_add_flag(seq_mute_btns[t], LV_OBJ_FLAG_HIDDEN);
         }
-        for (int s = 0; s < Config::MAX_STEPS; s++) {
+        for (int s = 0; s < Config::STEPS_PER_BANK; s++) {
             if (seq_grid[t][s]) {
                 if (visible) lv_obj_clear_flag(seq_grid[t][s], LV_OBJ_FLAG_HIDDEN);
                 else         lv_obj_add_flag(seq_grid[t][s], LV_OBJ_FLAG_HIDDEN);
@@ -1468,6 +1474,49 @@ static void seq_apply_page() {
     if (seq_page_lbl) {
         lv_label_set_text_fmt(seq_page_lbl, "PAGE %d/2", seq_page + 1);
     }
+}
+
+// Update the visible 16-step bank: relabel step chips and recolor all cells.
+// Call after seq_step_bank changes (manual or auto-follow).
+static void seq_apply_step_bank(bool force_redraw = false) {
+    int bank_start = seq_step_bank * Config::STEPS_PER_BANK;
+    int pat_len    = patterns[currentPattern].length;
+    int total_banks = (pat_len + Config::STEPS_PER_BANK - 1) / Config::STEPS_PER_BANK;
+    if (total_banks < 1) total_banks = 1;
+
+    // Update step number labels
+    for (int s = 0; s < Config::STEPS_PER_BANK; s++) {
+        if (seq_step_labels[s])
+            lv_label_set_text_fmt(seq_step_labels[s], "%02d", bank_start + s + 1);
+    }
+
+    // Update bank indicator button
+    if (seq_bank_lbl)
+        lv_label_set_text_fmt(seq_bank_lbl, "BAR %d/%d", seq_step_bank + 1, total_banks);
+
+    // Recolor all grid cells for the current bank
+    for (int t = 0; t < Config::MAX_TRACKS; t++) {
+        for (int s = 0; s < Config::STEPS_PER_BANK; s++) {
+            if (!seq_grid[t][s]) continue;
+            int abs_s = bank_start + s;
+            bool active = (abs_s < pat_len) && patterns[currentPattern].steps[t][abs_s];
+            lv_obj_set_style_bg_color(seq_grid[t][s],
+                active ? inst_colors[t] : RED808_SURFACE, 0);
+        }
+    }
+
+    // Dim all step labels; playing step will be re-highlighted in ui_update_sequencer
+    for (int s = 0; s < Config::STEPS_PER_BANK; s++) {
+        if (seq_step_labels[s])
+            lv_obj_set_style_text_color(seq_step_labels[s], RED808_TEXT_DIM, 0);
+    }
+    // Reset LED strip
+    for (int s = 0; s < Config::STEPS_PER_BANK; s++) {
+        if (seq_step_leds[s])
+            lv_obj_set_style_bg_color(seq_step_leds[s],
+                (s % 4 == 0) ? lv_color_hex(0x2A2A2A) : lv_color_hex(0x1A1A1A), 0);
+    }
+    (void)force_redraw;
 }
 
 void ui_create_sequencer_screen() {
@@ -1490,7 +1539,7 @@ void ui_create_sequencer_screen() {
     int name_w  = 50;
     int grid_x  = name_x + name_w + 2; // 56
     int cell_w  = 30, cell_h = 50, gap = 2;
-    int grid_w  = Config::MAX_STEPS * (cell_w + gap) - gap; // 510
+    int grid_w  = Config::STEPS_PER_BANK * (cell_w + gap) - gap; // 510
     int solo_x  = grid_x + grid_w + 2; // 568
     int solo_w  = UI_W - solo_x - 4;   // fill remaining (~28px)
     int step_label_y = 6;
@@ -1502,7 +1551,7 @@ void ui_create_sequencer_screen() {
     int name_w  = 68;
     int grid_x  = name_x + name_w + 4; // 88
     int cell_w  = 48, cell_h = 48, gap = 3;
-    int grid_w  = Config::MAX_STEPS * (cell_w + gap) - gap; // 813
+    int grid_w  = Config::STEPS_PER_BANK * (cell_w + gap) - gap; // 813
     int solo_x  = grid_x + grid_w + 4; // 905
     int solo_w  = 44;
     int mute_x  = solo_x + solo_w + 4; // 953
@@ -1513,7 +1562,7 @@ void ui_create_sequencer_screen() {
 #endif
 
     // ── Step column chips (top row) ──
-    for (int s = 0; s < Config::MAX_STEPS; s++) {
+    for (int s = 0; s < Config::STEPS_PER_BANK; s++) {
         lv_obj_t* chip = lv_obj_create(scr_sequencer);
         lv_obj_set_size(chip, cell_w, 20);
         lv_obj_set_pos(chip, grid_x + s * (cell_w + gap), step_label_y);
@@ -1670,23 +1719,23 @@ void ui_create_sequencer_screen() {
     // Initialize column highlights array to NULL (no longer used)
     memset(seq_column_highlights, 0, sizeof(seq_column_highlights));
 
-    // ── Grid cells (16 tracks × 16 steps) ──
+    // ── Grid cells (16 tracks × STEPS_PER_BANK columns, bank-mapped) ──
     for (int t = 0; t < Config::MAX_TRACKS; t++) {
 #if PORTRAIT_MODE
         int row = t;
 #else
         int row = t % SEQ_TRACKS_PER_PAGE;
 #endif
-        for (int s = 0; s < Config::MAX_STEPS; s++) {
+        for (int s = 0; s < Config::STEPS_PER_BANK; s++) {
             lv_obj_t* cell = lv_btn_create(scr_sequencer);
             lv_obj_set_size(cell, cell_w, cell_h);
             lv_obj_set_pos(cell, grid_x + s * (cell_w + gap), grid_y + row * row_pitch);
-            bool active = patterns[currentPattern].steps[t][s];
+            bool active = patterns[currentPattern].steps[t][s];  // bank 0 at startup
             apply_stable_button_style(cell, active ? inst_colors[t] : RED808_SURFACE, RED808_BORDER);
             lv_obj_set_style_radius(cell, 3, 0);
             lv_obj_set_style_border_width(cell, 0, 0);
             lv_obj_set_style_pad_all(cell, 0, 0);
-            int idx = t * Config::MAX_STEPS + s;
+            int idx = t * Config::STEPS_PER_BANK + s;
             lv_obj_add_event_cb(cell, seq_step_cb, LV_EVENT_PRESSED, (void*)(intptr_t)idx);
             seq_grid[t][s] = cell;
         }
@@ -1698,7 +1747,7 @@ void ui_create_sequencer_screen() {
 #else
     int led_y = grid_y + SEQ_TRACKS_PER_PAGE * row_pitch + 2;
 #endif
-    for (int s = 0; s < Config::MAX_STEPS; s++) {
+    for (int s = 0; s < Config::STEPS_PER_BANK; s++) {
         lv_obj_t* led = lv_obj_create(scr_sequencer);
         lv_obj_set_size(led, cell_w, 6);
         lv_obj_set_pos(led, grid_x + s * (cell_w + gap), led_y);
@@ -1774,11 +1823,71 @@ void ui_create_sequencer_screen() {
     lv_obj_set_style_text_color(unmute_lbl, lv_color_hex(0xB080D0), 0);
     lv_obj_center(unmute_lbl);
 
+    // BAR / STEP-BANK navigation (landscape only; shows which 16-step bank is visible)
+#if !PORTRAIT_MODE
+    seq_bank_prev_btn = lv_btn_create(scr_sequencer);
+    lv_obj_set_size(seq_bank_prev_btn, 28, 26);
+    lv_obj_set_pos(seq_bank_prev_btn, 430, bottom_y);
+    lv_obj_set_style_shadow_width(seq_bank_prev_btn, 0, 0);
+    lv_obj_set_style_bg_color(seq_bank_prev_btn, lv_color_hex(0x0C1C30), 0);
+    lv_obj_set_style_border_width(seq_bank_prev_btn, 1, 0);
+    lv_obj_set_style_border_color(seq_bank_prev_btn, lv_color_hex(0x204060), 0);
+    lv_obj_set_style_radius(seq_bank_prev_btn, 4, 0);
+    lv_obj_add_event_cb(seq_bank_prev_btn, [](lv_event_t*) {
+        int max_bank = (patterns[currentPattern].length + Config::STEPS_PER_BANK - 1) / Config::STEPS_PER_BANK - 1;
+        if (max_bank < 0) max_bank = 0;
+        seq_step_bank = (seq_step_bank > 0) ? seq_step_bank - 1 : max_bank;
+        seq_apply_step_bank(true);
+    }, LV_EVENT_PRESSED, NULL);
+    lv_obj_t* bank_prev_lbl = lv_label_create(seq_bank_prev_btn);
+    lv_label_set_text(bank_prev_lbl, LV_SYMBOL_LEFT);
+    lv_obj_center(bank_prev_lbl);
+
+    lv_obj_t* seq_bank_btn = lv_btn_create(scr_sequencer);
+    lv_obj_set_size(seq_bank_btn, 96, 26);
+    lv_obj_set_pos(seq_bank_btn, 460, bottom_y);
+    lv_obj_set_style_bg_color(seq_bank_btn, lv_color_hex(0x0A1828), 0);
+    lv_obj_set_style_bg_opa(seq_bank_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(seq_bank_btn, 1, 0);
+    lv_obj_set_style_border_color(seq_bank_btn, lv_color_hex(0x204060), 0);
+    lv_obj_set_style_radius(seq_bank_btn, 5, 0);
+    lv_obj_set_style_shadow_width(seq_bank_btn, 0, 0);
+    lv_obj_add_event_cb(seq_bank_btn, [](lv_event_t*) {
+        int max_bank = (patterns[currentPattern].length + Config::STEPS_PER_BANK - 1) / Config::STEPS_PER_BANK;
+        if (max_bank < 1) max_bank = 1;
+        seq_step_bank = (seq_step_bank + 1) % max_bank;
+        seq_apply_step_bank(true);
+    }, LV_EVENT_PRESSED, NULL);
+    seq_bank_lbl = lv_label_create(seq_bank_btn);
+    lv_label_set_text(seq_bank_lbl, "BAR 1/1");
+    lv_obj_set_style_text_font(seq_bank_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(seq_bank_lbl, lv_color_hex(0x5090C0), 0);
+    lv_obj_center(seq_bank_lbl);
+
+    seq_bank_next_btn = lv_btn_create(scr_sequencer);
+    lv_obj_set_size(seq_bank_next_btn, 28, 26);
+    lv_obj_set_pos(seq_bank_next_btn, 558, bottom_y);
+    lv_obj_set_style_shadow_width(seq_bank_next_btn, 0, 0);
+    lv_obj_set_style_bg_color(seq_bank_next_btn, lv_color_hex(0x0C1C30), 0);
+    lv_obj_set_style_border_width(seq_bank_next_btn, 1, 0);
+    lv_obj_set_style_border_color(seq_bank_next_btn, lv_color_hex(0x204060), 0);
+    lv_obj_set_style_radius(seq_bank_next_btn, 4, 0);
+    lv_obj_add_event_cb(seq_bank_next_btn, [](lv_event_t*) {
+        int max_bank = (patterns[currentPattern].length + Config::STEPS_PER_BANK - 1) / Config::STEPS_PER_BANK;
+        if (max_bank < 1) max_bank = 1;
+        seq_step_bank = (seq_step_bank + 1) % max_bank;
+        seq_apply_step_bank(true);
+    }, LV_EVENT_PRESSED, NULL);
+    lv_obj_t* bank_next_lbl = lv_label_create(seq_bank_next_btn);
+    lv_label_set_text(bank_next_lbl, LV_SYMBOL_RIGHT);
+    lv_obj_center(bank_next_lbl);
+#endif // !PORTRAIT_MODE
+
     // PAGE controls (landscape only — portrait shows all 16 tracks)
 #if !PORTRAIT_MODE
     seq_page_prev_btn = lv_btn_create(scr_sequencer);
     lv_obj_set_size(seq_page_prev_btn, 32, 26);
-    lv_obj_set_pos(seq_page_prev_btn, 538, bottom_y);
+    lv_obj_set_pos(seq_page_prev_btn, 598, bottom_y);
     lv_obj_set_style_shadow_width(seq_page_prev_btn, 0, 0);
     lv_obj_add_event_cb(seq_page_prev_btn, [](lv_event_t*) {
         seq_page = (seq_page == 0) ? 1 : 0;
@@ -1789,8 +1898,8 @@ void ui_create_sequencer_screen() {
     lv_obj_center(page_prev_lbl);
 
     seq_page_btn = lv_btn_create(scr_sequencer);
-    lv_obj_set_size(seq_page_btn, 120, 26);
-    lv_obj_set_pos(seq_page_btn, 572, bottom_y);
+    lv_obj_set_size(seq_page_btn, 100, 26);
+    lv_obj_set_pos(seq_page_btn, 632, bottom_y);
     lv_obj_set_style_bg_color(seq_page_btn, lv_color_hex(0x1C300C), 0);
     lv_obj_set_style_bg_opa(seq_page_btn, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(seq_page_btn, 1, 0);
@@ -1809,7 +1918,7 @@ void ui_create_sequencer_screen() {
 
     seq_page_next_btn = lv_btn_create(scr_sequencer);
     lv_obj_set_size(seq_page_next_btn, 32, 26);
-    lv_obj_set_pos(seq_page_next_btn, 694, bottom_y);
+    lv_obj_set_pos(seq_page_next_btn, 734, bottom_y);
     lv_obj_set_style_shadow_width(seq_page_next_btn, 0, 0);
     lv_obj_add_event_cb(seq_page_next_btn, [](lv_event_t*) {
         seq_page = (seq_page + 1) % 2;
@@ -1826,8 +1935,8 @@ void ui_create_sequencer_screen() {
     lv_obj_set_size(circle_btn, 120, 26);
     lv_obj_set_pos(circle_btn, UI_W - 126, bottom_y);
 #else
-    lv_obj_set_size(circle_btn, 178, 26);
-    lv_obj_set_pos(circle_btn, 832, bottom_y);
+    lv_obj_set_size(circle_btn, 158, 26);
+    lv_obj_set_pos(circle_btn, 778, bottom_y);
 #endif
     lv_obj_set_style_bg_color(circle_btn, lv_color_hex(0x0C1C30), 0);
     lv_obj_set_style_bg_opa(circle_btn, LV_OPA_COVER, 0);
@@ -1845,7 +1954,9 @@ void ui_create_sequencer_screen() {
 
     // Initial state
     seq_page = 0;
+    seq_step_bank = 0;
     seq_apply_page();
+    seq_apply_step_bank();
     for (int t = 0; t < Config::MAX_TRACKS; t++) {
         seq_update_solo_mute_visuals(t);
     }
@@ -1861,7 +1972,7 @@ void ui_update_sequencer() {
     static int prev_selected_track = -1;
     static bool prev_playing = false;
     static int prev_bpm10 = -1;
-    static uint8_t prev_grid_state[Config::MAX_TRACKS][Config::MAX_STEPS];
+    static uint8_t prev_grid_state[Config::MAX_TRACKS][Config::STEPS_PER_BANK];
     static int prev_track_volumes[Config::MAX_TRACKS] = {};
 
 #if PORTRAIT_MODE
@@ -1872,16 +1983,27 @@ void ui_update_sequencer() {
     int page_end   = page_start + SEQ_TRACKS_PER_PAGE;
 #endif
 
-    // On page change, force full grid refresh for visible tracks
+    // On track page change, force full grid refresh for visible tracks
     if (seq_page != prev_page) {
         prev_page = seq_page;
         memset(prev_grid_state, 0xFF, sizeof(prev_grid_state));
         prev_column = -2;
     }
 
-    // Update step highlight label only when step changes
+    // Auto-follow step bank: when currentStep crosses a bank boundary, switch bank
+    {
+        int cur_bank = currentStep / Config::STEPS_PER_BANK;
+        if (cur_bank != seq_step_bank) {
+            seq_step_bank = cur_bank;
+            seq_apply_step_bank();
+            memset(prev_grid_state, 0xFF, sizeof(prev_grid_state));
+            prev_column = -2;
+        }
+    }
+
+    // Step indicator label
     if (lbl_step_indicator && currentStep != prev_step) {
-        lv_label_set_text_fmt(lbl_step_indicator, "Step: %02d / %02d", currentStep + 1, Config::MAX_STEPS);
+        lv_label_set_text_fmt(lbl_step_indicator, "Step: %02d / %02d", currentStep + 1, patterns[currentPattern].length);
     }
 
     if (seq_info_pattern && currentPattern != prev_pattern) {
@@ -1916,13 +2038,16 @@ void ui_update_sequencer() {
         }
     }
 
-    // Update step label colour — only the two that changed (prev & current)
+    // Update step label colour — bank-relative column
     if (currentStep != prev_step) {
-        if (prev_step >= 0 && prev_step < Config::MAX_STEPS && seq_step_labels[prev_step]) {
-            lv_obj_set_style_text_color(seq_step_labels[prev_step], RED808_TEXT_DIM, 0);
-        }
-        if (isPlaying && currentStep < Config::MAX_STEPS && seq_step_labels[currentStep]) {
-            lv_obj_set_style_text_color(seq_step_labels[currentStep], RED808_WARNING, 0);
+        int prev_bank_col = (prev_step >= 0) ? (prev_step % Config::STEPS_PER_BANK) : -1;
+        int cur_bank_col  = currentStep % Config::STEPS_PER_BANK;
+        // Only update labels if same bank (bank-change is handled by seq_apply_step_bank)
+        if (currentStep / Config::STEPS_PER_BANK == seq_step_bank) {
+            if (prev_bank_col >= 0 && prev_bank_col < Config::STEPS_PER_BANK && seq_step_labels[prev_bank_col])
+                lv_obj_set_style_text_color(seq_step_labels[prev_bank_col], RED808_TEXT_DIM, 0);
+            if (isPlaying && cur_bank_col < Config::STEPS_PER_BANK && seq_step_labels[cur_bank_col])
+                lv_obj_set_style_text_color(seq_step_labels[cur_bank_col], RED808_WARNING, 0);
         }
     }
 
@@ -1943,11 +2068,16 @@ void ui_update_sequencer() {
         }
     }
 
-    int active_column = isPlaying ? currentStep : -1;
+    // Playhead and LED: use bank-relative column
+    int bank_col = isPlaying ? (currentStep % Config::STEPS_PER_BANK) : -1;
+    // Only show playhead when the playing step is in the visible bank
+    bool in_bank = isPlaying && (currentStep / Config::STEPS_PER_BANK == seq_step_bank);
+    int active_column = in_bank ? bank_col : -1;
+
     if (active_column != prev_column) {
-        // --- Move playhead line (single object, no cell restyling) ---
+        // --- Move playhead line ---
         if (seq_playhead_line) {
-            if (active_column >= 0 && active_column < Config::MAX_STEPS) {
+            if (active_column >= 0 && active_column < Config::STEPS_PER_BANK) {
                 int px = seq_cached_grid_x + active_column * (seq_cached_cell_w + seq_cached_gap) + seq_cached_cell_w / 2 - 1;
                 lv_obj_set_pos(seq_playhead_line, px, seq_cached_grid_y);
                 lv_obj_clear_flag(seq_playhead_line, LV_OBJ_FLAG_HIDDEN);
@@ -1956,22 +2086,23 @@ void ui_update_sequencer() {
                 lv_obj_add_flag(seq_playhead_line, LV_OBJ_FLAG_HIDDEN);
             }
         }
-        // Update LED strip: reset prev, highlight current
-        if (prev_column >= 0 && prev_column < Config::MAX_STEPS && seq_step_leds[prev_column]) {
+        // Update LED strip
+        if (prev_column >= 0 && prev_column < Config::STEPS_PER_BANK && seq_step_leds[prev_column]) {
             lv_obj_set_style_bg_color(seq_step_leds[prev_column],
                 (prev_column % 4 == 0) ? lv_color_hex(0x2A2A2A) : lv_color_hex(0x1A1A1A), 0);
         }
-        if (active_column >= 0 && active_column < Config::MAX_STEPS && seq_step_leds[active_column]) {
+        if (active_column >= 0 && active_column < Config::STEPS_PER_BANK && seq_step_leds[active_column]) {
             lv_obj_set_style_bg_color(seq_step_leds[active_column], RED808_WARNING, 0);
         }
         prev_column = active_column;
     }
 
-    // Diff loop — only restyle cells whose pattern data actually changed
+    // Diff loop — only restyle cells whose pattern data actually changed (bank-relative)
     for (int t = page_start; t < page_end; t++) {
-        for (int s = 0; s < Config::MAX_STEPS; s++) {
+        for (int s = 0; s < Config::STEPS_PER_BANK; s++) {
             if (!seq_grid[t][s]) continue;
-            bool active = patterns[currentPattern].steps[t][s];
+            int abs_s = seq_step_bank * Config::STEPS_PER_BANK + s;
+            bool active = (abs_s < patterns[currentPattern].length) && patterns[currentPattern].steps[t][abs_s];
             uint8_t state = active ? 1 : 0;
             if (state == prev_grid_state[t][s]) continue;
             prev_grid_state[t][s] = state;
@@ -2781,7 +2912,8 @@ static int pattern_active_steps(int patternIndex) {
     if (patternIndex < 0 || patternIndex >= Config::MAX_PATTERNS) return 0;
     for (int t = 0; t < Config::MAX_TRACKS; t++) {
         for (int s = 0; s < Config::MAX_STEPS; s++) {
-            active += patterns[patternIndex].steps[t][s] ? 1 : 0;
+            if (s < patterns[patternIndex].length)
+                active += patterns[patternIndex].steps[t][s] ? 1 : 0;
         }
     }
     return active;
@@ -3320,10 +3452,13 @@ static void sd_midi_load_btn_cb(lv_event_t* e) {
     if (sd_midi_status_lbl) lv_label_set_text(sd_midi_status_lbl, "Parsing MIDI...");
 
     // Parse MIDI file
-    bool steps[16][16];
+    bool steps[Config::MAX_TRACKS][Config::MAX_STEPS];
+    memset(steps, 0, sizeof(steps));
     char name[12] = "";
-    int  found = 0;
-    bool ok = midi_load_pattern(path, steps, name, sizeof(name), &found);
+    int   found = 0;
+    float midi_bpm = 0.0f;
+    int   plen = Config::STEPS_PER_BANK;
+    bool ok = midi_load_pattern(path, steps, name, sizeof(name), &found, &midi_bpm, 9, &plen);
 
     if (!ok || found == 0) {
         if (sd_midi_status_lbl)
@@ -3332,13 +3467,23 @@ static void sd_midi_load_btn_cb(lv_event_t* e) {
         return;
     }
 
+    // Apply BPM from MIDI file if present
+    if (midi_bpm > 0.0f) {
+        extern void applyBPMPrecise(float bpm, bool sendToMaster);
+        applyBPMPrecise(midi_bpm, true);
+    }
+
     // Apply pattern locally + send to Master + P4
-    handleMidiPatternLoaded(sd_midi_target_slot, steps, name);
+    handleMidiPatternLoaded(sd_midi_target_slot, steps, name, plen);
 
     // Feedback + navigate to sequencer after delay
     char msg[72];
-    snprintf(msg, sizeof(msg), LV_SYMBOL_OK " %d steps → P%02d '%s'",
-             found, sd_midi_target_slot + 1, name);
+    if (midi_bpm > 0.0f)
+        snprintf(msg, sizeof(msg), LV_SYMBOL_OK " %d steps → P%02d '%s' @ %.0f BPM",
+                 found, sd_midi_target_slot + 1, name, midi_bpm);
+    else
+        snprintf(msg, sizeof(msg), LV_SYMBOL_OK " %d steps → P%02d '%s'",
+                 found, sd_midi_target_slot + 1, name);
     if (sd_midi_status_lbl) lv_label_set_text(sd_midi_status_lbl, msg);
 
     lv_timer_t* t = lv_timer_create([](lv_timer_t* t) {
@@ -4074,7 +4219,7 @@ void ui_create_seq_circle_screen() {
 
     // Center track info labels
     lbl_circ_info = lv_label_create(scr_seq_circle);
-    lv_label_set_text_fmt(lbl_circ_info, "STEP  0 / %d", Config::MAX_STEPS);
+    lv_label_set_text_fmt(lbl_circ_info, "STEP  0 / %d", Config::STEPS_PER_BANK);
     lv_obj_set_style_text_font(lbl_circ_info, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(lbl_circ_info, RED808_TEXT_DIM, 0);
     lv_obj_set_style_text_align(lbl_circ_info, LV_TEXT_ALIGN_CENTER, 0);
@@ -4090,8 +4235,8 @@ void ui_create_seq_circle_screen() {
     lv_obj_set_width(circ_track_name_lbl, 120);
 
     // 16 step buttons on the ring
-    for (int s = 0; s < Config::MAX_STEPS; s++) {
-        float angle = -(float)M_PI / 2.0f + s * 2.0f * (float)M_PI / (float)Config::MAX_STEPS;
+    for (int s = 0; s < Config::STEPS_PER_BANK; s++) {
+        float angle = -(float)M_PI / 2.0f + s * 2.0f * (float)M_PI / (float)Config::STEPS_PER_BANK;
         int cx = CIRC_CX + (int)(cosf(angle) * CIRC_R);
         int cy = CIRC_CY + (int)(sinf(angle) * CIRC_R);
         circ_step_cx[s] = cx;
@@ -4201,7 +4346,7 @@ void ui_update_seq_circle() {
     static int prev_step  = -2;
     static int prev_track = -1;
 
-    int active_step = (isPlaying && currentStep >= 0 && currentStep < Config::MAX_STEPS)
+    int active_step = (isPlaying && currentStep >= 0 && currentStep < patterns[currentPattern].length)
                       ? currentStep : -1;
 
     bool stepChanged  = (active_step != prev_step);
@@ -4224,11 +4369,11 @@ void ui_update_seq_circle() {
     // --- Update center info ---
     if (lbl_circ_info && stepChanged) {
         lv_label_set_text_fmt(lbl_circ_info, "STEP %2d / %d",
-            active_step >= 0 ? active_step + 1 : 0, Config::MAX_STEPS);
+            active_step >= 0 ? active_step + 1 : 0, patterns[currentPattern].length);
     }
 
     // --- Update step buttons ---
-    for (int s = 0; s < Config::MAX_STEPS; s++) {
+    for (int s = 0; s < Config::STEPS_PER_BANK; s++) {
         if (!circ_step_btns[s]) continue;
 
         bool is_on      = patterns[currentPattern].steps[selectedTrack][s];

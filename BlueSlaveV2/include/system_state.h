@@ -90,6 +90,7 @@ struct TrackFilter {
 struct Pattern {
     bool steps[Config::MAX_TRACKS][Config::MAX_STEPS];
     bool muted[Config::MAX_TRACKS];
+    int  length = Config::STEPS_PER_BANK;  // actual pattern length (16/32/48/64)
     String name;
 };
 

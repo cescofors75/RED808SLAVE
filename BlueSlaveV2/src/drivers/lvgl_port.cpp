@@ -140,8 +140,10 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
 #if PORTRAIT_MODE
     // Portrait mode: partial rendering + sw_rotate.
     // Allocate two render buffers in PSRAM (not the panel FBs).
-    static constexpr size_t PORT_BUF_LINES = 100;
-    const size_t buf_px = SCREEN_WIDTH * PORT_BUF_LINES;  // 1024 * 100 = 102400 px
+    // 60 lines (was 100) cuts PSRAM by ~80KB while still giving LVGL a full
+    // sub-frame to compose without visible tearing on the 17Hz refresh path.
+    static constexpr size_t PORT_BUF_LINES = 60;
+    const size_t buf_px = SCREEN_WIDTH * PORT_BUF_LINES;  // 1024 * 60 = 61440 px (~120KB)
     lv_color_t* buf_a = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
     lv_color_t* buf_b = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
     lv_disp_draw_buf_init(&draw_buf, buf_a, buf_b, buf_px);
