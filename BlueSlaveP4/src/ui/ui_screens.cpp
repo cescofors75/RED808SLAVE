@@ -308,7 +308,11 @@ static lv_obj_t* grid_nr_btn  = NULL;   // Note Repeat toggle + subdivision cycl
 static lv_obj_t* grid_nr_lbl  = NULL;
 static lv_obj_t* grid_16l_btn = NULL;   // 16 Levels toggle
 static lv_obj_t* grid_16l_lbl = NULL;
-static lv_obj_t* grid_step_dot = NULL;
+// Link status indicators (replaces the old "LIVE" badge)
+static lv_obj_t* grid_mstr_dot = NULL;  // Master (UDP to ESP32-C6 AP) link
+static lv_obj_t* grid_mstr_lbl = NULL;
+static lv_obj_t* grid_aux_dot  = NULL;  // Aux (UART to ESP32-S3) link
+static lv_obj_t* grid_aux_lbl  = NULL;
 static lv_obj_t* grid_vol_lbl = NULL;
 
 // Sync Pads LEDs — pads illuminate automatically with sequencer
@@ -688,29 +692,49 @@ static void create_live_screen(void) {
     create_info_cell(scr_live, COL_X(6), ROW_Y(3), CW, CH,
                      "VOL", "75", RED808_ACCENT, &grid_vol_lbl);
 
-    // [7,3] Live indicator with pulsing dot
-    lv_obj_t* live_ind = lv_obj_create(scr_live);
-    lv_obj_set_size(live_ind, CW, CH);
-    lv_obj_set_pos(live_ind, COL_X(7), ROW_Y(3));
-    lv_obj_set_style_radius(live_ind, 14, 0);
-    lv_obj_set_style_bg_color(live_ind, RED808_SURFACE, 0);
-    lv_obj_set_style_bg_opa(live_ind, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(live_ind, 2, 0);
-    lv_obj_set_style_border_color(live_ind, RED808_SUCCESS, 0);
-    lv_obj_clear_flag(live_ind, LV_OBJ_FLAG_SCROLLABLE);
-    grid_step_dot = lv_obj_create(live_ind);
-    lv_obj_set_size(grid_step_dot, 14, 14);
-    lv_obj_align(grid_step_dot, LV_ALIGN_CENTER, 0, -14);
-    lv_obj_set_style_radius(grid_step_dot, 7, 0);
-    lv_obj_set_style_bg_color(grid_step_dot, RED808_SUCCESS, 0);
-    lv_obj_set_style_bg_opa(grid_step_dot, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(grid_step_dot, 0, 0);
-    lv_obj_clear_flag(grid_step_dot, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t* ll = lv_label_create(live_ind);
-    lv_label_set_text(ll, "LIVE");
-    lv_obj_set_style_text_font(ll, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(ll, RED808_SUCCESS, 0);
-    lv_obj_align(ll, LV_ALIGN_CENTER, 0, 12);
+    // [7,3] Link status: MSTR (to Master via C6 WiFi) + AUX (to S3 via UART)
+    lv_obj_t* link_ind = lv_obj_create(scr_live);
+    lv_obj_set_size(link_ind, CW, CH);
+    lv_obj_set_pos(link_ind, COL_X(7), ROW_Y(3));
+    lv_obj_set_style_radius(link_ind, 14, 0);
+    lv_obj_set_style_bg_color(link_ind, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_opa(link_ind, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(link_ind, 2, 0);
+    lv_obj_set_style_border_color(link_ind, RED808_BORDER, 0);
+    lv_obj_set_style_pad_all(link_ind, 6, 0);
+    lv_obj_clear_flag(link_ind, LV_OBJ_FLAG_SCROLLABLE);
+
+    // ── Row A: MSTR (top half) ──────────────────────────────────────────
+    grid_mstr_dot = lv_obj_create(link_ind);
+    lv_obj_set_size(grid_mstr_dot, 14, 14);
+    lv_obj_align(grid_mstr_dot, LV_ALIGN_LEFT_MID, 0, -18);
+    lv_obj_set_style_radius(grid_mstr_dot, 7, 0);
+    lv_obj_set_style_bg_color(grid_mstr_dot, RED808_TEXT_DIM, 0);
+    lv_obj_set_style_bg_opa(grid_mstr_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(grid_mstr_dot, 0, 0);
+    lv_obj_clear_flag(grid_mstr_dot, LV_OBJ_FLAG_SCROLLABLE);
+
+    grid_mstr_lbl = lv_label_create(link_ind);
+    lv_label_set_text(grid_mstr_lbl, "MSTR --");
+    lv_obj_set_style_text_font(grid_mstr_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(grid_mstr_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_align(grid_mstr_lbl, LV_ALIGN_LEFT_MID, 22, -18);
+
+    // ── Row B: AUX  (bottom half) ───────────────────────────────────────
+    grid_aux_dot = lv_obj_create(link_ind);
+    lv_obj_set_size(grid_aux_dot, 14, 14);
+    lv_obj_align(grid_aux_dot, LV_ALIGN_LEFT_MID, 0, 18);
+    lv_obj_set_style_radius(grid_aux_dot, 7, 0);
+    lv_obj_set_style_bg_color(grid_aux_dot, RED808_TEXT_DIM, 0);
+    lv_obj_set_style_bg_opa(grid_aux_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(grid_aux_dot, 0, 0);
+    lv_obj_clear_flag(grid_aux_dot, LV_OBJ_FLAG_SCROLLABLE);
+
+    grid_aux_lbl = lv_label_create(link_ind);
+    lv_label_set_text(grid_aux_lbl, "AUX --");
+    lv_obj_set_style_text_font(grid_aux_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(grid_aux_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_align(grid_aux_lbl, LV_ALIGN_LEFT_MID, 22, 18);
 
     #undef COL_X
     #undef ROW_Y
@@ -816,14 +840,25 @@ static void update_live_screen(void) {
         lv_label_set_text_fmt(grid_step_lbl, "%02d", p4.current_step + 1);
     }
 
-    // Step dot pulse — only update on change
-    static bool prev_dot_state = false;
-    if (grid_step_dot) {
-        bool pulse = p4.is_playing && ((now / 250) % 2 == 0);
-        if (pulse != prev_dot_state) {
-            prev_dot_state = pulse;
-            lv_obj_set_style_bg_opa(grid_step_dot, pulse ? LV_OPA_COVER : LV_OPA_40, 0);
-        }
+    // Link-status indicators (edge-triggered so LVGL only redraws on change).
+    // MSTR = UDP link to Master (over ESP32-C6 AP); AUX = UART link to S3.
+    static int8_t prev_mstr = -1;
+    static int8_t prev_aux  = -1;
+    bool mstr_on = p4.master_connected;
+    bool aux_on  = p4.s3_connected;
+    if ((int8_t)mstr_on != prev_mstr && grid_mstr_dot && grid_mstr_lbl) {
+        prev_mstr = mstr_on;
+        lv_color_t c = mstr_on ? RED808_SUCCESS : RED808_TEXT_DIM;
+        lv_obj_set_style_bg_color(grid_mstr_dot, c, 0);
+        lv_obj_set_style_text_color(grid_mstr_lbl, c, 0);
+        lv_label_set_text(grid_mstr_lbl, mstr_on ? "MSTR OK" : "MSTR --");
+    }
+    if ((int8_t)aux_on != prev_aux && grid_aux_dot && grid_aux_lbl) {
+        prev_aux = aux_on;
+        lv_color_t c = aux_on ? RED808_INFO : RED808_TEXT_DIM;
+        lv_obj_set_style_bg_color(grid_aux_dot, c, 0);
+        lv_obj_set_style_text_color(grid_aux_lbl, c, 0);
+        lv_label_set_text(grid_aux_lbl, aux_on ? "AUX OK" : "AUX --");
     }
 
     // 16 Levels source pad label tracking — keeps the right-side button in
@@ -2166,7 +2201,9 @@ static void ui_reload_themed_screens(void) {
     grid_pat_lbl = NULL; grid_step_lbl = NULL;
     grid_nr_btn = NULL; grid_nr_lbl = NULL;
     grid_16l_btn = NULL; grid_16l_lbl = NULL;
-    grid_step_dot = NULL; grid_vol_lbl = NULL; grid_sync_btn = NULL;
+    grid_mstr_dot = NULL; grid_mstr_lbl = NULL;
+    grid_aux_dot  = NULL; grid_aux_lbl  = NULL;
+    grid_vol_lbl = NULL; grid_sync_btn = NULL;
     for (int i = 0; i < 3; i++) {
         fx_arcs[i] = NULL; fx_value_labels[i] = NULL;
         fx_name_labels[i] = NULL; fx_toggle_btns[i] = NULL;
