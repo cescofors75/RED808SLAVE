@@ -11,22 +11,78 @@
 #include "../include/config.h"
 #include <Arduino.h>
 #include <atomic>
+#include <math.h>
 
-// ── Pad event queue: LVGL callback (Core 0) → loop (Core 1) ──
-// Decouples UDP send from LVGL mutex to reduce pad-to-audio latency.
-static volatile uint8_t s_pad_q[32];
+// ── Pad event queue: touch_task (Core 0) → loop (Core 1) ──
+// Each entry packs (velocity << 8) | pad to carry MPC-style velocity all the
+// way to UDP without adding a parallel array. Decouples UDP/UART send from
+// the LVGL mutex.
+static volatile uint16_t s_pad_q[32];
 static std::atomic<uint8_t> s_pad_qh{0};
 static std::atomic<uint8_t> s_pad_qt{0};
 
-// Direct touch bypass: flag + debounce timestamps
+// Direct touch bypass: flag used by touch_task to early-out when not on LIVE
 static std::atomic<bool> g_live_screen_active{false};
-static volatile unsigned long pad_last_direct[16] = {0};
 
-static void enqueue_pad_event(uint8_t pad) {
+static inline void enqueue_pad_event(uint8_t pad, uint8_t velocity) {
     uint8_t h = s_pad_qh.load(std::memory_order_relaxed);
-    s_pad_q[h & 0x1F] = pad;
+    s_pad_q[h & 0x1F] = (uint16_t)((velocity << 8) | pad);
     s_pad_qh.store(h + 1, std::memory_order_release);
 }
+
+// =============================================================================
+// MPC-STYLE PLAYBACK STATE — note repeat, 16 levels, velocity fade
+// =============================================================================
+// Note repeat: subdivisions per beat = {1, 2, 4, 8, 3, 6} for
+// 1/4, 1/8, 1/16, 1/32, 1/8T, 1/16T respectively. Index 0 = OFF.
+static const uint8_t     NR_SUBDIV_PER_BEAT[7] = {0, 1, 2, 4, 8, 3, 6};
+static const char* const NR_LABEL[7] = {"NR\nOFF", "NR\n1/4", "NR\n1/8",
+                                         "NR\n1/16", "NR\n1/32",
+                                         "NR\n1/8T", "NR\n1/16T"};
+static volatile uint8_t s_nr_idx = 0;                  // 0 = OFF
+
+// 16 Levels: all 16 pads become 16 velocities of a single source pad
+static volatile bool    s_16l_active   = false;
+static volatile uint8_t s_16l_src_pad  = 0;            // last non-16L tap
+
+// Per-pad state, written by touch_task (Core 0) and read by update_live_screen
+// (Core 0 LVGL task). Single writer / single reader per field → no locks.
+static volatile bool          s_pad_held[16] = {};
+static volatile unsigned long s_pad_repeat_next_ms[16] = {};
+static volatile uint8_t       s_pad_held_velocity[16] = {};
+
+// Velocity fade visualisation: each press stores (velocity, start_ms) and
+// update_live_screen interpolates an exponential decay over FADE_MS to drive
+// the pad background opacity. Quantised into 8 brightness bands so LVGL only
+// re-invalidates a pad rect when the band actually changes (keeps partial
+// refresh cheap even with 16 pads decaying at once).
+static const int FADE_MS = 320;
+static volatile uint8_t       s_pad_flash_vel[16] = {};
+static volatile unsigned long s_pad_flash_start_ms[16] = {};
+
+static inline void ui_pad_flash_start(uint8_t pad, uint8_t velocity) {
+    if (pad >= 16) return;
+    s_pad_flash_vel[pad]      = velocity ? velocity : 1;
+    s_pad_flash_start_ms[pad] = millis();
+}
+
+static unsigned long ui_nr_interval_ms(void) {
+    // Use current tempo from P4State (UART-synced). BPM can be 0 briefly at
+    // boot; clamp to 40..300 for safety.
+    extern struct P4State p4;
+    int bpm_x10 = p4.bpm_int * 10 + p4.bpm_frac;
+    if (bpm_x10 < 400)  bpm_x10 = 1200;
+    if (bpm_x10 > 3000) bpm_x10 = 3000;
+    uint8_t idx = s_nr_idx;
+    if (idx == 0 || idx >= sizeof(NR_SUBDIV_PER_BEAT)) return 0;
+    uint32_t div = NR_SUBDIV_PER_BEAT[idx];
+    // interval = 60000 ms / (bpm * div). bpm_x10 is BPM*10, so:
+    //   ms = 600000 / (bpm_x10 * div)
+    unsigned long ms = 600000UL / ((unsigned long)bpm_x10 * div);
+    if (ms < 15) ms = 15;   // safety floor (~66 Hz max retrigger)
+    return ms;
+}
+
 
 // Screen objects
 lv_obj_t* scr_boot = NULL;
@@ -248,8 +304,10 @@ static lv_obj_t* grid_play_lbl = NULL;
 static lv_obj_t* grid_bpm_lbl = NULL;
 static lv_obj_t* grid_pat_lbl = NULL;
 static lv_obj_t* grid_step_lbl = NULL;
-static lv_obj_t* grid_wifi_lbl = NULL;
-static lv_obj_t* grid_s3_lbl = NULL;
+static lv_obj_t* grid_nr_btn  = NULL;   // Note Repeat toggle + subdivision cycler
+static lv_obj_t* grid_nr_lbl  = NULL;
+static lv_obj_t* grid_16l_btn = NULL;   // 16 Levels toggle
+static lv_obj_t* grid_16l_lbl = NULL;
 static lv_obj_t* grid_step_dot = NULL;
 static lv_obj_t* grid_vol_lbl = NULL;
 
@@ -341,15 +399,12 @@ static void ripple_update(void) {
 }
 
 static void pad_touch_cb(lv_event_t* e) {
-    int pad = (int)(intptr_t)lv_event_get_user_data(e);
-    if (pad < 0 || pad > 15) return;
-    // Dedup: skip if direct touch bypass already handled this pad recently
-    unsigned long now = millis();
-    if (now - pad_last_direct[pad] < 30) return;
-    // Immediate visual flash (local, no I/O)
-    p4.pad_flash_until[pad] = now + 80;
-    // Queue for UDP/UART send on Core 1 (outside LVGL mutex)
-    enqueue_pad_event((uint8_t)pad);
+    // Safety fallback for the LVGL button event. In practice the GT911 direct
+    // path (ui_pad_frame_update) already serviced the press at 200Hz; this
+    // only fires if LVGL somehow received a touch the cache did not classify
+    // as a pad (shouldn't happen with matching geometry). No-op is safe — the
+    // real velocity-aware tap handling lives in ui_pad_frame_update().
+    LV_UNUSED(e);
 }
 
 static void grid_nav_cb(lv_event_t* e) {
@@ -370,6 +425,41 @@ static void grid_sync_cb(lv_event_t* e) {
     }
     // Sync state to S3
     uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SYNC_PADS, sync_pads_active ? 1 : 0);
+}
+
+// Cycle Note Repeat: OFF → 1/4 → 1/8 → 1/16 → 1/32 → 1/8T → 1/16T → OFF
+static void grid_nr_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    uint8_t idx = (uint8_t)((s_nr_idx + 1) % 7);
+    s_nr_idx = idx;
+    if (grid_nr_btn) {
+        bool on = (idx != 0);
+        lv_obj_set_style_bg_color(grid_nr_btn,
+            on ? RED808_ACCENT : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(grid_nr_btn,
+            on ? RED808_ACCENT2 : RED808_BORDER, 0);
+        if (grid_nr_lbl) lv_label_set_text(grid_nr_lbl, NR_LABEL[idx]);
+    }
+}
+
+// Toggle 16 Levels — all pads play the last-tapped sample at 16 velocities
+static void grid_16l_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    bool on = !s_16l_active;
+    s_16l_active = on;
+    if (grid_16l_btn) {
+        lv_obj_set_style_bg_color(grid_16l_btn,
+            on ? RED808_CYAN : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(grid_16l_btn,
+            on ? RED808_ACCENT : RED808_BORDER, 0);
+        if (grid_16l_lbl) {
+            if (on) {
+                lv_label_set_text_fmt(grid_16l_lbl, "16 LVL\nSRC %d", s_16l_src_pad + 1);
+            } else {
+                lv_label_set_text(grid_16l_lbl, "16 LVL\nOFF");
+            }
+        }
+    }
 }
 
 // Called when S3 sends sync toggle — update UI without re-sending
@@ -569,13 +659,21 @@ static void create_live_screen(void) {
                          "THEME\n" LV_SYMBOL_RIGHT, RED808_ACCENT2, &lv_font_montserrat_18);
     lv_obj_add_event_cb(b, grid_theme_cb, LV_EVENT_CLICKED, NULL);
 
-    // [6,2] Network status
-    create_info_cell(scr_live, COL_X(6), ROW_Y(2), CW, CH,
-                     "NETWORK", "OFF", RED808_ERROR, &grid_wifi_lbl);
+    // [6,2] NOTE REPEAT cycler — OFF / 1/4 / 1/8 / 1/16 / 1/32 / 1/8T / 1/16T
+    grid_nr_btn = create_ctrl_btn(scr_live, COL_X(6), ROW_Y(2), CW, CH,
+                                  NR_LABEL[s_nr_idx], RED808_SURFACE,
+                                  &lv_font_montserrat_20);
+    lv_obj_set_style_border_color(grid_nr_btn, RED808_BORDER, 0);
+    grid_nr_lbl = lv_obj_get_child(grid_nr_btn, 0);
+    lv_obj_add_event_cb(grid_nr_btn, grid_nr_cb, LV_EVENT_CLICKED, NULL);
 
-    // [7,2] AUX status
-    create_info_cell(scr_live, COL_X(7), ROW_Y(2), CW, CH,
-                     "AUX", "OFF", RED808_TEXT_DIM, &grid_s3_lbl);
+    // [7,2] 16 LEVELS toggle — re-maps all 16 pads to velocity ladder of last tap
+    grid_16l_btn = create_ctrl_btn(scr_live, COL_X(7), ROW_Y(2), CW, CH,
+                                   "16 LVL\nOFF", RED808_SURFACE,
+                                   &lv_font_montserrat_20);
+    lv_obj_set_style_border_color(grid_16l_btn, RED808_BORDER, 0);
+    grid_16l_lbl = lv_obj_get_child(grid_16l_btn, 0);
+    lv_obj_add_event_cb(grid_16l_btn, grid_16l_cb, LV_EVENT_CLICKED, NULL);
 
     // --- Row 3: Info Displays ---
     // [4,3] Pattern
@@ -621,48 +719,66 @@ static void create_live_screen(void) {
 static void update_live_screen(void) {
     unsigned long now = millis();
 
-    // Pad flash effects — manual triggers + sequencer sync
-    static bool pad_was_flash[16] = {};
+    // ── MPC-style pad fade: velocity-weighted exponential decay ──
+    // Each pad maps its current "brightness" to one of 8 bands (0 = idle,
+    // 7 = peak hit). LVGL only re-invalidates a pad when its band actually
+    // changes, keeping partial refresh cheap even when all 16 pads fire.
     static int prev_sync_step = -1;
     bool step_changed = (p4.current_step != prev_sync_step);
     if (step_changed) prev_sync_step = p4.current_step;
+    static uint8_t pad_prev_band[16] = {};
     for (int i = 0; i < 16; i++) {
         if (!live_pad_btns[i]) continue;
-        bool flashing = (now < p4.pad_flash_until[i]);
-        // Sequencer sync: light up pads for active steps
-        if (sync_pads_active && p4.is_playing && p4.steps[i][p4.current_step])
-            flashing = true;
-        bool was_flash = pad_was_flash[i];
-        if (flashing == was_flash && !step_changed) continue;
-        pad_was_flash[i] = flashing;
-        // NOTE: ripple_spawn is already called from pad_touch_cb/direct_touch.
-        // Do not spawn here to avoid duplicated animations and extra LVGL work.
+
+        uint8_t band = 0;
+        uint8_t vel  = s_pad_flash_vel[i];
+        if (vel) {
+            unsigned long el = now - s_pad_flash_start_ms[i];
+            if (el >= (unsigned long)FADE_MS) {
+                s_pad_flash_vel[i] = 0;   // fade complete → back to idle
+            } else {
+                float t   = (float)el / (float)FADE_MS;           // 0..1
+                float env = expf(-3.2f * t);                       // 1→~0.04
+                float b   = (vel / 127.0f) * env * 7.999f;
+                band = (uint8_t)b;
+                if (band > 7) band = 7;
+            }
+        }
+        // Sequencer sync floor: if this pad is active on the current step,
+        // render at mid brightness so the groove is always visible.
+        if (sync_pads_active && p4.is_playing && p4.steps[i][p4.current_step]) {
+            if (band < 4) band = 4;
+        }
+        if (band == pad_prev_band[i] && !step_changed) continue;
+        pad_prev_band[i] = band;
+
         lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[i]);
 
-        if (flashing) {
-            // ── NEON HIT: bright fill + white ring + thin colored outline ──
-            // Shadow disabled on P4 (full_refresh=1 + 16 pads would soft-render
-            // ~256K blended px/frame and kill touch responsiveness).
-            lv_obj_set_style_bg_color(live_pad_btns[i], tc, 0);
-            lv_obj_set_style_bg_opa(live_pad_btns[i], LV_OPA_COVER, 0);
-            lv_obj_set_style_border_width(live_pad_btns[i], 4, 0);
-            lv_obj_set_style_border_color(live_pad_btns[i], lv_color_white(), 0);
-            lv_obj_set_style_border_opa(live_pad_btns[i], LV_OPA_80, 0);
-            lv_obj_set_style_outline_width(live_pad_btns[i], 4, 0);
-            lv_obj_set_style_outline_opa(live_pad_btns[i], LV_OPA_COVER, 0);
-            // Label → white for contrast
-            if (live_pad_labels[i]) lv_obj_set_style_text_color(live_pad_labels[i], lv_color_white(), 0);
-        } else {
-            // ── IDLE: black interior + colored neon ring border ──
+        if (band == 0) {
+            // Idle: black interior + colored ring
             lv_obj_set_style_bg_color(live_pad_btns[i], lv_color_black(), 0);
-            lv_obj_set_style_bg_opa(live_pad_btns[i], LV_OPA_80, 0);
+            lv_obj_set_style_bg_opa(live_pad_btns[i], LV_OPA_COVER, 0);
             lv_obj_set_style_border_width(live_pad_btns[i], 3, 0);
             lv_obj_set_style_border_color(live_pad_btns[i], tc, 0);
             lv_obj_set_style_border_opa(live_pad_btns[i], LV_OPA_COVER, 0);
-            lv_obj_set_style_outline_width(live_pad_btns[i], 3, 0);
-            lv_obj_set_style_outline_opa(live_pad_btns[i], LV_OPA_40, 0);
-            // Label → track color
-            if (live_pad_labels[i]) lv_obj_set_style_text_color(live_pad_labels[i], tc, 0);
+            if (live_pad_labels[i])
+                lv_obj_set_style_text_color(live_pad_labels[i], tc, 0);
+        } else {
+            // Lit: blend black↔track color by band, brighten border
+            // opa_fill = 32 + (band * 223 / 7): band=1→~64, band=7→255
+            lv_opa_t opa_fill = (lv_opa_t)(32 + (band * 223) / 7);
+            lv_obj_set_style_bg_color(live_pad_btns[i], tc, 0);
+            lv_obj_set_style_bg_opa(live_pad_btns[i], opa_fill, 0);
+            // Border widens on hard hits (band 6-7) and stays colored for soft
+            lv_coord_t bw = (band >= 6) ? 4 : 3;
+            lv_obj_set_style_border_width(live_pad_btns[i], bw, 0);
+            lv_color_t bc = (band >= 6) ? lv_color_white() : tc;
+            lv_obj_set_style_border_color(live_pad_btns[i], bc, 0);
+            lv_obj_set_style_border_opa(live_pad_btns[i], LV_OPA_COVER, 0);
+            if (live_pad_labels[i]) {
+                lv_color_t lc = (band >= 5) ? lv_color_white() : tc;
+                lv_obj_set_style_text_color(live_pad_labels[i], lc, 0);
+            }
         }
     }
 
@@ -710,22 +826,17 @@ static void update_live_screen(void) {
         }
     }
 
-    // WiFi status
-    static bool gp_prev_wifi = false;
-    if (grid_wifi_lbl && p4.wifi_connected != gp_prev_wifi) {
-        gp_prev_wifi = p4.wifi_connected;
-        lv_label_set_text(grid_wifi_lbl, p4.wifi_connected ? "OK" : "OFF");
-        lv_obj_set_style_text_color(grid_wifi_lbl,
-            p4.wifi_connected ? RED808_SUCCESS : RED808_ERROR, 0);
-    }
-
-    // S3/AUX status
-    static bool gp_prev_s3 = false;
-    if (grid_s3_lbl && p4.s3_connected != gp_prev_s3) {
-        gp_prev_s3 = p4.s3_connected;
-        lv_label_set_text(grid_s3_lbl, p4.s3_connected ? "ON" : "OFF");
-        lv_obj_set_style_text_color(grid_s3_lbl,
-            p4.s3_connected ? RED808_INFO : RED808_TEXT_DIM, 0);
+    // 16 Levels source pad label tracking — keeps the right-side button in
+    // sync with whichever pad the player last tapped outside of 16L mode.
+    static uint8_t prev_16l_src = 255;
+    if (grid_16l_lbl && s_16l_active) {
+        uint8_t cur = s_16l_src_pad;
+        if (cur != prev_16l_src) {
+            prev_16l_src = cur;
+            lv_label_set_text_fmt(grid_16l_lbl, "16 LVL\nSRC %d", cur + 1);
+        }
+    } else {
+        prev_16l_src = 255;
     }
 
     // Volume
@@ -2053,7 +2164,8 @@ static void ui_reload_themed_screens(void) {
     }
     grid_play_btn = NULL; grid_play_lbl = NULL; grid_bpm_lbl = NULL;
     grid_pat_lbl = NULL; grid_step_lbl = NULL;
-    grid_wifi_lbl = NULL; grid_s3_lbl = NULL;
+    grid_nr_btn = NULL; grid_nr_lbl = NULL;
+    grid_16l_btn = NULL; grid_16l_lbl = NULL;
     grid_step_dot = NULL; grid_vol_lbl = NULL; grid_sync_btn = NULL;
     for (int i = 0; i < 3; i++) {
         fx_arcs[i] = NULL; fx_value_labels[i] = NULL;
@@ -2129,53 +2241,120 @@ void ui_process_pad_queue(void) {
     uint8_t t = s_pad_qt.load(std::memory_order_relaxed);
     uint8_t h = s_pad_qh.load(std::memory_order_acquire);
     while (t != h) {
-        uint8_t pad = s_pad_q[t & 0x1F];
+        uint16_t ev = s_pad_q[t & 0x1F];
         t++;
-        // Feed DSP spectrum
-        dsp_notify_pad(pad, 127);
-        // Notify S3 via UART first (fast, 5 bytes)
+        uint8_t pad      = (uint8_t)(ev & 0xFF);
+        uint8_t velocity = (uint8_t)((ev >> 8) & 0xFF);
+        if (!velocity) velocity = 100;   // defensive floor
+        // Feed DSP spectrum with real velocity
+        dsp_notify_pad(pad, velocity);
+        // Notify S3 via UART (fast, 5 bytes). Legacy TCMD_PAD_TAP ignores
+        // velocity; we still send it for forward compatibility.
         uart_send_to_s3(MSG_TOUCH_CMD, TCMD_PAD_TAP, pad);
-        // Then send UDP to master if connected
+        // Then send UDP to master with MPC-style velocity
         if (p4.wifi_connected || p4.master_connected) {
-            udp_send_trigger(pad, 127);
+            udp_send_trigger(pad, velocity);
         }
+        // Mirror to legacy binary flash timer so screens that still read
+        // p4.pad_flash_until (e.g. sequencer sync highlight) keep working.
+        p4.pad_flash_until[pad] = millis() + 80;
     }
     s_pad_qt.store(t, std::memory_order_relaxed);
 }
 
 // =============================================================================
-// DIRECT TOUCH BYPASS — called from GT911 touch_task (Core 0, 200Hz)
-// Detects pad hits from raw coordinates, bypasses LVGL event system entirely.
-// Eliminates ~16ms vsync latency from the touch→UDP path.
+// LIVE PAD HIT GEOMETRY — shared between LVGL layout and GT911 touch_task
 // =============================================================================
-void ui_direct_touch_check(uint16_t x, uint16_t y) {
-    if (!g_live_screen_active.load(std::memory_order_acquire)) return;
+// Pad grid geometry (must match create_live_screen layout below).
+// M=8 (margin), CW/CH = pad size, SX/SY = stride (pad + gap).
+static constexpr int LIVE_M  = 8;
+static constexpr int LIVE_CW = 122;
+static constexpr int LIVE_CH = 143;
+static constexpr int LIVE_SX = 126;
+static constexpr int LIVE_SY = 147;
 
-    // Pad grid geometry (must match create_live_screen layout)
-    // M=8, CW=122, CH=143, stride_x=CW+G=126, stride_y=CH+G=147
-    const int M = 8, CW = 122, CH = 143, SX = 126, SY = 147;
+int ui_pad_from_xy(uint16_t x, uint16_t y) {
+    if (!g_live_screen_active.load(std::memory_order_acquire)) return -1;
+    if (x < LIVE_M || x >= (LIVE_M + 4 * LIVE_SX)) return -1;
+    if (y < LIVE_M || y >= (LIVE_M + 4 * LIVE_SY)) return -1;
+    int col  = (x - LIVE_M) / LIVE_SX;
+    int row  = (y - LIVE_M) / LIVE_SY;
+    int x_in = (x - LIVE_M) % LIVE_SX;
+    int y_in = (y - LIVE_M) % LIVE_SY;
+    if (x_in >= LIVE_CW || y_in >= LIVE_CH) return -1;
+    if (col >= 4 || row >= 4) return -1;
+    return row * 4 + col;
+}
 
-    if (x < M || x >= (M + 4 * SX) || y < M || y >= (M + 4 * SY)) return;
+// =============================================================================
+// PAD FRAME UPDATE — called from GT911 touch_task (Core 0, 200Hz)
+// Rising edge → enqueue event (with 16 Levels remapping if active) and arm
+// note-repeat timer. Falling edge → cancel repeat. Held → fire repeats on
+// schedule using the current tempo & subdivision.
+// =============================================================================
+void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
+    if (!g_live_screen_active.load(std::memory_order_acquire)) {
+        // Clear state so we don't fire phantom repeats when leaving LIVE
+        for (int p = 0; p < 16; p++) {
+            s_pad_held[p] = false;
+            s_pad_repeat_next_ms[p] = 0;
+        }
+        return;
+    }
 
-    int col = (x - M) / SX;
-    int row = (y - M) / SY;
-    int x_in = (x - M) % SX;
-    int y_in = (y - M) % SY;
-
-    if (x_in >= CW || y_in >= CH || col >= 4 || row >= 4) return;
-
-    int pad = row * 4 + col;
-
-    // Debounce: don't re-trigger same pad within 30ms (allows ~33 Hz rapid-fire)
     unsigned long now = millis();
-    if (now - pad_last_direct[pad] < 30) return;
-    pad_last_direct[pad] = now;
+    unsigned long nr_interval = ui_nr_interval_ms();    // 0 if NR off
 
-    // Visual flash (direct, no LVGL needed)
-    p4.pad_flash_until[pad] = now + 80;
+    for (int p = 0; p < 16; p++) {
+        bool was_held = s_pad_held[p];
+        bool is_held  = pressed[p];
 
-    // Enqueue for UDP send on Core 1
-    enqueue_pad_event((uint8_t)pad);
+        if (is_held && !was_held) {
+            // ── Rising edge: real finger-down ──
+            uint8_t vel = velocity[p] ? velocity[p] : 100;
+            s_pad_held_velocity[p] = vel;
+
+            uint8_t send_pad = p;
+            uint8_t send_vel = vel;
+            if (s_16l_active) {
+                // Remap to 16 velocities of the stored source pad
+                send_pad = s_16l_src_pad;
+                send_vel = (uint8_t)(((p + 1) * 127) / 16);  // 7..127
+                if (send_vel < 8) send_vel = 8;
+            } else {
+                s_16l_src_pad = (uint8_t)p;   // remember for future 16L
+            }
+            enqueue_pad_event(send_pad, send_vel);
+            ui_pad_flash_start(p, vel);
+
+            // Arm note-repeat timer
+            s_pad_repeat_next_ms[p] = (nr_interval && s_nr_idx)
+                ? (now + nr_interval) : 0;
+        } else if (!is_held && was_held) {
+            // ── Falling edge: finger lifted ──
+            s_pad_repeat_next_ms[p] = 0;
+        } else if (is_held && nr_interval && s_pad_repeat_next_ms[p]
+                   && now >= s_pad_repeat_next_ms[p]) {
+            // ── Held + note-repeat tick ──
+            uint8_t vel = s_pad_held_velocity[p] ? s_pad_held_velocity[p] : 100;
+            uint8_t send_pad = p;
+            uint8_t send_vel = vel;
+            if (s_16l_active) {
+                send_pad = s_16l_src_pad;
+                send_vel = (uint8_t)(((p + 1) * 127) / 16);
+                if (send_vel < 8) send_vel = 8;
+            }
+            enqueue_pad_event(send_pad, send_vel);
+            ui_pad_flash_start(p, vel);
+            // Schedule next tick; if we fell behind, catch up without drifting
+            // into the far past (e.g. after a blocked frame).
+            unsigned long next = s_pad_repeat_next_ms[p] + nr_interval;
+            if (next <= now) next = now + nr_interval;
+            s_pad_repeat_next_ms[p] = next;
+        }
+
+        s_pad_held[p] = is_held;
+    }
 }
 
 void ui_update_current_screen(void) {

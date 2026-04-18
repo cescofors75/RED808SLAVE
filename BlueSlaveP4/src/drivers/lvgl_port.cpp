@@ -36,6 +36,7 @@ static lv_indev_t* touch_indevs[MAX_TOUCH_POINTS];
 static struct {
     volatile lv_point_t point;
     volatile lv_indev_state_t state;
+    volatile uint8_t area;   // GT911 touch size byte — proxy for finger pressure/area
 } touch_data[MAX_TOUCH_POINTS];
 
 // =============================================================================
@@ -116,8 +117,10 @@ static void gt911_init(void) {
 }
 
 static void gt911_poll_all(void) {
-    for (int i = 0; i < MAX_TOUCH_POINTS; i++)
+    for (int i = 0; i < MAX_TOUCH_POINTS; i++) {
         touch_data[i].state = LV_INDEV_STATE_REL;
+        touch_data[i].area  = 0;
+    }
 
     if (!gt911_initialized) return;
 
@@ -148,10 +151,12 @@ static void gt911_poll_all(void) {
     if (ok) {
         for (int i = 0; i < readLen; i++) buf[i] = Wire.read();
         for (int i = 0; i < touches; i++) {
-            uint16_t x = buf[i*8] | ((uint16_t)buf[i*8+1] << 8);
-            uint16_t y = buf[i*8+2] | ((uint16_t)buf[i*8+3] << 8);
+            uint16_t x    = buf[i*8]   | ((uint16_t)buf[i*8+1] << 8);
+            uint16_t y    = buf[i*8+2] | ((uint16_t)buf[i*8+3] << 8);
+            uint16_t size = buf[i*8+4] | ((uint16_t)buf[i*8+5] << 8);
             touch_data[i].point.x = (x < LCD_H_RES) ? (lv_coord_t)x : (lv_coord_t)(LCD_H_RES - 1);
             touch_data[i].point.y = (y < LCD_V_RES) ? (lv_coord_t)y : (lv_coord_t)(LCD_V_RES - 1);
+            touch_data[i].area  = (size > 255) ? 255 : (uint8_t)size;
             touch_data[i].state = LV_INDEV_STATE_PR;
         }
     }
@@ -161,20 +166,34 @@ static void gt911_poll_all(void) {
     Wire.endTransmission();
 }
 
-// Touch FreeRTOS task — Core 0, polls I2C independently of LVGL rendering
+// Touch FreeRTOS task — Core 0, polls I2C independently of LVGL rendering.
+// Aggregates up to 5 touch points into a per-pad pressed[] + velocity[] frame
+// and delegates press/release/repeat logic to ui_screens (ui_pad_frame_update).
 static void touch_task(void* arg) {
     (void)arg;
     while (true) {
         gt911_poll_all();
-        // Direct pad hit detection — bypasses LVGL for minimum latency
+
+        bool    pressed[16]  = {};
+        uint8_t velocity[16] = {};
+
         for (int i = 0; i < MAX_TOUCH_POINTS; i++) {
-            if (touch_data[i].state == LV_INDEV_STATE_PR) {
-                ui_direct_touch_check(
-                    (uint16_t)touch_data[i].point.x,
-                    (uint16_t)touch_data[i].point.y
-                );
-            }
+            if (touch_data[i].state != LV_INDEV_STATE_PR) continue;
+            int pad = ui_pad_from_xy((uint16_t)touch_data[i].point.x,
+                                     (uint16_t)touch_data[i].point.y);
+            if (pad < 0) continue;
+            pressed[pad] = true;
+            // Map GT911 area byte (0..255) to MIDI velocity (40..127).
+            // Very light contacts (area==0) get a sensible floor so the sample
+            // still plays clearly. Hard presses approach 127.
+            uint8_t a = touch_data[i].area;
+            uint8_t v = a ? (uint8_t)(40 + ((uint32_t)a * 87) / 255) : 100;
+            if (v > 127) v = 127;
+            if (v > velocity[pad]) velocity[pad] = v;
         }
+
+        ui_pad_frame_update(pressed, velocity);
+
         vTaskDelay(pdMS_TO_TICKS(5));   // 200Hz touch polling
     }
 }
