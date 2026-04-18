@@ -1416,7 +1416,11 @@ void receiveUDPData() {
                 if (diff < -(patLen / 2)) diff += patLen;
                 if (diff >  (patLen / 2)) diff -= patLen;
                 if (diff < 0) diff = -diff;
-                if (diff > 1) {
+                // Tight resync: snap on ANY mismatch (>=1 step). Master's UDP
+                // step_sync packets arrive at 1/4 beat rate (8 Hz @ 120 BPM),
+                // so bounded drift never exceeds one step duration. Previous
+                // threshold (>1) allowed up to ~125 ms audio/visual skew.
+                if (diff >= 1) {
                     // Clocks have drifted — re-anchor to master position
                     currentStep = masterStep;
                     lastLocalStepUs = micros();

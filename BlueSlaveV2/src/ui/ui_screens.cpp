@@ -2617,11 +2617,43 @@ void ui_create_settings_screen() {
 }
 
 // ============================================================================
-// DIAGNOSTICS SCREEN
+// DIAGNOSTICS SCREEN — Device / Protocol / Type / Status grid
 // ============================================================================
-#define DIAG_ROWS 9
-static lv_obj_t* diag_labels[DIAG_ROWS];
-static lv_obj_t* diag_values[DIAG_ROWS];
+// Each row describes ONE hardware link with four columns:
+//   [Device] [Protocol/Address] [Type/Role] [green OK • or red --]
+// Status colour is driven directly by DiagnosticInfo flags populated by the
+// main firmware (I2C scan, WiFi stack, UART heartbeat, …).
+// ----------------------------------------------------------------------------
+#define DIAG_ROWS 14
+static lv_obj_t* diag_dev_labels[DIAG_ROWS];    // Device name + role
+static lv_obj_t* diag_proto_labels[DIAG_ROWS];  // Protocol / bus address
+static lv_obj_t* diag_type_labels[DIAG_ROWS];   // Peripheral type tag
+static lv_obj_t* diag_status_labels[DIAG_ROWS]; // Green OK / Red -- pill
+// Back-compat alias so any legacy update paths still compile.
+static lv_obj_t** diag_values = diag_status_labels;
+static lv_obj_t** diag_labels = diag_dev_labels;
+
+// Row metadata — index maps 1:1 with DiagnosticInfo flags in update pass.
+struct DiagRowMeta {
+    const char* device;
+    const char* type;   // short tag (ENCODER / ROTARY / HUB / FADER / BYBUTTON…)
+};
+static const DiagRowMeta DIAG_META[DIAG_ROWS] = {
+    { "WiFi",          "NET"      },
+    { "UDP Master",    "LINK"     },
+    { "P4 Display",    "BRIDGE"   },
+    { "I2C Hub",       "HUB"      },
+    { "Touch GT911",   "TOUCH"    },
+    { "LCD Panel",     "DISPLAY"  },
+    { "M5 Encoder 1",  "ROTATE8"  },
+    { "M5 Encoder 2",  "ROTATE8"  },
+    { "ByteButton 1",  "BYBUTTON" },
+    { "ByteButton 2",  "BYBUTTON" },
+    { "DFRobot Enc",   "ENCODER"  },
+    { "DFRobot Pot",   "ROTARY"   },
+    { "Unit Fader",    "FADER"    },
+    { "SD Card",       "STORAGE"  },
+};
 
 extern bool sd_mounted;  // from SD card screen
 
@@ -2636,42 +2668,75 @@ void ui_create_diagnostics_screen() {
     lv_obj_set_style_text_color(title, RED808_TEXT, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
-    static const char* row_names[DIAG_ROWS] = {
-        "WiFi", "UDP", "Touch GT911", "LCD RGB",
-        "M5 Encoder #1", "M5 Encoder #2",
-        "M5 ByteButton #1", "M5 ByteButton #2", "SD Card"
-    };
-
 #if PORTRAIT_MODE
     int card_w = UI_W - 32;
-    lv_obj_t* health_card = create_section_shell(scr_diagnostics, 16, 32, card_w, 390);
+    lv_obj_t* health_card = create_section_shell(scr_diagnostics, 16, 32, card_w, 420);
+    int row_h = 24;
 #else
-    lv_obj_t* health_card = create_section_shell(scr_diagnostics, 24, 32, 300, 348);
+    lv_obj_t* health_card = create_section_shell(scr_diagnostics, 24, 32, 320, 400);
+    int row_h = 24;
 #endif
+
     lv_obj_t* health_title = lv_label_create(health_card);
     lv_label_set_text(health_title, LV_SYMBOL_OK "  HARDWARE LINKS");
     lv_obj_set_style_text_font(health_title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(health_title, RED808_INFO, 0);
     lv_obj_set_pos(health_title, 0, 0);
 
-    int y = 38;
-#if PORTRAIT_MODE
-    int row_h = 22;
-#else
-    int row_h = 34;
-#endif
-    for (int i = 0; i < DIAG_ROWS; i++) {
-        diag_labels[i] = lv_label_create(health_card);
-        lv_label_set_text(diag_labels[i], row_names[i]);
-        lv_obj_set_style_text_font(diag_labels[i], &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(diag_labels[i], RED808_TEXT, 0);
-        lv_obj_set_pos(diag_labels[i], 0, y);
+    // Column header
+    lv_obj_t* hdr_dev = lv_label_create(health_card);
+    lv_label_set_text(hdr_dev, "DEVICE");
+    lv_obj_set_style_text_font(hdr_dev, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(hdr_dev, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(hdr_dev, 0, 22);
 
-        diag_values[i] = lv_label_create(health_card);
-        lv_label_set_text(diag_values[i], "---");
-        lv_obj_set_style_text_font(diag_values[i], &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(diag_values[i], RED808_TEXT_DIM, 0);
-        lv_obj_set_pos(diag_values[i], 170, y);
+    lv_obj_t* hdr_proto = lv_label_create(health_card);
+    lv_label_set_text(hdr_proto, "PROTOCOL");
+    lv_obj_set_style_text_font(hdr_proto, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(hdr_proto, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(hdr_proto, 110, 22);
+
+    lv_obj_t* hdr_type = lv_label_create(health_card);
+    lv_label_set_text(hdr_type, "TYPE");
+    lv_obj_set_style_text_font(hdr_type, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(hdr_type, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(hdr_type, 210, 22);
+
+    lv_obj_t* hdr_st = lv_label_create(health_card);
+    lv_label_set_text(hdr_st, "ST");
+    lv_obj_set_style_text_font(hdr_st, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(hdr_st, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(hdr_st, 275, 22);
+
+    int y = 42;
+    for (int i = 0; i < DIAG_ROWS; i++) {
+        // Col 1 — device
+        diag_dev_labels[i] = lv_label_create(health_card);
+        lv_label_set_text(diag_dev_labels[i], DIAG_META[i].device);
+        lv_obj_set_style_text_font(diag_dev_labels[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(diag_dev_labels[i], RED808_TEXT, 0);
+        lv_obj_set_pos(diag_dev_labels[i], 0, y);
+
+        // Col 2 — protocol (populated live in update pass)
+        diag_proto_labels[i] = lv_label_create(health_card);
+        lv_label_set_text(diag_proto_labels[i], "…");
+        lv_obj_set_style_text_font(diag_proto_labels[i], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(diag_proto_labels[i], RED808_TEXT_DIM, 0);
+        lv_obj_set_pos(diag_proto_labels[i], 110, y + 2);
+
+        // Col 3 — type tag
+        diag_type_labels[i] = lv_label_create(health_card);
+        lv_label_set_text(diag_type_labels[i], DIAG_META[i].type);
+        lv_obj_set_style_text_font(diag_type_labels[i], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(diag_type_labels[i], RED808_ACCENT2, 0);
+        lv_obj_set_pos(diag_type_labels[i], 210, y + 2);
+
+        // Col 4 — status pill
+        diag_status_labels[i] = lv_label_create(health_card);
+        lv_label_set_text(diag_status_labels[i], "--");
+        lv_obj_set_style_text_font(diag_status_labels[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(diag_status_labels[i], RED808_ERROR, 0);
+        lv_obj_set_pos(diag_status_labels[i], 275, y);
 
         y += row_h;
     }
@@ -2737,39 +2802,60 @@ void ui_update_diagnostics() {
     static uint32_t prev_udp_rx = 0;
     static uint32_t prev_json_err = 0;
 
-    struct { bool val; const char* ok; const char* fail; } rows[] = {
-        { diagInfo.wifiOk,        "Connected",          "Disconnected" },
-        { diagInfo.udpConnected,  "Port 8888 OK",       "Inactive" },
-        { diagInfo.touchOk,       "OK (0x5D)",          "NOT FOUND" },
-        { diagInfo.lcdOk,         "1024x600 OK",        "ERROR" },
-        { diagInfo.m5encoder1Ok,  "OK",                 "Not detected" },
-        { diagInfo.m5encoder2Ok,  "OK",                 "Not detected" },
-        { diagInfo.byteButton1Ok, "OK",                 "Not detected" },
-        { diagInfo.byteButton2Ok, "OK",                 "Not detected" },
-        { diagInfo.sdOk || sd_mounted, sd_mounted ? "Mounted (SD_MMC)" : "Not mounted", "No card" },
+    // Aggregate flags for compound rows (DFRobot 4 encoders, 2 byte buttons).
+    bool dfEncAny = diagInfo.dfrobot1Ok || diagInfo.dfrobot2Ok ||
+                    diagInfo.dfrobot3Ok || diagInfo.dfrobot4Ok;
+    int dfEncCount = (int)diagInfo.dfrobot1Ok + (int)diagInfo.dfrobot2Ok +
+                     (int)diagInfo.dfrobot3Ok + (int)diagInfo.dfrobot4Ok;
+    bool sdAlive = diagInfo.sdOk || sd_mounted;
+
+    // Row metadata parallel to DIAG_META — status flag + protocol string.
+    // Protocol strings describe where each device lives (bus/address/channel).
+    struct DiagRowRuntime { bool val; const char* proto; };
+    char proto_m5_1[24], proto_m5_2[24];
+    char proto_bb_1[24], proto_bb_2[24];
+    char proto_dfenc[24];
+    snprintf(proto_m5_1, sizeof(proto_m5_1), "I2C hub ch%d",
+             (m5HubChannel[0] >= 0) ? m5HubChannel[0] : 0);
+    snprintf(proto_m5_2, sizeof(proto_m5_2), "I2C hub ch%d",
+             (m5HubChannel[1] >= 0) ? m5HubChannel[1] : 0);
+    snprintf(proto_bb_1, sizeof(proto_bb_1), "I2C 0x47 ch%d",
+             (byteButtonHubChannel[0] >= 0) ? byteButtonHubChannel[0] : 0);
+    snprintf(proto_bb_2, sizeof(proto_bb_2), "I2C 0x47 ch%d",
+             (byteButtonHubChannel[1] >= 0) ? byteButtonHubChannel[1] : 0);
+    snprintf(proto_dfenc, sizeof(proto_dfenc), "I2C 4x (%d/4)", dfEncCount);
+
+    DiagRowRuntime rows[DIAG_ROWS] = {
+        { diagInfo.wifiOk,        "TCP/IP Red808" },   // WiFi
+        { diagInfo.udpConnected,  "UDP :8888 JSON" },  // UDP Master
+        { masterConnected,        "UART 921600" },     // P4 Display link (heartbeat)
+        { diagInfo.i2cHubOk,      "I2C 0x70" },        // PCA9548A mux
+        { diagInfo.touchOk,       "I2C 0x5D" },        // GT911
+        { diagInfo.lcdOk,         "RGB666 1024x600" }, // LCD
+        { diagInfo.m5encoder1Ok,  proto_m5_1 },        // M5 Encoder 1
+        { diagInfo.m5encoder2Ok,  proto_m5_2 },        // M5 Encoder 2
+        { diagInfo.byteButton1Ok, proto_bb_1 },        // ByteButton 1
+        { diagInfo.byteButton2Ok, proto_bb_2 },        // ByteButton 2
+        { dfEncAny,               proto_dfenc },       // DFRobot encoders (4x)
+        { diagInfo.dfrobotPotsOk, "I2C ADS1115" },     // DFRobot pot ADC
+        { true,                   "ADC GPIO6" },       // Unit fader (passive ADC)
+        { sdAlive,                sdAlive ? "SD_MMC FAT" : "not mounted" },
     };
 
     for (int i = 0; i < DIAG_ROWS; i++) {
-        if (!diag_rows_initialized || rows[i].val != prev_vals[i]) {
-            prev_vals[i] = rows[i].val;
-            if (i == 6) {
-                lv_label_set_text_fmt(diag_values[i], rows[i].val ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[0]);
-            } else if (i == 7) {
-                lv_label_set_text_fmt(diag_values[i], rows[i].val ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[1]);
-            } else {
-                lv_label_set_text(diag_values[i], rows[i].val ? rows[i].ok : rows[i].fail);
-            }
-            lv_obj_set_style_text_color(diag_values[i], rows[i].val ? RED808_SUCCESS : RED808_ERROR, 0);
+        bool v = rows[i].val;
+        if (!diag_rows_initialized || v != prev_vals[i]) {
+            prev_vals[i] = v;
+            lv_label_set_text(diag_status_labels[i], v ? "OK" : "--");
+            lv_obj_set_style_text_color(diag_status_labels[i],
+                v ? RED808_SUCCESS : RED808_ERROR, 0);
+        }
+        // Protocol string may change at runtime (channel reassigned after rescan)
+        if (diag_proto_labels[i]) {
+            lv_label_set_text(diag_proto_labels[i], rows[i].proto);
         }
     }
     diag_rows_initialized = true;
-
-    if (diag_values[6]) {
-        lv_label_set_text_fmt(diag_values[6], diagInfo.byteButton1Ok ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[0]);
-    }
-    if (diag_values[7]) {
-        lv_label_set_text_fmt(diag_values[7], diagInfo.byteButton2Ok ? "OK (0x47 ch%d)" : "Not detected", byteButtonHubChannel[1]);
-    }
 
     if (wifiConnected != prev_wifi_connected) {
         prev_wifi_connected = wifiConnected;

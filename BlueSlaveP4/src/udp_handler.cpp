@@ -555,8 +555,14 @@ void udp_handler_process(void) {
         packetSize = udp.parsePacket();
     }
 
-    // --- Local step clock (BPM-based, like S3 does) ---
-    if (p4.is_playing) {
+    // --- Local step clock (fallback only) ---
+    // Authoritative source is MSG_SYSTEM/SYS_STEP from S3 over UART (see
+    // uart_handler.cpp). When the S3 link is alive, advancing current_step
+    // locally as well would cause the step to tick at ~2× the real rate
+    // (UART assigns absolute step, then this clock increments right after),
+    // producing visible desync with audio. Only run the local clock when
+    // the S3 link is down AND Master UDP is absent.
+    if (p4.is_playing && !p4.s3_connected && !p4.master_connected) {
         static unsigned long lastStepTime = 0;
         float bpm = p4.bpm_int + p4.bpm_frac * 0.1f;
         if (bpm < 40) bpm = 120;
