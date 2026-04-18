@@ -94,7 +94,7 @@ volatile bool livePadsVisualDirty = false;
 TrackFilter trackFilters[Config::MAX_TRACKS];
 TrackFilter masterFilter = {false, 0, 0, 0};
 int filterSelectedTrack = -1;  // -1 = master
-int filterSelectedFX = FILTER_FLANGER;
+int filterSelectedFX = FILTER_CHORUS;
 int fxFilterType = 0;
 int fxFilterCutoffHz = 20000;    // max (fully open) — pot at zero = no filtering
 int fxFilterResonanceX10 = 10;   // 1.0 Q — min
@@ -206,7 +206,7 @@ const char* const byteButtonActionNames[] = {
     "Go Sequencer",      // BB_ACTION_SCREEN_SEQUENCER
     "Go BUTTONS",        // BB_ACTION_SCREEN_PERFORMANCE
     "Go Volumes",        // BB_ACTION_SCREEN_VOLUMES
-    "FX Mute FLANGER",   // BB_ACTION_FX_CLEAN
+    "FX Mute CHORUS",    // BB_ACTION_FX_CLEAN
     "FX Mute DELAY",     // BB_ACTION_FX_SPACE
     "FX Mute REVERB",    // BB_ACTION_FX_ACID
     "FX Mute ALL",       // BB_ACTION_FX_DESTROY
@@ -765,7 +765,7 @@ static void requestMasterSync(bool requestState) {
         requestTrackVolumesFromMaster();
 
         // Reset all encoder FX to OFF on connection (clean slate)
-        { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerActive"; d["value"] = 0; sendUDPCommand(d); }
+        { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusActive";  d["value"] = 0; sendUDPCommand(d); }
         { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayActive";   d["value"] = 0; sendUDPCommand(d); }
         { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbActive";  d["value"] = 0; sendUDPCommand(d); }
         { JsonDocument d(&sramAllocator); d["cmd"] = "setFilter";        d["value"] = 0; sendUDPCommand(d); }
@@ -1532,15 +1532,15 @@ void sendFilterUDP(int track, int fxType) {
     bool activating;
 
     switch (fxType) {
-        case FILTER_FLANGER: {
-            mix = (float)f.delayAmount / 127.0f;
-            activating = (f.delayAmount > 0);
-            { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
+        case FILTER_CHORUS: {
+            mix = (float)f.chorusAmount / 127.0f;
+            activating = (f.chorusAmount > 0);
+            { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
             if (activating) {
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerRate";     d["value"] = 0.3f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerDepth";    d["value"] = 0.7f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerFeedback"; d["value"] = 0.5f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setFlangerMix";      d["value"] = mix;  sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusRate";   d["value"] = 0.6f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusDepth";  d["value"] = 0.5f; sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusStereo"; d["value"] = 1;    sendUDPCommand(d); }
+                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusMix";    d["value"] = mix;  sendUDPCommand(d); }
             }
             break;
         }
@@ -1715,6 +1715,14 @@ void handleDFRobotPots() {
                 // 1.0 .. 10.0 Q
                 fxFilterResonanceX10 = constrain((int)lroundf(10.0f + t * 90.0f), 10, 100);
                 if (!analogFxMuted[1]) {
+                    // Auto-activate LowPass filter so resonance is audible.
+                    if (fxFilterType == 0) {
+                        fxFilterType = 1;  // LP
+                        JsonDocument fdoc(&sramAllocator);
+                        fdoc["cmd"] = "setFilter";
+                        fdoc["type"] = 1;
+                        sendUDPCommand(fdoc);
+                    }
                     doc["cmd"] = "setFilterResonance";
                     doc["value"] = (float)fxFilterResonanceX10 / 10.0f;
                     sendUDPCommand(doc);
@@ -2375,7 +2383,7 @@ static void syncFxEncoderLED(int lane) {
 
 // =============================================================================
 // FX LANE MUTE TOGGLE (used by ByteButton + can be called from anywhere)
-// lane: 0=Flanger, 1=Delay, 2=Reverb
+// lane: 0=Chorus, 1=Delay, 2=Reverb
 // =============================================================================
 static void toggleDfFxMute(int lane) {
     if (lane < 0 || lane > 2) return;
@@ -2385,10 +2393,10 @@ static void toggleDfFxMute(int lane) {
     int effective = muted ? 0 : constrain(storedVal, 0, 127);
 
     // Update local state
-    if (lane == 0)      masterFilter.flangerAmount = (uint8_t)effective;
+    if (lane == 0)      masterFilter.chorusAmount  = (uint8_t)effective;
     else if (lane == 1) masterFilter.delayAmount   = (uint8_t)effective;
     else                masterFilter.compAmount    = (uint8_t)effective;
-    masterFilter.enabled = (masterFilter.flangerAmount > 0 ||
+    masterFilter.enabled = (masterFilter.chorusAmount > 0 ||
                             masterFilter.delayAmount > 0 ||
                             masterFilter.compAmount > 0);
 
@@ -2397,7 +2405,7 @@ static void toggleDfFxMute(int lane) {
     uart_bridge_send_encoder_mute(lane, muted);
     syncFxEncoderLED(lane);
     RED808_LOG_PRINTF("[FX] Lane %d (%s) %s\n", lane,
-        lane==0?"Flanger":lane==1?"Delay":"Reverb", muted?"MUTED":"UNMUTED");
+        lane==0?"Chorus":lane==1?"Delay":"Reverb", muted?"MUTED":"UNMUTED");
 }
 
 // =============================================================================
@@ -2408,17 +2416,17 @@ void handleDFRobotEncoders() {
     static unsigned long lastBtnMs[DFROBOT_ENCODER_COUNT] = {};
     static int laneStoredValue[3] = {0, 0, 0};
 
-    // Maps DFRobot encoder index → FX lane: enc1→Flanger(0), enc2→Delay(1), enc3→Reverb(2)
+    // Maps DFRobot encoder index → FX lane: enc1→Delay(1), enc2→Reverb(2), enc3→Chorus(0)
     // Encoder 0 is BPM (no lane).
     auto encToLane = [](int enc) -> int {
-        if (enc == 1) return 0;  // Flanger
-        if (enc == 2) return 1;  // Delay
-        if (enc == 3) return 2;  // Reverb
+        if (enc == 1) return 1;  // Delay
+        if (enc == 2) return 2;  // Reverb
+        if (enc == 3) return 0;  // Chorus
         return -1;
     };
 
     auto syncMasterEnabled = [&]() {
-        masterFilter.enabled = (masterFilter.flangerAmount > 0 ||
+        masterFilter.enabled = (masterFilter.chorusAmount > 0 ||
                                 masterFilter.delayAmount > 0 ||
                                 masterFilter.compAmount > 0);
     };
@@ -2426,9 +2434,9 @@ void handleDFRobotEncoders() {
     auto sendFxLane = [&](int lane, int value, bool muted) {
         int effective = muted ? 0 : constrain(value, 0, 127);
 
-        // Update local state: lane 0=Flanger, 1=Delay, 2=Reverb
-        if (lane == 0)      masterFilter.flangerAmount = (uint8_t)effective;
-        else if (lane == 1) masterFilter.delayAmount   = (uint8_t)effective;  // reuse delayAmount for Delay
+        // Update local state: lane 0=Chorus, 1=Delay, 2=Reverb
+        if (lane == 0)      masterFilter.chorusAmount  = (uint8_t)effective;
+        else if (lane == 1) masterFilter.delayAmount   = (uint8_t)effective;
         else                masterFilter.compAmount    = (uint8_t)effective;  // reuse compAmount for Reverb
 
         syncMasterEnabled();
@@ -2623,7 +2631,7 @@ static void runByteButtonAction(uint8_t action, int moduleIdx) {
             navigateToScreen(SCREEN_VOLUMES);
             break;
         case BB_ACTION_FX_CLEAN:
-            toggleDfFxMute(0);  // Flanger
+            toggleDfFxMute(0);  // Chorus
             break;
         case BB_ACTION_FX_SPACE:
             toggleDfFxMute(1);  // Delay

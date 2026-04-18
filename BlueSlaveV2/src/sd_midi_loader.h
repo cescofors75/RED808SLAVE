@@ -3,10 +3,10 @@
 // Reads Standard MIDI Format (.mid) from SD_MMC and extracts a step grid
 // of up to MAX_STEPS 16th-note steps (up to 4 bars) per pattern.
 //
-// Track mapping (GM standard drums):
-//   0=Kick  1=Snare  2=Closed HH  3=Pedal HH  4=Open HH  5=Crash
-//   6=LowTom  7=HiTom  8=MidTom  9=LMTom  10=HMTom  11=HTom
-//  12=SideStick  13=Clap  14=Ride  15=Misc
+// Track mapping (matches trackNames[] in main.cpp):
+//   0:BD  1:SD  2:CH  3:OH  4:CP  5:CB  6:RS  7:CL
+//   8:MA  9:CY  10:HT 11:LT 12:MC 13:MT 14:HC 15:LC
+// GM percussion notes 35..81 are mapped to the closest matching slot.
 // =============================================================================
 #pragma once
 #include <cstdint>

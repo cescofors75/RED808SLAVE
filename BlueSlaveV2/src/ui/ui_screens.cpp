@@ -3996,7 +3996,7 @@ void ui_update_performance() {
     static uint32_t last_ms = 0;
     if ((lv_tick_get() - last_ms) < 250) return;
 
-    static const char* fx_names[] = {"Delay", "Flanger", "Compressor"};
+    static const char* fx_names[] = {"Chorus", "Delay", "Reverb"};
     lv_label_set_text(perf_runtime_values[0], volumeMode == VOL_SEQUENCER ? "Sequencer" : "Live Pads");
     lv_label_set_text(perf_runtime_values[1], theme_presets[currentTheme].name);
     lv_label_set_text(perf_runtime_values[2], filterSelectedTrack == -1 ? "Master" : trackNames[filterSelectedTrack]);

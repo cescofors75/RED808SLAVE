@@ -29,7 +29,7 @@ enum Screen {
 };
 
 enum FilterType {
-    FILTER_FLANGER = 0,
+    FILTER_CHORUS = 0,
     FILTER_DELAY,
     FILTER_REVERB,
     FILTER_COUNT = 3
@@ -83,8 +83,8 @@ enum ByteButtonAction {
 struct TrackFilter {
     bool enabled;
     uint8_t delayAmount;    // 0-127
-    uint8_t flangerAmount;  // 0-127
-    uint8_t compAmount;     // 0-127
+    uint8_t chorusAmount;   // 0-127 (was flangerAmount)
+    uint8_t compAmount;     // 0-127 (used for Reverb amount)
 };
 
 struct Pattern {

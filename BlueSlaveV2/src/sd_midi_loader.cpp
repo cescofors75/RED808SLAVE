@@ -5,19 +5,114 @@
 #include <SD_MMC.h>
 #include <cstring>
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 
 // ---------------------------------------------------------------------------
-// GM drum note → our track index (offset table for MIDI notes 35-59)
+// GM drum note → our track index
+// Track layout (matches trackNames[] in main.cpp):
+//   0:BD  1:SD  2:CH  3:OH  4:CP  5:CB  6:RS  7:CL
+//   8:MA  9:CY  10:HT 11:LT 12:MC 13:MT 14:HC 15:LC
 // 0xFF = note ignored
 // ---------------------------------------------------------------------------
-static const uint8_t NOTE_MAP[25] = {
-    //35  36   37  38   39  40  41   42  43   44  45   46  47   48  49   50  51   52  53   54  55   56  57    58   59
-      0,   0,  12,  1,  13,  1,  6,   2,  7,   3,  8,   4,  9,  10,  5,  11, 14,   5, 14,  15,  5,  15,  5, 0xFF, 14
+static const uint8_t NOTE_MAP[47] = {
+    // 35 Acoustic Bass Drum  -> BD
+    /*35*/ 0,
+    // 36 Bass Drum 1         -> BD
+    /*36*/ 0,
+    // 37 Side Stick          -> RS
+    /*37*/ 6,
+    // 38 Acoustic Snare      -> SD
+    /*38*/ 1,
+    // 39 Hand Clap           -> CP
+    /*39*/ 4,
+    // 40 Electric Snare      -> SD
+    /*40*/ 1,
+    // 41 Low Floor Tom       -> LT
+    /*41*/ 11,
+    // 42 Closed Hi-Hat       -> CH
+    /*42*/ 2,
+    // 43 High Floor Tom      -> LT
+    /*43*/ 11,
+    // 44 Pedal Hi-Hat        -> CH (no pedal track, fold to closed)
+    /*44*/ 2,
+    // 45 Low Tom             -> LT
+    /*45*/ 11,
+    // 46 Open Hi-Hat         -> OH
+    /*46*/ 3,
+    // 47 Low-Mid Tom         -> MT
+    /*47*/ 13,
+    // 48 Hi-Mid Tom          -> HT
+    /*48*/ 10,
+    // 49 Crash Cymbal 1      -> CY
+    /*49*/ 9,
+    // 50 High Tom            -> HT
+    /*50*/ 10,
+    // 51 Ride Cymbal 1       -> CY
+    /*51*/ 9,
+    // 52 Chinese Cymbal      -> CY
+    /*52*/ 9,
+    // 53 Ride Bell           -> CY
+    /*53*/ 9,
+    // 54 Tambourine          -> MA (use shaker slot)
+    /*54*/ 8,
+    // 55 Splash Cymbal       -> CY
+    /*55*/ 9,
+    // 56 Cowbell             -> CB
+    /*56*/ 5,
+    // 57 Crash Cymbal 2      -> CY
+    /*57*/ 9,
+    // 58 Vibraslap           -> CL
+    /*58*/ 7,
+    // 59 Ride Cymbal 2       -> CY
+    /*59*/ 9,
+    // 60 Hi Bongo            -> HC (high conga slot)
+    /*60*/ 14,
+    // 61 Low Bongo           -> LC
+    /*61*/ 15,
+    // 62 Mute Hi Conga       -> HC
+    /*62*/ 14,
+    // 63 Open Hi Conga       -> HC
+    /*63*/ 14,
+    // 64 Low Conga           -> LC
+    /*64*/ 15,
+    // 65 High Timbale        -> HT
+    /*65*/ 10,
+    // 66 Low Timbale         -> LT
+    /*66*/ 11,
+    // 67 High Agogo          -> CL
+    /*67*/ 7,
+    // 68 Low Agogo           -> CL
+    /*68*/ 7,
+    // 69 Cabasa              -> MA
+    /*69*/ 8,
+    // 70 Maracas             -> MA
+    /*70*/ 8,
+    // 71 Short Whistle       -> CL
+    /*71*/ 7,
+    // 72 Long Whistle        -> CL
+    /*72*/ 7,
+    // 73 Short Guiro         -> MA
+    /*73*/ 8,
+    // 74 Long Guiro          -> MA
+    /*74*/ 8,
+    // 75 Claves              -> CL
+    /*75*/ 7,
+    // 76 Hi Wood Block       -> CL
+    /*76*/ 7,
+    // 77 Lo Wood Block       -> CL
+    /*77*/ 7,
+    // 78 Mute Cuica          -> MC (mid conga slot)
+    /*78*/ 12,
+    // 79 Open Cuica          -> MC
+    /*79*/ 12,
+    // 80 Mute Triangle       -> CL
+    /*80*/ 7,
+    // 81 Open Triangle       -> CL
+    /*81*/ 7,
 };
 
 static inline uint8_t gm_note_to_track(uint8_t note) {
-    if (note >= 35 && note <= 59) return NOTE_MAP[note - 35];
-    if (note >= 60 && note <= 81) return 15;  // congas, bongos, etc. → misc
+    if (note >= 35 && note <= 81) return NOTE_MAP[note - 35];
     return 0xFF;
 }
 
@@ -61,14 +156,26 @@ static void skipN(uint32_t n) {
 
 // ---------------------------------------------------------------------------
 // Raw event buffer — filled during parseTrack, post-processed in midi_load_pattern
-// 4096 entries (~20KB SRAM) covers full song themes; previously 512 truncated
-// medium/large MIDI files mid-parse and caused "tema no carga bien" symptom.
+// Allocated in PSRAM (~32KB) to avoid reducing internal SRAM available for
+// SD_MMC/LVGL/WiFi drivers. Previously 512 truncated medium/large MIDI files
+// mid-parse; now 4096 covers full song themes.
 // ---------------------------------------------------------------------------
 #define MIDI_EVENT_BUF 4096
 struct RawEvt { uint32_t tick; uint8_t trk; };
-static RawEvt s_evbuf[MIDI_EVENT_BUF];
+static RawEvt* s_evbuf = nullptr;
 static int    s_evcount = 0;
 static bool   s_evbuf_overflow = false;
+
+static bool ensure_evbuf() {
+    if (s_evbuf) return true;
+    s_evbuf = (RawEvt*)heap_caps_malloc(sizeof(RawEvt) * MIDI_EVENT_BUF,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_evbuf) {
+        // Fallback: try internal RAM (smaller, but still works)
+        s_evbuf = (RawEvt*)malloc(sizeof(RawEvt) * MIDI_EVENT_BUF);
+    }
+    return s_evbuf != nullptr;
+}
 
 // Parse one MTrk chunk — collects matching note-on events into s_evbuf
 // tempo_us_out: filled with microseconds-per-quarter-note if Set Tempo found
@@ -248,6 +355,10 @@ bool midi_load_pattern(const char* path, bool steps[Config::MAX_TRACKS][Config::
     uint32_t tempo_us = 0;
     s_evcount = 0;
     s_evbuf_overflow = false;
+    if (!ensure_evbuf()) {
+        log_e("[MIDI] Could not allocate event buffer");
+        return false;
+    }
     uint16_t tpq = parseFile(path, midi_channel, &tempo_us);
     if (tpq == 0) return false;
 

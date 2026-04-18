@@ -189,16 +189,16 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
                   enc_id, value, muted, active, mix, fullSend);
 
     switch (enc_id) {
-        case 0: // Flanger — slow sweep, classic jet sound
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerActive\",\"value\":%d}", active ? 1 : 0);
+        case 0: // Chorus — lush stereo modulation
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
                 if (fullSend) {
-                    sendJson("{\"cmd\":\"setFlangerRate\",\"value\":0.2}");
-                    sendJson("{\"cmd\":\"setFlangerDepth\",\"value\":0.7}");
-                    sendJson("{\"cmd\":\"setFlangerFeedback\",\"value\":0.6}");
+                    sendJson("{\"cmd\":\"setChorusRate\",\"value\":0.6}");
+                    sendJson("{\"cmd\":\"setChorusDepth\",\"value\":0.5}");
+                    sendJson("{\"cmd\":\"setChorusStereo\",\"value\":1}");
                 }
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerMix\",\"value\":%.3f}", mix);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusMix\",\"value\":%.3f}", mix);
                 sendJson(buf);
             }
             break;
