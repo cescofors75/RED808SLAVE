@@ -637,26 +637,21 @@ static void update_live_screen(void) {
         bool was_flash = pad_was_flash[i];
         if (flashing == was_flash && !step_changed) continue;
         pad_was_flash[i] = flashing;
-        // Spawn ripple on rising edge (pad just started flashing)
-        if (flashing && !was_flash) ripple_spawn(i);
+        // NOTE: ripple_spawn is already called from pad_touch_cb/direct_touch.
+        // Do not spawn here to avoid duplicated animations and extra LVGL work.
         lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[i]);
 
         if (flashing) {
-            // ── NEON HIT: bright fill + white ring + wide neon glow ──
+            // ── NEON HIT: bright fill + white ring + thin colored outline ──
+            // Shadow disabled on P4 (full_refresh=1 + 16 pads would soft-render
+            // ~256K blended px/frame and kill touch responsiveness).
             lv_obj_set_style_bg_color(live_pad_btns[i], tc, 0);
             lv_obj_set_style_bg_opa(live_pad_btns[i], LV_OPA_COVER, 0);
-            // Bright white inner border (LED-ring look)
             lv_obj_set_style_border_width(live_pad_btns[i], 4, 0);
             lv_obj_set_style_border_color(live_pad_btns[i], lv_color_white(), 0);
             lv_obj_set_style_border_opa(live_pad_btns[i], LV_OPA_80, 0);
-            // Fat neon outline
-            lv_obj_set_style_outline_width(live_pad_btns[i], 6, 0);
+            lv_obj_set_style_outline_width(live_pad_btns[i], 4, 0);
             lv_obj_set_style_outline_opa(live_pad_btns[i], LV_OPA_COVER, 0);
-            // Wide neon glow shadow
-            lv_obj_set_style_shadow_width(live_pad_btns[i], 32, 0);
-            lv_obj_set_style_shadow_color(live_pad_btns[i], tc, 0);
-            lv_obj_set_style_shadow_opa(live_pad_btns[i], LV_OPA_90, 0);
-            lv_obj_set_style_shadow_spread(live_pad_btns[i], 8, 0);
             // Label → white for contrast
             if (live_pad_labels[i]) lv_obj_set_style_text_color(live_pad_labels[i], lv_color_white(), 0);
         } else {
@@ -668,9 +663,6 @@ static void update_live_screen(void) {
             lv_obj_set_style_border_opa(live_pad_btns[i], LV_OPA_COVER, 0);
             lv_obj_set_style_outline_width(live_pad_btns[i], 3, 0);
             lv_obj_set_style_outline_opa(live_pad_btns[i], LV_OPA_40, 0);
-            lv_obj_set_style_shadow_width(live_pad_btns[i], 0, 0);
-            lv_obj_set_style_shadow_opa(live_pad_btns[i], LV_OPA_0, 0);
-            lv_obj_set_style_shadow_spread(live_pad_btns[i], 0, 0);
             // Label → track color
             if (live_pad_labels[i]) lv_obj_set_style_text_color(live_pad_labels[i], tc, 0);
         }

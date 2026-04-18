@@ -768,7 +768,7 @@ static void requestMasterSync(bool requestState) {
         { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusActive";  d["value"] = 0; sendUDPCommand(d); }
         { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayActive";   d["value"] = 0; sendUDPCommand(d); }
         { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbActive";  d["value"] = 0; sendUDPCommand(d); }
-        { JsonDocument d(&sramAllocator); d["cmd"] = "setFilter";        d["value"] = 0; sendUDPCommand(d); }
+        { JsonDocument d(&sramAllocator); d["cmd"] = "setFilter";        d["type"]  = 0;   sendUDPCommand(d); }
         { JsonDocument d(&sramAllocator); d["cmd"] = "setDistortion";    d["value"] = 0.0f; sendUDPCommand(d); }
         // Also reset via UART bridge (works when S3_WIFI_ENABLED=0)
         for (int lane = 0; lane < 3; lane++) {
@@ -1373,15 +1373,17 @@ void receiveUDPData() {
                     }
                     if (!incomingEmpty) break;
                 }
-                // If pattern 6 (demo) has local data and master sends empty, keep local
-                if (pat == 6 && incomingEmpty) {
+                // Protect ALL patterns (not just demo): if master sends empty and
+                // we already have local data, keep local and skip the overwrite.
+                // This prevents master→slave sync floods from wiping user edits.
+                if (incomingEmpty) {
                     bool localHasData = false;
                     for (int t = 0; t < Config::MAX_TRACKS && !localHasData; t++)
                         for (int s = 0; s < Config::MAX_STEPS && !localHasData; s++)
-                            if (patterns[6].steps[t][s]) localHasData = true;
+                            if (patterns[pat].steps[t][s]) localHasData = true;
                     if (localHasData) {
-                        RED808_LOG_PRINTLN("[UDP] Skipping empty pattern_sync for pattern 7 (demo)");
-                        return;  // skip this packet, keep local demo
+                        RED808_LOG_PRINTF("[UDP] Skipping empty pattern_sync for pattern %d\n", pat + 1);
+                        return;  // skip this packet, keep local pattern
                     }
                 }
                 int t = 0;

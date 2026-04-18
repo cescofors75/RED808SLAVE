@@ -138,7 +138,7 @@ void udp_send_set_track_volume(int track, int volume) {
 
 void udp_send_set_filter(int type) {
     char buf[64];
-    snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilter\",\"value\":%d}", type);
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilter\",\"type\":%d}", type);
     sendJson(buf);
 }
 
@@ -269,7 +269,7 @@ void udp_request_master_sync(void) {
     sendJson("{\"cmd\":\"setReverbActive\",\"value\":0}");
     sendJson("{\"cmd\":\"setChorusActive\",\"value\":0}");
     sendJson("{\"cmd\":\"setTremoloActive\",\"value\":0}");
-    sendJson("{\"cmd\":\"setFilter\",\"value\":0}");
+    sendJson("{\"cmd\":\"setFilter\",\"type\":0}");
     sendJson("{\"cmd\":\"setDistortion\",\"value\":0.0}");
 
     syncRequested = true;
@@ -301,9 +301,29 @@ static void processJson(const char* json, int len) {
     // ----- Pattern sync -----
     if (strcmp(cmd, "pattern_sync") == 0) {
         int pat = doc["pattern"] | p4.current_pattern;
-        p4.current_pattern = pat;
         JsonArray data = doc["data"];
         if (data) {
+            // Check if incoming is all-empty
+            bool incomingEmpty = true;
+            for (JsonArray row : data) {
+                for (JsonVariant val : row) {
+                    if (val.as<int>() != 0) { incomingEmpty = false; break; }
+                }
+                if (!incomingEmpty) break;
+            }
+            // If the incoming pattern is empty but we already have local data for
+            // the same index, keep local (protects against master sync floods).
+            if (incomingEmpty && pat == p4.current_pattern) {
+                bool localHasData = false;
+                for (int t = 0; t < 16 && !localHasData; t++)
+                    for (int s = 0; s < 16 && !localHasData; s++)
+                        if (p4.steps[t][s]) localHasData = true;
+                if (localHasData) {
+                    P4_LOG_PRINTF("[UDP] Skipping empty pattern_sync for pattern %d\n", pat + 1);
+                    return;
+                }
+            }
+            p4.current_pattern = pat;
             int track = 0;
             for (JsonArray row : data) {
                 if (track >= 16) break;
@@ -315,6 +335,8 @@ static void processJson(const char* json, int len) {
                 }
                 track++;
             }
+        } else {
+            p4.current_pattern = pat;
         }
         // Forward pattern data to S3 so it can sync its sequencer + pad-sync
         uart_send_pattern_to_s3(pat, p4.steps);
