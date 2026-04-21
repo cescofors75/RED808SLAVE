@@ -67,3 +67,4 @@ void uart_bridge_send_pad_trigger(int pad, uint8_t velocity);
 // Pattern data (extended packet — 32 bytes for 16×16 grid sent to P4)
 // Only packs the first STEPS_PER_BANK (16) steps — P4 protocol is fixed at 16.
 void uart_bridge_send_pattern_data(int pattern, const bool steps[][64], int numTracks);
+void uart_bridge_send_pattern_push(int pattern, const bool steps[][64], int numTracks);

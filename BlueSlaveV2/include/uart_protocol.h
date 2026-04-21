@@ -34,8 +34,9 @@
 #define MSG_SCREEN      0x07    // Screen navigation
 #define MSG_TOUCH_CMD   0x08    // P4→S3: touch-initiated command
 #define MSG_DIAG        0x09    // RESERVED (unused)
-#define MSG_PATTERN_DATA 0x0A   // Extended: pattern step data
+#define MSG_PATTERN_DATA 0x0A   // Extended: pattern step data (display only, master already has it)
 #define MSG_SD_DATA     0x0B    // S3→P4: SD card data (extended packets)
+#define MSG_PATTERN_PUSH 0x0C   // Extended: freshly-loaded pattern (MIDI) — P4 must push it to Master via UDP
 
 // =============================================================================
 // ENCODER IDs (MSG_ENCODER, Byte 2)

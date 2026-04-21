@@ -213,6 +213,17 @@ static void parseTrack(uint32_t len, int tpq, uint32_t* tempo_us_out, int midi_c
             continue;
         }
 
+        // System Real-Time messages (0xF8-0xFE): single-byte, NO data, and
+        // they must NOT reset running status per MIDI spec. Some SMF files
+        // sprinkle these (e.g. 0xF8 timing clock). If we fell into the
+        // generic status-byte path below, `status` would be corrupted and
+        // all subsequent running-status note events would be misparsed —
+        // producing sparse / wrong track hits (classic "only 2 instruments"
+        // symptom). Skip them here without touching `status`.
+        if (b >= 0xF8 && b <= 0xFE) {
+            continue;
+        }
+
         // Regular MIDI event — handle running status
         uint8_t d1;
         if (b & 0x80) { status = b; d1 = readU8(); }
@@ -362,6 +373,8 @@ bool midi_load_pattern(const char* path, bool steps[Config::MAX_TRACKS][Config::
     uint16_t tpq = parseFile(path, midi_channel, &tempo_us);
     if (tpq == 0) return false;
 
+    int ev_primary = s_evcount;
+
     // Auto-fallback: if nothing found on ch9, retry scanning all channels
     if (s_evcount == 0 && midi_channel == 9) {
         s_evcount = 0;
@@ -382,6 +395,17 @@ bool midi_load_pattern(const char* path, bool steps[Config::MAX_TRACKS][Config::
 
     if (bpm_out)
         *bpm_out = (tempo_us > 0) ? (60000000.0f / (float)tempo_us) : 0.0f;
+
+    // Count how many of the 16 tracks actually ended up with at least one step —
+    // helps diagnose "only 2 instruments" issues quickly from the serial log.
+    int tracks_used = 0;
+    for (int t = 0; t < Config::MAX_TRACKS; t++) {
+        for (int s = 0; s < plen; s++) {
+            if (steps[t][s]) { tracks_used++; break; }
+        }
+    }
+    log_i("[MIDI] %s: tpq=%u evPrimary=%d evFinal=%d tracksUsed=%d plen=%d tempo_us=%u",
+          path, (unsigned)tpq, ev_primary, s_evcount, tracks_used, plen, (unsigned)tempo_us);
 
     return total > 0;
 }

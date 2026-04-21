@@ -370,6 +370,70 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
         // packets per pattern change floods the link and can overflow the
         // socket. selectPattern (SYS_PATTERN) is enough for Master to sync.
     }
+    else if (type == MSG_PATTERN_PUSH && len == 32) {
+        // S3 just parsed a MIDI file from SD and handed us a freshly-loaded
+        // pattern. The Master does NOT yet know about this pattern — P4 is
+        // the owner of the Master UDP channel for this path.
+        //
+        // Flow:
+        //   1. Decode the 32-byte packed payload into p4.steps[][].
+        //   2. Select that pattern slot on Master.
+        //   3. Clear the slot (setStep active:false for all 16 tracks × 16 steps).
+        //   4. Send setStep active:true for every hit.
+        //   5. Send start so the pattern plays immediately.
+        int slot = (int)id;
+        if (slot < 0 || slot > 15) return;
+
+        // 1) decode
+        for (int track = 0; track < 16; track++) {
+            uint16_t row = ((uint16_t)payload[track * 2] << 8) | payload[track * 2 + 1];
+            for (int step = 0; step < 16; step++) {
+                p4.steps[track][step] = (row >> step) & 1;
+            }
+        }
+        p4.current_pattern = slot;
+
+        if (!udp_wifi_connected()) {
+            // No master link — UI is updated but master won't play the new
+            // pattern until WiFi is available again.
+            return;
+        }
+
+        // 2) selectPattern
+        udp_send_select_pattern(slot);
+        delay(30);
+
+        // 3) clear slot (16 tracks × 16 steps = 256 false-setStep packets,
+        //    throttled every 16 packets)
+        int cleared = 0;
+        for (int t = 0; t < 16; t++) {
+            for (int s = 0; s < 16; s++) {
+                udp_send_set_step(t, s, false);
+                if ((++cleared % 16) == 0) delay(8);
+            }
+        }
+        delay(30);
+
+        // 4) broadcast active steps (throttled every 8)
+        int sent = 0;
+        int activeCount = 0;
+        for (int t = 0; t < 16; t++) {
+            for (int s = 0; s < 16; s++) {
+                if (p4.steps[t][s]) {
+                    udp_send_set_step(t, s, true);
+                    activeCount++;
+                    if ((++sent % 8) == 0) delay(10);
+                }
+            }
+        }
+        delay(50);
+
+        // 5) start playback
+        if (!p4.is_playing) {
+            udp_send_start();
+            p4.is_playing = true;
+        }
+    }
     else if (type == MSG_SD_DATA) {
         switch (id) {
             case SD_RESP_STATUS:

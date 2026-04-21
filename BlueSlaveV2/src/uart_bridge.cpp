@@ -240,3 +240,30 @@ void uart_bridge_send_pattern_data(int pattern, const bool steps[][64], int numT
     }
     uart_bridge_send_extended(MSG_PATTERN_DATA, (uint8_t)pattern, packed, 32);
 }
+
+// Like send_pattern_data, but uses MSG_PATTERN_PUSH so the P4 side will
+// also broadcast the pattern to the Master via UDP (this is the MIDI-load
+// path: S3 parses the SMF, hands the packed pattern to P4, P4 is the sole
+// owner of the Master UDP channel for freshly-loaded patterns). Folds any
+// multi-bar MIDI (up to 64 steps) onto 16 steps by OR-ing bar 2/3/4 onto
+// bar 1 since both P4 and the Master protocol are fixed at 16 steps.
+void uart_bridge_send_pattern_push(int pattern, const bool steps[][64], int numTracks) {
+    uint8_t packed[32];
+    memset(packed, 0, sizeof(packed));
+    int tracks = constrain(numTracks, 0, 16);
+    for (int t = 0; t < tracks; t++) {
+        uint16_t bits = 0;
+        for (int s = 0; s < 16; s++) {
+            bool active = false;
+            for (int bar = 0; bar < 4; bar++) {
+                int idx = s + bar * 16;
+                if (idx >= 64) break;
+                if (steps[t][idx]) { active = true; break; }
+            }
+            if (active) bits |= (1 << s);
+        }
+        packed[t * 2]     = (bits >> 8) & 0xFF;
+        packed[t * 2 + 1] = bits & 0xFF;
+    }
+    uart_bridge_send_extended(MSG_PATTERN_PUSH, (uint8_t)pattern, packed, 32);
+}
