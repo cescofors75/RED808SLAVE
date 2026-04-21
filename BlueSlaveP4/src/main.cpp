@@ -22,11 +22,13 @@
 static unsigned long lastScreenUpdate = 0;
 
 void setup() {
-    // 1. Debug serial
+    // 1. Debug serial (only waits if debug logging is enabled)
     Serial.begin(115200);
+#if P4_ENABLE_DEBUG_LOG
     delay(500);
     Serial.println("\n=== RED808 P4 — Visual Beast ===");
     Serial.println("Guition JC1060P470C | ESP32-P4 + C6 WiFi");
+#endif
 
     // 2. Initialize MIPI-DSI display + backlight
     P4_LOG_PRINTLN("[INIT] Display...");
@@ -60,13 +62,13 @@ void setup() {
     usb_cdc_init();
 #endif
 
-    // 8. Start DSP processing task (Core 0)
+    // 9. Start DSP processing task (Core 0)
     P4_LOG_PRINTLN("[INIT] DSP task...");
     dsp_task_init();
 
     P4_LOG_PRINTLN("=== P4 Ready — Connecting to Master ===");
 
-    // 9. Start LVGL rendering task (must be AFTER UI creation)
+    // 10. Start LVGL rendering task (must be AFTER UI creation)
     lvgl_port_task_start();
 }
 

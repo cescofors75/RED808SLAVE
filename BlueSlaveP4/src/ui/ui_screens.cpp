@@ -91,7 +91,7 @@ static unsigned long ui_nr_interval_ms(void) {
     if (bpm_x10 < 400)  bpm_x10 = 1200;
     if (bpm_x10 > 3000) bpm_x10 = 3000;
     uint8_t idx = s_nr_idx;
-    if (idx == 0 || idx >= sizeof(NR_SUBDIV_PER_BEAT)) return 0;
+    if (idx == 0 || idx >= (sizeof(NR_SUBDIV_PER_BEAT) / sizeof(NR_SUBDIV_PER_BEAT[0]))) return 0;
     uint32_t div = NR_SUBDIV_PER_BEAT[idx];
     // interval = 60000 ms / (bpm * div). bpm_x10 is BPM*10, so:
     //   ms = 600000 / (bpm_x10 * div)
@@ -850,11 +850,19 @@ static void update_live_screen(void) {
         lv_label_set_text_fmt(grid_pat_lbl, "P%02d", p4.current_pattern + 1);
     }
 
-    // Step
-    static int gp_prev_step = -1;
-    if (grid_step_lbl && p4.current_step != gp_prev_step) {
-        gp_prev_step = p4.current_step;
-        lv_label_set_text_fmt(grid_step_lbl, "%02d", p4.current_step + 1);
+    // Step — only show the running step while playing; show "--" when paused
+    // or disconnected so the counter doesn't appear to run on the home screen.
+    static int gp_prev_step = -2;   // -2 = never set, -1 = currently showing "--"
+    if (grid_step_lbl) {
+        if (!p4.is_playing) {
+            if (gp_prev_step != -1) {
+                gp_prev_step = -1;
+                lv_label_set_text(grid_step_lbl, "--");
+            }
+        } else if (p4.current_step != gp_prev_step) {
+            gp_prev_step = p4.current_step;
+            lv_label_set_text_fmt(grid_step_lbl, "%02d", p4.current_step + 1);
+        }
     }
 
     // Link-status indicators (edge-triggered so LVGL only redraws on change).

@@ -232,6 +232,10 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
     }
 }
 
+// Latched state for LP-filter auto-enable (in udp_send_fx_pot case 2).
+// Cleared on WiFi drop via udp_reset_fx_latch() so it is resent after reconnect.
+static bool s_fx_lp_filter_enabled = false;
+
 void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
     if (!udpStarted || muted) return;
     char buf[96];
@@ -248,10 +252,11 @@ void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
         }
         case 2: {  // Resonance (1.0-10.0 Q) — LP filter must be active to hear it.
             // Mirror S3 behaviour: auto-enable LowPass so the Q is audible.
-            static bool filter_enabled = false;
-            if (!filter_enabled) {
+            // Latch is cleared in onWiFiDisconnected() so it re-sends after
+            // any master/link drop.
+            if (!s_fx_lp_filter_enabled) {
                 sendJson("{\"cmd\":\"setFilter\",\"type\":1}");
-                filter_enabled = true;
+                s_fx_lp_filter_enabled = true;
             }
             float q = 1.0f + norm * 9.0f;
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterResonance\",\"value\":%.2f}", q);
@@ -259,6 +264,10 @@ void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
         }
     }
 }
+
+// Reset latched FX state so it is resent after (re)connecting to Master.
+// Called from WiFi disconnect path.
+void udp_reset_fx_latch(void) { s_fx_lp_filter_enabled = false; }
 
 // =============================================================================
 // SYNC REQUEST — handshake + request initial data
@@ -473,6 +482,9 @@ static void onWiFiDisconnected(void) {
         syncRequested = false;
         p4.wifi_connected = false;
         p4.master_connected = false;
+        // Clear FX latches so they are re-sent after reconnect (LP filter, etc.)
+        extern void udp_reset_fx_latch(void);
+        udp_reset_fx_latch();
     }
 }
 
@@ -489,6 +501,39 @@ void udp_handler_init(void) {
 // =============================================================================
 bool udp_wifi_connected(void)   { return wifiConnected; }
 bool udp_master_connected(void) { return masterAlive; }
+
+// =============================================================================
+// LOCAL STEP CLOCK (fallback)
+// Runs when authoritative sources are absent: no S3 UART link AND no Master.
+// Extracted so it also works when WiFi is down (otherwise udp_handler_process
+// would return early and never advance the step locally).
+// =============================================================================
+static void run_local_step_clock(unsigned long now) {
+    static unsigned long lastStepTime = 0;
+    static bool prev_playing = false;
+
+    if (!p4.is_playing) {
+        prev_playing = false;
+        return;
+    }
+    // Only fallback when no other clock source is available.
+    if (p4.s3_connected || p4.master_connected) {
+        prev_playing = true;
+        return;
+    }
+    // Edge false→true: snap the step clock to now to avoid catch-up bursts.
+    if (!prev_playing) {
+        lastStepTime = now;
+        prev_playing = true;
+    }
+    float bpm = p4.bpm_int + p4.bpm_frac * 0.1f;
+    if (bpm < 40) bpm = 120;
+    unsigned long stepInterval = (unsigned long)(60000.0f / bpm / 4.0f); // 16ths
+    if (now - lastStepTime >= stepInterval) {
+        lastStepTime = now;
+        p4.current_step = (p4.current_step + 1) % 16;
+    }
+}
 
 // =============================================================================
 // PROCESS — call from main loop
@@ -509,6 +554,9 @@ void udp_handler_process(void) {
         if (now - lastWifiAttempt > WIFI_RETRY_MS) {
             startWiFi();
         }
+        // Still tick the local step clock so the UI advances when playing
+        // in total isolation (no WiFi + no S3).
+        run_local_step_clock(now);
         return;
     }
 
@@ -562,20 +610,7 @@ void udp_handler_process(void) {
     }
 
     // --- Local step clock (fallback only) ---
-    // Authoritative source is MSG_SYSTEM/SYS_STEP from S3 over UART (see
-    // uart_handler.cpp). When the S3 link is alive, advancing current_step
-    // locally as well would cause the step to tick at ~2× the real rate
-    // (UART assigns absolute step, then this clock increments right after),
-    // producing visible desync with audio. Only run the local clock when
-    // the S3 link is down AND Master UDP is absent.
-    if (p4.is_playing && !p4.s3_connected && !p4.master_connected) {
-        static unsigned long lastStepTime = 0;
-        float bpm = p4.bpm_int + p4.bpm_frac * 0.1f;
-        if (bpm < 40) bpm = 120;
-        unsigned long stepInterval = (unsigned long)(60000.0f / bpm / 4.0f); // 16th notes
-        if (now - lastStepTime >= stepInterval) {
-            lastStepTime = now;
-            p4.current_step = (p4.current_step + 1) % 16;
-        }
-    }
+    // Authoritative source is MSG_SYSTEM/SYS_STEP from S3 over UART. When
+    // the S3 link or Master is alive, this does nothing.
+    run_local_step_clock(now);
 }

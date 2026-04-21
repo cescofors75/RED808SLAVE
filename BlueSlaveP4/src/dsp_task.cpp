@@ -6,6 +6,7 @@
 #include "dsp_task.h"
 #include "../include/config.h"
 #include <Arduino.h>
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -23,10 +24,12 @@ static constexpr uint8_t DECAY_RATE   = 6;       // amplitude units per tick
 // SHARED STATE
 // =============================================================================
 static SpectrumData s_spectrum = {};
-static volatile float s_bpm = 120.0f;
+static std::atomic<uint32_t> s_bpm_q16{(uint32_t)(120.0f * 65536.0f)};
 
-// Per-pad trigger energy (written from any core, read from DSP core)
-static volatile uint8_t s_padEnergy[16] = {};
+// Per-pad trigger energy — written from any core (UI/UART callbacks) and
+// consumed on the DSP core. std::atomic<uint8_t> is lock-free on ESP32
+// (single-byte aligned) and guarantees a consistent read/modify/write.
+static std::atomic<uint8_t> s_padEnergy[16] = {};
 
 // =============================================================================
 // PUBLIC API
@@ -37,12 +40,14 @@ const SpectrumData& dsp_get_spectrum() {
 
 void dsp_notify_pad(uint8_t pad, uint8_t velocity) {
     if (pad < 16) {
-        s_padEnergy[pad] = velocity;
+        // Store unconditionally — max() would need CAS loop and isn't needed:
+        // the DSP task reads-and-clears, so the latest hit wins.
+        s_padEnergy[pad].store(velocity, std::memory_order_relaxed);
     }
 }
 
 void dsp_set_bpm(float bpm) {
-    s_bpm = bpm;
+    s_bpm_q16.store((uint32_t)(bpm * 65536.0f), std::memory_order_relaxed);
 }
 
 // =============================================================================
@@ -55,10 +60,9 @@ static void dsp_task_func(void* /*arg*/) {
         bool changed = false;
 
         for (int i = 0; i < SPECTRUM_BARS; i++) {
-            // Consume pad trigger energy
-            uint8_t energy = s_padEnergy[i];
+            // Atomic read-and-clear of the trigger energy.
+            uint8_t energy = s_padEnergy[i].exchange(0, std::memory_order_relaxed);
             if (energy > 0) {
-                s_padEnergy[i] = 0;
                 if (energy > s_spectrum.bars[i]) {
                     s_spectrum.bars[i] = energy;
                     changed = true;

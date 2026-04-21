@@ -211,14 +211,22 @@ static void process_basic(const UartBasicPacket* pkt) {
                     if (udp_wifi_connected()) udp_send_select_pattern(val);
                     break;
                 case SYS_PLAY_STATE:
+                    // State sync from S3 — do NOT re-send start/stop to
+                    // Master here. The origin UI (P4 header or S3 touch)
+                    // already sent the UDP command; echoing it would
+                    // duplicate traffic and can cause feedback loops.
                     p4.is_playing = (val != 0);
-                    // Relay play/stop to Master
-                    if (udp_wifi_connected()) {
-                        if (p4.is_playing) udp_send_start();
-                        else               udp_send_stop();
-                    }
+                    // Snap local step counter when playback starts/stops
+                    // so the fallback clock / UI label reset cleanly.
+                    if (!p4.is_playing) p4.current_step = 0;
                     break;
-                case SYS_STEP:        p4.current_step = val;               break;
+                case SYS_STEP:
+                    // Only accept step updates while actually playing — prevents
+                    // the step counter from ticking on boot / pause / disconnect
+                    // if a stray SYS_STEP arrives or SYS_PLAY_STATE was lost.
+                    if (p4.is_playing) p4.current_step = val;
+                    else               p4.current_step = 0;
+                    break;
                 case SYS_WIFI_STATE:  p4.s3_wifi_connected = (val != 0);   break;
                 case SYS_MASTER_CONN: p4.master_connected = (val != 0);    break;
                 case SYS_THEME:       p4.theme = val;                      break;
@@ -261,13 +269,34 @@ static void process_basic(const UartBasicPacket* pkt) {
                 case FX_POT1_MUTE:    p4.pot_muted[1] = (val != 0);       break;
                 case FX_POT2_MUTE:    p4.pot_muted[2] = (val != 0);       break;
                 case FX_FILTER_TYPE:  p4.filter_type = val;                break;
-                case FX_CUTOFF_H:     p4.cutoff_hz = (p4.cutoff_hz & 0xFF) | (val << 8); break;
-                case FX_CUTOFF_L:     p4.cutoff_hz = (p4.cutoff_hz & 0xFF00) | val;      break;
+                // 16-bit values arrive as two packets (H then L). Accumulate
+                // into a staging variable and commit to p4.* only when the
+                // low byte arrives so UI never reads a half-updated value.
+                case FX_CUTOFF_H: {
+                    static int s_cutoff_staging = 20000;
+                    s_cutoff_staging = (s_cutoff_staging & 0x00FF) | (val << 8);
+                    // Expose staging until L arrives — keeps high byte visible.
+                    p4.cutoff_hz = s_cutoff_staging;
+                    break;
+                }
+                case FX_CUTOFF_L: {
+                    // Commit: take last high byte from current value.
+                    p4.cutoff_hz = (p4.cutoff_hz & 0xFF00) | val;
+                    break;
+                }
                 case FX_RESONANCE:    p4.resonance_x10 = val;             break;
                 case FX_DISTORTION:   p4.distortion_pct = val;            break;
                 case FX_BITCRUSH:     p4.bitcrush_bits = val;             break;
-                case FX_SAMPLERATE_H: p4.sample_rate_hz = (p4.sample_rate_hz & 0xFF) | (val << 8); break;
-                case FX_SAMPLERATE_L: p4.sample_rate_hz = (p4.sample_rate_hz & 0xFF00) | val;      break;
+                case FX_SAMPLERATE_H: {
+                    static int s_sr_staging = 44100;
+                    s_sr_staging = (s_sr_staging & 0x00FF) | (val << 8);
+                    p4.sample_rate_hz = s_sr_staging;
+                    break;
+                }
+                case FX_SAMPLERATE_L: {
+                    p4.sample_rate_hz = (p4.sample_rate_hz & 0xFF00) | val;
+                    break;
+                }
                 case FX_RESP_MODE:    p4.fx_resp_mode = val;              break;
             }
             break;
@@ -328,16 +357,11 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
                 p4.steps[track][step] = (row >> step) & 1;
             }
         }
-        // Forward active steps to master via UDP.
-        // selectPattern is sent separately by the SYS_PATTERN handler (arrives first).
-        if (udp_wifi_connected()) {
-            for (int track = 0; track < 16; track++) {
-                for (int step = 0; step < 16; step++) {
-                    if (p4.steps[track][step])
-                        udp_send_set_step(track, step, true);
-                }
-            }
-        }
+        // NOTE: do NOT forward the whole pattern as N×setStep to Master.
+        // The Master already owns the canonical pattern and pushes it via
+        // `pattern_sync` (see udp_handler.cpp). Re-broadcasting 256 UDP
+        // packets per pattern change floods the link and can overflow the
+        // socket. selectPattern (SYS_PATTERN) is enough for Master to sync.
     }
     else if (type == MSG_SD_DATA) {
         switch (id) {
@@ -466,7 +490,22 @@ int uart_handler_process(void) {
     // Check heartbeat timeout
     if (p4.s3_connected && (millis() - p4.last_heartbeat_ms) > Config::HEARTBEAT_TIMEOUT_MS) {
         p4.s3_connected = false;
+        // Reset framing-error display throttle so [UART-DISC] logs resume
+        // for diagnosing the recovery window.
+        s_totalDiscarded = 0;
         P4_LOG_PRINTLN("[UART] S3 heartbeat lost!");
+    }
+
+    // Proactive heartbeat: even when S3 is silent, poke the link every 1s so
+    // a partially-alive S3 (e.g. display thread busy) gets a chance to reply
+    // and we keep the USB/UART endpoint warm. Cheap (1 byte per second).
+    {
+        static unsigned long lastTx = 0;
+        unsigned long nowMs = millis();
+        if (nowMs - lastTx >= 1000) {
+            lastTx = nowMs;
+            uart_send_to_s3(MSG_SYSTEM, SYS_HEARTBEAT, 0x01);
+        }
     }
 
     // Debug: periodic status
