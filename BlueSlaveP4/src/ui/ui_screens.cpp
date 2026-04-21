@@ -202,6 +202,9 @@ static void header_play_cb(lv_event_t* e) {
     // triggering another UDP start/stop from S3 (that duplication is what
     // made the two sequencers fall out of sync on every P4 tap).
     uart_send_to_s3(MSG_SYSTEM, SYS_PLAY_STATE, next_play ? 1 : 0);
+    // P4 owns step clock: reset phase explicitly on every transport toggle.
+    uart_send_to_s3(MSG_SYSTEM, SYS_STEP, 0);
+    p4.current_step = 0;
     p4.is_playing = next_play;
 }
 
@@ -1209,6 +1212,9 @@ static lv_obj_t*  seq_page_lbls[4]      = {};
 static lv_obj_t*  seq_hdr_play_btn      = NULL;
 static lv_obj_t*  seq_hdr_play_lbl      = NULL;
 static lv_obj_t*  seq_hdr_pat_lbl       = NULL;
+static lv_obj_t*  seq_ctrl_lbl          = NULL;
+static int        seq_ctrl_swing        = 50;
+static int        seq_ctrl_drive        = 0;
 
 // Last-loaded MIDI info — kept so the info button in the sequencer header
 // can re-open the summary modal on demand.
@@ -1360,6 +1366,47 @@ static void seq_page_cb(lv_event_t* e) {
     seq_apply_page_styles();
 }
 
+static void seq_update_mpc_ctrl_label(void) {
+    if (!seq_ctrl_lbl) return;
+    lv_label_set_text_fmt(seq_ctrl_lbl, "SW%02d DR%02d", seq_ctrl_swing, seq_ctrl_drive);
+}
+
+static void seq_mpc_preset_cb(lv_event_t* e) {
+    (void)e;
+    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MPC_PRESET, 0);
+    seq_ctrl_swing = 58;
+    seq_ctrl_drive = 18;
+    seq_update_mpc_ctrl_label();
+}
+
+static void seq_swing_delta_cb(lv_event_t* e) {
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    if (delta > 0) {
+        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SWING_UP, 0);
+        seq_ctrl_swing++;
+    } else {
+        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SWING_DOWN, 0);
+        seq_ctrl_swing--;
+    }
+    if (seq_ctrl_swing < 50) seq_ctrl_swing = 50;
+    if (seq_ctrl_swing > 75) seq_ctrl_swing = 75;
+    seq_update_mpc_ctrl_label();
+}
+
+static void seq_drive_delta_cb(lv_event_t* e) {
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    if (delta > 0) {
+        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_DRIVE_UP, 0);
+        seq_ctrl_drive += 2;
+    } else {
+        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_DRIVE_DOWN, 0);
+        seq_ctrl_drive -= 2;
+    }
+    if (seq_ctrl_drive < 0) seq_ctrl_drive = 0;
+    if (seq_ctrl_drive > 100) seq_ctrl_drive = 100;
+    seq_update_mpc_ctrl_label();
+}
+
 // Called by MEM-MIDI loader after filling seq_raw_grid.
 static void seq_install_raw_and_show_page0(int raw_len) {
     seq_raw_len = (raw_len < 16) ? 16 : (raw_len > 64 ? 64 : raw_len);
@@ -1470,6 +1517,96 @@ static void create_sequencer_screen(void) {
             lv_obj_center(seq_page_lbls[p]);
         }
         seq_apply_page_styles();
+
+        // MPC feel controls mirrored on P4 (commanded to S3 engine).
+        {
+            int cx = hx + 4 * 54 + 8;
+
+            lv_obj_t* mpc = lv_btn_create(scr_sequencer);
+            lv_obj_set_size(mpc, 64, HH);
+            lv_obj_set_pos(mpc, cx, HY);
+            lv_obj_set_style_radius(mpc, 8, 0);
+            lv_obj_set_style_bg_color(mpc, lv_color_hex(0x2D1208), 0);
+            lv_obj_set_style_border_width(mpc, 1, 0);
+            lv_obj_set_style_border_color(mpc, lv_color_hex(0xD05A24), 0);
+            lv_obj_set_style_shadow_width(mpc, 0, 0);
+            lv_obj_add_event_cb(mpc, seq_mpc_preset_cb, LV_EVENT_CLICKED, NULL);
+            lv_obj_t* ml = lv_label_create(mpc);
+            lv_label_set_text(ml, "MPC");
+            lv_obj_set_style_text_font(ml, &lv_font_montserrat_16, 0);
+            lv_obj_set_style_text_color(ml, lv_color_hex(0xFF9A54), 0);
+            lv_obj_center(ml);
+            cx += 68;
+
+            lv_obj_t* swm = lv_btn_create(scr_sequencer);
+            lv_obj_set_size(swm, 46, HH);
+            lv_obj_set_pos(swm, cx, HY);
+            lv_obj_set_style_radius(swm, 8, 0);
+            lv_obj_set_style_bg_color(swm, RED808_SURFACE, 0);
+            lv_obj_set_style_border_width(swm, 1, 0);
+            lv_obj_set_style_border_color(swm, RED808_BORDER, 0);
+            lv_obj_set_style_shadow_width(swm, 0, 0);
+            lv_obj_add_event_cb(swm, seq_swing_delta_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+            lv_obj_t* swml = lv_label_create(swm);
+            lv_label_set_text(swml, "SW-");
+            lv_obj_set_style_text_font(swml, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_color(swml, RED808_TEXT, 0);
+            lv_obj_center(swml);
+            cx += 50;
+
+            lv_obj_t* swp = lv_btn_create(scr_sequencer);
+            lv_obj_set_size(swp, 46, HH);
+            lv_obj_set_pos(swp, cx, HY);
+            lv_obj_set_style_radius(swp, 8, 0);
+            lv_obj_set_style_bg_color(swp, RED808_SURFACE, 0);
+            lv_obj_set_style_border_width(swp, 1, 0);
+            lv_obj_set_style_border_color(swp, RED808_BORDER, 0);
+            lv_obj_set_style_shadow_width(swp, 0, 0);
+            lv_obj_add_event_cb(swp, seq_swing_delta_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
+            lv_obj_t* swpl = lv_label_create(swp);
+            lv_label_set_text(swpl, "SW+");
+            lv_obj_set_style_text_font(swpl, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_color(swpl, RED808_TEXT, 0);
+            lv_obj_center(swpl);
+            cx += 50;
+
+            lv_obj_t* drm = lv_btn_create(scr_sequencer);
+            lv_obj_set_size(drm, 46, HH);
+            lv_obj_set_pos(drm, cx, HY);
+            lv_obj_set_style_radius(drm, 8, 0);
+            lv_obj_set_style_bg_color(drm, RED808_SURFACE, 0);
+            lv_obj_set_style_border_width(drm, 1, 0);
+            lv_obj_set_style_border_color(drm, RED808_BORDER, 0);
+            lv_obj_set_style_shadow_width(drm, 0, 0);
+            lv_obj_add_event_cb(drm, seq_drive_delta_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+            lv_obj_t* drml = lv_label_create(drm);
+            lv_label_set_text(drml, "DR-");
+            lv_obj_set_style_text_font(drml, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_color(drml, RED808_TEXT, 0);
+            lv_obj_center(drml);
+            cx += 50;
+
+            lv_obj_t* drp = lv_btn_create(scr_sequencer);
+            lv_obj_set_size(drp, 46, HH);
+            lv_obj_set_pos(drp, cx, HY);
+            lv_obj_set_style_radius(drp, 8, 0);
+            lv_obj_set_style_bg_color(drp, RED808_SURFACE, 0);
+            lv_obj_set_style_border_width(drp, 1, 0);
+            lv_obj_set_style_border_color(drp, RED808_BORDER, 0);
+            lv_obj_set_style_shadow_width(drp, 0, 0);
+            lv_obj_add_event_cb(drp, seq_drive_delta_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
+            lv_obj_t* drpl = lv_label_create(drp);
+            lv_label_set_text(drpl, "DR+");
+            lv_obj_set_style_text_font(drpl, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_color(drpl, RED808_TEXT, 0);
+            lv_obj_center(drpl);
+
+            seq_ctrl_lbl = lv_label_create(scr_sequencer);
+            lv_obj_set_pos(seq_ctrl_lbl, cx - 98, HY + HH + 1);
+            lv_obj_set_style_text_font(seq_ctrl_lbl, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(seq_ctrl_lbl, RED808_TEXT_DIM, 0);
+            seq_update_mpc_ctrl_label();
+        }
 
         // Info button (top-right corner) — re-opens the last MIDI summary.
         {
@@ -1710,6 +1847,8 @@ static void create_sequencer_screen(void) {
         lv_obj_set_pos(bpm_lbl, LCD_H_RES - 90, SEQ_STATUS_Y + 2);
         seq_status_bpm_lbl = bpm_lbl;
     }
+
+    seq_update_mpc_ctrl_label();
 }   // end create_sequencer_screen
 
 static void update_sequencer_screen(void) {
@@ -2946,6 +3085,7 @@ static void ui_reload_themed_screens(void) {
     seq_status_step_lbl = NULL;
     seq_status_pat_lbl = NULL;
     seq_status_bpm_lbl = NULL;
+    seq_ctrl_lbl = NULL;
     for (int i = 0; i < 16; i++) {
         vol_sliders[i] = NULL; vol_labels[i] = NULL;
         vol_name_labels[i] = NULL; vol_mute_dots[i] = NULL;

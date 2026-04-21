@@ -19,6 +19,9 @@ extern void updateByteButtonLeds();
 extern uint8_t dfFxParamMode[];
 extern int dfFxParamValue[];
 extern bool analogFxMuted[];
+extern int get_sequencer_swing_percent();
+extern int get_master_drive_percent();
+extern void apply_mpc_preset(bool saveToNvs);
 
 // UART bridge relay (for when S3 WiFi is off — P4 forwards to Master)
 extern void uart_bridge_send(uint8_t type, uint8_t id, uint8_t value);
@@ -104,6 +107,8 @@ static lv_obj_t* seq_bank_next_btn = NULL;
 static lv_obj_t* seq_play_btn = NULL;
 static lv_obj_t* seq_play_lbl = NULL;
 static lv_obj_t* seq_unmute_btn = NULL;
+static lv_obj_t* seq_mpc_btn = NULL;
+static lv_obj_t* seq_mpc_lbl = NULL;
 
 // Volume sliders
 static lv_obj_t* vol_strip_panels[Config::MAX_TRACKS] = {};
@@ -1935,7 +1940,7 @@ void ui_create_sequencer_screen() {
     lv_obj_set_size(circle_btn, 120, 26);
     lv_obj_set_pos(circle_btn, UI_W - 126, bottom_y);
 #else
-    lv_obj_set_size(circle_btn, 158, 26);
+    lv_obj_set_size(circle_btn, 108, 26);
     lv_obj_set_pos(circle_btn, 778, bottom_y);
 #endif
     lv_obj_set_style_bg_color(circle_btn, lv_color_hex(0x0C1C30), 0);
@@ -1947,10 +1952,42 @@ void ui_create_sequencer_screen() {
     lv_obj_add_event_cb(circle_btn, [](lv_event_t*) { nav_to(SCREEN_SEQ_CIRCLE, scr_seq_circle); },
                         LV_EVENT_PRESSED, NULL);
     lv_obj_t* circle_lbl = lv_label_create(circle_btn);
-    lv_label_set_text(circle_lbl, LV_SYMBOL_REFRESH "  CIRCULAR");
+    lv_label_set_text(circle_lbl, LV_SYMBOL_REFRESH " CIRCLE");
     lv_obj_set_style_text_font(circle_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(circle_lbl, lv_color_hex(0x60AADF), 0);
     lv_obj_center(circle_lbl);
+
+    // MPC preset button: applies and stores fixed punch profile.
+    seq_mpc_btn = lv_btn_create(scr_sequencer);
+#if PORTRAIT_MODE
+    lv_obj_set_size(seq_mpc_btn, 136, 26);
+    lv_obj_set_pos(seq_mpc_btn, 332, bottom_y);
+#else
+    lv_obj_set_size(seq_mpc_btn, 124, 26);
+    lv_obj_set_pos(seq_mpc_btn, 892, bottom_y);
+#endif
+    lv_obj_set_style_bg_color(seq_mpc_btn, lv_color_hex(0x2D1208), 0);
+    lv_obj_set_style_bg_opa(seq_mpc_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(seq_mpc_btn, 1, 0);
+    lv_obj_set_style_border_color(seq_mpc_btn, lv_color_hex(0xD05A24), 0);
+    lv_obj_set_style_radius(seq_mpc_btn, 5, 0);
+    lv_obj_set_style_shadow_width(seq_mpc_btn, 0, 0);
+    lv_obj_add_event_cb(seq_mpc_btn, [](lv_event_t*) {
+        apply_mpc_preset(true);
+        if (seq_mpc_lbl) {
+            lv_label_set_text_fmt(seq_mpc_lbl, "MPC S%d D%d",
+                                  get_sequencer_swing_percent(),
+                                  get_master_drive_percent());
+        }
+    }, LV_EVENT_PRESSED, NULL);
+
+    seq_mpc_lbl = lv_label_create(seq_mpc_btn);
+    lv_label_set_text_fmt(seq_mpc_lbl, "MPC S%d D%d",
+                          get_sequencer_swing_percent(),
+                          get_master_drive_percent());
+    lv_obj_set_style_text_font(seq_mpc_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(seq_mpc_lbl, lv_color_hex(0xFF9A54), 0);
+    lv_obj_center(seq_mpc_lbl);
 
     // Initial state
     seq_page = 0;
@@ -1972,6 +2009,8 @@ void ui_update_sequencer() {
     static int prev_selected_track = -1;
     static bool prev_playing = false;
     static int prev_bpm10 = -1;
+    static int prev_swing = -1;
+    static int prev_drive = -1;
     static uint8_t prev_grid_state[Config::MAX_TRACKS][Config::STEPS_PER_BANK];
     static int prev_track_volumes[Config::MAX_TRACKS] = {};
 
@@ -2004,6 +2043,16 @@ void ui_update_sequencer() {
     // Step indicator label
     if (lbl_step_indicator && currentStep != prev_step) {
         lv_label_set_text_fmt(lbl_step_indicator, "Step: %02d / %02d", currentStep + 1, patterns[currentPattern].length);
+    }
+
+    if (seq_mpc_lbl) {
+        int swing = get_sequencer_swing_percent();
+        int drive = get_master_drive_percent();
+        if (swing != prev_swing || drive != prev_drive) {
+            prev_swing = swing;
+            prev_drive = drive;
+            lv_label_set_text_fmt(seq_mpc_lbl, "MPC S%d D%d", swing, drive);
+        }
     }
 
     if (seq_info_pattern && currentPattern != prev_pattern) {

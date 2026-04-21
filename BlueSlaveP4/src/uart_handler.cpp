@@ -263,13 +263,9 @@ static void process_basic(const UartBasicPacket* pkt) {
                     if (!p4.is_playing) p4.current_step = 0;
                     break;
                 case SYS_STEP:
-                    // S3 drives the sequencer clock (local 16th-note timer)
-                    // and sends SYS_STEP over UART on every advance. This is
-                    // THE authoritative step signal — UART is low-latency and
-                    // lossless, unlike Master's 8 Hz UDP step_sync. Always
-                    // follow it while playing.
-                    if (p4.is_playing) p4.current_step = val;
-                    else               p4.current_step = 0;
+                    // P4 is authoritative clock; ignore external SYS_STEP
+                    // updates from S3 to prevent clock fights.
+                    (void)val;
                     break;
                 case SYS_WIFI_STATE:  p4.s3_wifi_connected = (val != 0);   break;
                 case SYS_MASTER_CONN: p4.master_connected = (val != 0);    break;

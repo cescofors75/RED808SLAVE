@@ -76,6 +76,8 @@ bool isPlaying = false;
 int currentBPM = Config::DEFAULT_BPM;
 float currentBPMPrecise = (float)Config::DEFAULT_BPM;
 int currentKit = 0;
+int sequencerSwingPercent = 50;   // 50 = straight, >50 delays off-beat (odd steps)
+int sequencerVelocityBoost = 0;   // extra punch added to sequencer hits
 
 // Volume
 int masterVolume = Config::DEFAULT_VOLUME;
@@ -329,6 +331,8 @@ static void requestMasterSync(bool requestState);
 void sendUDPCommand(const char* cmd);
 void sendUDPCommand(JsonDocument& doc);
 static void applyUnifiedMasterVolume(int value, bool sendToMaster);
+static void set_master_drive_percent(int percent, bool sendToMaster);
+void nvs_mark_dirty();
 void applyBPMPrecise(float bpm, bool sendToMaster);
 #if S3_WIFI_ENABLED
 void receiveUDPData();
@@ -339,6 +343,9 @@ void selectPatternOnMaster(int patternIndex);
 void sendFullPatternToMaster(int pat);
 void sendLivePadTrigger(int pad, int velocity);
 void sendFilterUDP(int track, int fxType);
+int get_sequencer_swing_percent();
+int get_master_drive_percent();
+void apply_mpc_preset(bool saveToNvs);
 void scanI2CHub();
 void handleM5Encoders();
 void handleDFRobotEncoders();
@@ -539,6 +546,23 @@ void handleP4TouchCommand(uint8_t cmdId, uint8_t value) {
         case TCMD_SYNC_PADS:
             ui_live_set_sync(value != 0);
             break;
+        case TCMD_MPC_PRESET:
+            apply_mpc_preset(true);
+            break;
+        case TCMD_SWING_UP:
+            sequencerSwingPercent = constrain(sequencerSwingPercent + 1, 50, 75);
+            nvs_mark_dirty();
+            break;
+        case TCMD_SWING_DOWN:
+            sequencerSwingPercent = constrain(sequencerSwingPercent - 1, 50, 75);
+            nvs_mark_dirty();
+            break;
+        case TCMD_DRIVE_UP:
+            set_master_drive_percent(fxDistortionPercent + 2, true);
+            break;
+        case TCMD_DRIVE_DOWN:
+            set_master_drive_percent(fxDistortionPercent - 2, true);
+            break;
         default:
             break;
     }
@@ -622,6 +646,43 @@ static constexpr const char* NVS_NAMESPACE = "red808";
 static unsigned long nvs_last_save_ms = 0;
 static bool nvs_dirty = false;
 
+static float master_drive_amount_from_percent(int percent) {
+    // Soft drive taper: keeps low values subtle while preserving punch range.
+    float t = (float)constrain(percent, 0, 100) / 100.0f;
+    return 0.45f * t + 0.25f * t * t;
+}
+
+static int master_drive_percent_from_amount(float amount) {
+    // Inverse of: amount = 0.45*t + 0.25*t^2
+    float a = constrain(amount, 0.0f, 1.0f);
+    float disc = 0.45f * 0.45f + a;
+    float t = (-0.45f + sqrtf(disc)) / 0.5f;
+    return constrain((int)lroundf(t * 100.0f), 0, 100);
+}
+
+static void set_master_drive_percent(int percent, bool sendToMaster) {
+    fxDistortionPercent = constrain(percent, 0, 100);
+    nvs_dirty = true;
+
+    // Mirror on P4/S3 bridge lane 2 so both surfaces show coherent FX state.
+    uint8_t encValue = (uint8_t)constrain((int)lroundf((fxDistortionPercent / 100.0f) * 127.0f), 0, 127);
+    uart_bridge_send_encoder(2, encValue);
+
+    if (!sendToMaster || !udpConnected) return;
+    JsonDocument doc(&sramAllocator);
+    doc["cmd"] = "setDistortion";
+    doc["value"] = master_drive_amount_from_percent(fxDistortionPercent);
+    sendUDPCommand(doc);
+}
+
+int get_sequencer_swing_percent() {
+    return sequencerSwingPercent;
+}
+
+int get_master_drive_percent() {
+    return fxDistortionPercent;
+}
+
 void applyBPMPrecise(float bpm, bool sendToMaster) {
     float clamped = constrain(bpm, (float)Config::MIN_BPM, (float)Config::MAX_BPM);
     currentBPMPrecise = clamped;
@@ -675,6 +736,15 @@ static void nvs_load_settings() {
         currentBPMPrecise = constrain((float)val32 / 10.0f, (float)Config::MIN_BPM, (float)Config::MAX_BPM);
         currentBPM = (int)lroundf(currentBPMPrecise);
     }
+    if (nvs_get_i32(h, "swingPct", &val32) == ESP_OK) {
+        sequencerSwingPercent = constrain((int)val32, 50, 75);
+    }
+    if (nvs_get_i32(h, "seqBoost", &val32) == ESP_OK) {
+        sequencerVelocityBoost = constrain((int)val32, 0, 32);
+    }
+    if (nvs_get_i32(h, "drvPct", &val32) == ESP_OK) {
+        fxDistortionPercent = constrain((int)val32, 0, 100);
+    }
     if (nvs_get_u8(h, "volMode", &val8) == ESP_OK)
         volumeMode = (val8 == 1) ? VOL_LIVE_PADS : VOL_SEQUENCER;
 
@@ -704,6 +774,9 @@ void nvs_save_settings() {
     nvs_set_i32(h, "liveVol", masterVolume);
     nvs_set_i32(h, "bpm", currentBPM);
     nvs_set_i32(h, "bpm10", (int32_t)lroundf(currentBPMPrecise * 10.0f));
+    nvs_set_i32(h, "swingPct", sequencerSwingPercent);
+    nvs_set_i32(h, "seqBoost", sequencerVelocityBoost);
+    nvs_set_i32(h, "drvPct", fxDistortionPercent);
     nvs_set_u8(h, "volMode", 0);
 
     nvs_commit(h);
@@ -782,6 +855,10 @@ static void requestMasterSync(bool requestState) {
         for (int lane = 0; lane < 3; lane++) {
             uart_bridge_send_encoder(lane, 0);
             uart_bridge_send_encoder_mute(lane, false);
+        }
+        // Restore persisted soft drive after clean-reset handshake.
+        if (fxDistortionPercent > 0) {
+            set_master_drive_percent(fxDistortionPercent, true);
         }
         RED808_LOG_PRINTLN("[FX] All effects reset to OFF on connection");
     }
@@ -1308,6 +1385,61 @@ static int microtiming_velocity(int velocity) {
     return constrain(velocity + jitter, 1, 127);
 }
 
+// MPC-style velocity shaping for sequencer hits.
+// Adds groove accents without requiring per-step velocity storage.
+static int sequencer_groove_velocity(int track, int step, int baseVel) {
+    int v = constrain(baseVel, 1, 127);
+
+    // Stronger pulse on quarter notes (steps 0/4/8/12 in a 16-step bar).
+    if ((step & 0x03) == 0) v += 7;
+
+    // Track profile: kick/snare punch, hats softer with off-beat push.
+    switch (track) {
+        case 0: v += 12; break; // Kick
+        case 1: v += 9;  break; // Snare
+        case 2: v -= 12; if ((step & 0x01) == 1) v += 6; break; // Closed HH
+        case 3: v -= 8;  if ((step & 0x03) == 2) v += 7; break; // Open HH
+        case 4: v += 4;  break; // Clap
+        default: break;
+    }
+
+    // Tiny deterministic movement to avoid machine-gun flatness.
+    v += ((step * 37 + track * 13) % 5) - 2; // [-2..+2]
+
+    // Global punch control used by MPC preset.
+    v += sequencerVelocityBoost;
+
+    return constrain(v, 16, 127);
+}
+
+static uint32_t sequencer_step_interval_us(int step, float bpmPrecise) {
+    float bpm = constrain(bpmPrecise, (float)Config::MIN_BPM, (float)Config::MAX_BPM);
+    float base16 = 60000000.0f / bpm / 4.0f;
+
+    int swing = constrain(sequencerSwingPercent, 50, 75);
+    float amt = (float)(swing - 50) / 50.0f;  // 0.0..0.5
+    float factor = ((step & 1) == 0) ? (1.0f + amt) : (1.0f - amt);
+    uint32_t us = (uint32_t)lroundf(base16 * factor);
+    if (us < 20000U) us = 20000U;
+    return us;
+}
+
+void apply_mpc_preset(bool saveToNvs) {
+    // Fixed preset: aggressive but still musical for drum-machine feel.
+    sequencerSwingPercent = 58;
+    sequencerVelocityBoost = 18;
+    set_master_drive_percent(18, true);
+
+    if (saveToNvs) {
+        nvs_save_settings();
+    } else {
+        nvs_dirty = true;
+    }
+
+    RED808_LOG_PRINTF("[MPC] preset applied: swing=%d velBoost=%d drive=%d%%\n",
+                      sequencerSwingPercent, sequencerVelocityBoost, fxDistortionPercent);
+}
+
 void sendLivePadTrigger(int pad, int velocity) {
     if (pad < 0 || pad >= Config::MAX_SAMPLES) return;
 #if S3_WIFI_ENABLED
@@ -1515,7 +1647,7 @@ void receiveUDPData() {
     }
     else if (strcmp(cmd, "setDistortion") == 0) {
         float distortion = doc["value"].is<float>() ? doc["value"].as<float>() : ((float)(doc["value"] | fxDistortionPercent) / 100.0f);
-        fxDistortionPercent = constrain((int)lroundf(distortion * 100.0f), 0, 100);
+        fxDistortionPercent = master_drive_percent_from_amount(distortion);
     }
     else if (strcmp(cmd, "setSampleRate") == 0) {
         fxSampleRateHz = constrain(doc["value"] | fxSampleRateHz, 1000, 44100);
@@ -1746,7 +1878,7 @@ void handleDFRobotPots() {
                 fxDistortionPercent = constrain((int)lroundf(t * 100.0f), 0, 100);
                 if (!analogFxMuted[2]) {
                     doc["cmd"] = "setDistortion";
-                    doc["value"] = (float)fxDistortionPercent / 100.0f;
+                    doc["value"] = master_drive_amount_from_percent(fxDistortionPercent);
                     sendUDPCommand(doc);
                 }
             }
@@ -1764,7 +1896,7 @@ static void sendAnalogFxParamNow(int lane) {
         doc["value"] = analogFxMuted[1] ? 1.0f : ((float)fxFilterResonanceX10 / 10.0f);
     } else {
         doc["cmd"] = "setDistortion";
-        doc["value"] = analogFxMuted[2] ? 0.0f : ((float)fxDistortionPercent / 100.0f);
+        doc["value"] = analogFxMuted[2] ? 0.0f : master_drive_amount_from_percent(fxDistortionPercent);
     }
     sendUDPCommand(doc);
 }
@@ -3107,40 +3239,41 @@ void loop() {
 
     // (Hold-repeat removed — repeat count is controlled by RPT buttons)
 
-    // Local step clock: PRIMARY driver of currentStep (same approach as old project).
-    // Master step_update is ignored for position — UDP packet loss makes it unreliable.
-    // Uses microsecond period so decimal BPM (e.g. 120.5 vs 120.7) has real timing effect.
-    // SNAP-TO-NOW: never catch up — max 1 step per loop iteration = smooth visual always.
-    if (isPlaying && currentBPMPrecise > 0.0f) {
-        uint32_t nowUs = micros();
-        uint32_t step_us = (uint32_t)(60000000.0f / currentBPMPrecise / 4.0f);
-        if (step_us < 50000U) step_us = 50000U;
-        if (lastLocalStepUs == 0) lastLocalStepUs = nowUs;
-        if ((uint32_t)(nowUs - lastLocalStepUs) >= step_us) {
-            lastLocalStepUs = nowUs;  // snap to now — NEVER accumulate, NEVER catch up
-            lastLocalStepMs = now;
-            currentStep = (currentStep + 1) % patterns[currentPattern].length;
-            uart_bridge_send_step(currentStep);
+    // P4-authoritative clock mode:
+    // S3 no longer advances currentStep locally. It executes sequencer hits
+    // only when a new step value arrives from P4 over UART (SYS_STEP).
+    {
+        static int prev_exec_step = -1;
 
-            // ── Sequencer triggers: flash pads always; send UDP only when connected ──
-            {
+        if (isPlaying) {
+            int patLen = patterns[currentPattern].length;
+            if (patLen < 1) patLen = 16;
+
+            int safeStep = currentStep % patLen;
+            if (safeStep < 0) safeStep += patLen;
+
+            if (safeStep != prev_exec_step) {
+                prev_exec_step = safeStep;
+                lastLocalStepMs = now;
+
                 const int seqVel = map(constrain(sequencerVolume, 0, Config::MAX_VOLUME),
                                        0, Config::MAX_VOLUME, 32, 127);
                 for (int t = 0; t < Config::MAX_TRACKS; t++) {
-                    if (patterns[currentPattern].steps[t][currentStep] &&
+                    if (patterns[currentPattern].steps[t][safeStep] &&
                         !patterns[currentPattern].muted[t]) {
-                        // Flash live pad on the live screen (always, even without UDP)
+                        const int hitVel = sequencer_groove_velocity(t, safeStep, seqVel);
                         livePadFlashUntilMs[t] = now + LIVE_PAD_FLASH_MS;
                         if (udpConnected) {
-                            sendLivePadTrigger(t, seqVel);
+                            sendLivePadTrigger(t, hitVel);
                         }
                     }
                 }
             }
+        } else {
+            prev_exec_step = -1;
+            lastLocalStepMs = now;
+            lastLocalStepUs = micros();
         }
-    } else if (!isPlaying) {
-        lastLocalStepMs = now;
-        lastLocalStepUs = micros();
     }
 
     // Encoders run in dedicated encoder_task — no polling here

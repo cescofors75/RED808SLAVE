@@ -122,7 +122,14 @@
 #define TCMD_SD_BACK       0x09 // P4→S3: go to parent directory
 #define TCMD_SD_LOAD       0x0A // P4→S3: load selected file to pad N
 #define TCMD_SYNC_PADS     0x0B  // Bidirectional: toggle pad LED sync mode
-#define TCMD_SD_LOAD_MIDI  0x0C  // P4→S3: load selected MIDI file into pattern slot N (value=slot 6-15)// =============================================================================
+#define TCMD_SD_LOAD_MIDI  0x0C  // P4→S3: load selected MIDI file into pattern slot N (value=slot 6-15)
+#define TCMD_MPC_PRESET    0x0D  // P4→S3: apply fixed MPC punch preset (swing+velocity+drive)
+#define TCMD_SWING_UP      0x0E  // P4→S3: increase swing
+#define TCMD_SWING_DOWN    0x0F  // P4→S3: decrease swing
+#define TCMD_DRIVE_UP      0x10  // P4→S3: increase master drive
+#define TCMD_DRIVE_DOWN    0x11  // P4→S3: decrease master drive
+
+// =============================================================================
 // SD DATA sub-IDs (MSG_SD_DATA extended, Byte 2)
 // =============================================================================
 #define SD_RESP_STATUS     0x00 // payload: [mounted(1)]
@@ -218,7 +225,7 @@ static inline bool uart_validate_packet(const UartBasicPacket* pkt) {
         case MSG_SCREEN:
             return pkt->id == SCR_NAVIGATE;
         case MSG_TOUCH_CMD:
-            return pkt->id <= TCMD_SD_LOAD_MIDI;
+            return pkt->id <= TCMD_DRIVE_DOWN;
         case MSG_PATTERN_DATA:
         case MSG_SD_DATA:
             return false;                                // not a basic packet

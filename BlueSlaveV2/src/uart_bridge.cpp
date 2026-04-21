@@ -119,6 +119,16 @@ int uart_bridge_receive(void) {
                 }
                 isPlaying = want;
                 count++;
+            } else if (pkt->type == MSG_SYSTEM && pkt->id == SYS_STEP) {
+                // P4 is authoritative sequencer clock. Execute this step value
+                // as-is (S3 main loop triggers hits on step-edge changes).
+                extern int currentStep;
+                extern unsigned long lastLocalStepMs;
+                extern uint32_t lastLocalStepUs;
+                currentStep = (int)pkt->value;
+                lastLocalStepMs = millis();
+                lastLocalStepUs = micros();
+                count++;
             }
 
         } else if (peek == UART_START_EXTENDED) {

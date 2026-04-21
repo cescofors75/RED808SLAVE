@@ -360,14 +360,21 @@ static void processJson(const char* json, int len) {
     else if (strcmp(cmd, "play_state") == 0) {
         p4.is_playing = doc["playing"] | false;
         if (p4.is_playing) p4.current_step = 0;
+        else p4.current_step = 0;
+        uart_send_to_s3(MSG_SYSTEM, SYS_PLAY_STATE, p4.is_playing ? 1 : 0);
+        uart_send_to_s3(MSG_SYSTEM, SYS_STEP, 0);
     }
     else if (strcmp(cmd, "start") == 0) {
         p4.is_playing = true;
         p4.current_step = 0;
+        uart_send_to_s3(MSG_SYSTEM, SYS_PLAY_STATE, 1);
+        uart_send_to_s3(MSG_SYSTEM, SYS_STEP, 0);
     }
     else if (strcmp(cmd, "stop") == 0) {
         p4.is_playing = false;
         p4.current_step = 0;
+        uart_send_to_s3(MSG_SYSTEM, SYS_PLAY_STATE, 0);
+        uart_send_to_s3(MSG_SYSTEM, SYS_STEP, 0);
     }
     // ----- Tempo -----
     else if (strcmp(cmd, "tempo_sync") == 0 || strcmp(cmd, "tempo") == 0) {
@@ -377,10 +384,7 @@ static void processJson(const char* json, int len) {
     }
     // ----- Step update (visual tick from Master) -----
     else if (strcmp(cmd, "step_update") == 0 || strcmp(cmd, "step_sync") == 0) {
-        // Master's UDP step_sync arrives at ~8 Hz and can be lossy.
-        // S3's UART SYS_STEP is the primary clock. Keep this handler as a
-        // NO-OP for step position to avoid fighting — just confirm Master
-        // is alive (already done above via lastMasterPacket).
+        // P4 local clock is authoritative; ignore Master step hints.
     }
     // ----- Volume -----
     else if (strcmp(cmd, "volume_sync") == 0 || strcmp(cmd, "master_volume_sync") == 0 ||
@@ -506,10 +510,9 @@ bool udp_wifi_connected(void)   { return wifiConnected; }
 bool udp_master_connected(void) { return masterAlive; }
 
 // =============================================================================
-// LOCAL STEP CLOCK (fallback)
-// Runs when authoritative sources are absent: no S3 UART link AND no Master.
-// Extracted so it also works when WiFi is down (otherwise udp_handler_process
-// would return early and never advance the step locally).
+// LOCAL STEP CLOCK (authoritative)
+// P4 is the sequencer authority. It advances step locally and mirrors every
+// step to S3 over UART (SYS_STEP), independent of WiFi/Master transport.
 // =============================================================================
 static void run_local_step_clock(unsigned long now) {
     static unsigned long lastStepTime = 0;
@@ -519,15 +522,12 @@ static void run_local_step_clock(unsigned long now) {
         prev_playing = false;
         return;
     }
-    // Only fallback when no other clock source is available.
-    if (p4.s3_connected || p4.master_connected) {
-        prev_playing = true;
-        return;
-    }
     // Edge false→true: snap the step clock to now to avoid catch-up bursts.
     if (!prev_playing) {
         lastStepTime = now;
         prev_playing = true;
+        p4.current_step = 0;
+        uart_send_to_s3(MSG_SYSTEM, SYS_STEP, (uint8_t)p4.current_step);
     }
     float bpm = p4.bpm_int + p4.bpm_frac * 0.1f;
     if (bpm < 40) bpm = 120;
@@ -535,6 +535,7 @@ static void run_local_step_clock(unsigned long now) {
     if (now - lastStepTime >= stepInterval) {
         lastStepTime = now;
         p4.current_step = (p4.current_step + 1) % 16;
+        uart_send_to_s3(MSG_SYSTEM, SYS_STEP, (uint8_t)p4.current_step);
     }
 }
 
@@ -557,8 +558,7 @@ void udp_handler_process(void) {
         if (now - lastWifiAttempt > WIFI_RETRY_MS) {
             startWiFi();
         }
-        // Still tick the local step clock so the UI advances when playing
-        // in total isolation (no WiFi + no S3).
+        // Keep authoritative clock running even without WiFi.
         run_local_step_clock(now);
         return;
     }
@@ -612,8 +612,6 @@ void udp_handler_process(void) {
         packetSize = udp.parsePacket();
     }
 
-    // --- Local step clock (fallback only) ---
-    // Authoritative source is MSG_SYSTEM/SYS_STEP from S3 over UART. When
-    // the S3 link or Master is alive, this does nothing.
+    // --- Local step clock (authoritative) ---
     run_local_step_clock(now);
 }
