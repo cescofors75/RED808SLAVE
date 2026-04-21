@@ -82,6 +82,9 @@ void loop() {
     // Process UART packets from S3 (optional secondary)
     uart_handler_process();
 
+    // Drain deferred MIDI→Master UDP burst (staged by MSG_PATTERN_PUSH)
+    uart_handler_tick_pending_push();
+
 #if P4_USB_CDC_ENABLED
     // Try to connect/reconnect to S3 USB CDC device
     usb_cdc_process();

@@ -98,6 +98,27 @@ int uart_bridge_receive(void) {
                 extern unsigned long lastMasterPacketMs;
                 masterConnected = true;
                 lastMasterPacketMs = millis();
+            } else if (pkt->type == MSG_SYSTEM && pkt->id == SYS_PLAY_STATE) {
+                // State-only sync from P4 (P4 header Play/Pause button).
+                // P4 has already sent start/stop to Master over UDP — we
+                // must NOT re-send UDP here or the two sequencers drift
+                // due to duplicated starts. Just mirror the flag so the
+                // S3 UI and local clock match P4's intent.
+                extern bool isPlaying;
+                extern int currentStep;
+                extern unsigned long lastLocalStepMs;
+                extern uint32_t lastLocalStepUs;
+                bool want = (pkt->value != 0);
+                if (want && !isPlaying) {
+                    currentStep = 0;
+                    lastLocalStepMs = millis();
+                    lastLocalStepUs = micros();
+                }
+                if (!want) {
+                    currentStep = 0;
+                }
+                isPlaying = want;
+                count++;
             }
 
         } else if (peek == UART_START_EXTENDED) {

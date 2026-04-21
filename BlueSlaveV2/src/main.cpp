@@ -567,13 +567,27 @@ void handleP4PatternData(int pat, const bool steps[16][16]) {
 void handleMidiPatternLoaded(int slot, const bool steps[16][64], const char* name, int patternLength) {
     if (slot < 0 || slot >= Config::MAX_PATTERNS) return;
 
-    // Copy steps into local pattern array
-    int len = (patternLength > 0 && patternLength <= Config::MAX_STEPS) ? patternLength : Config::STEPS_PER_BANK;
-    for (int t = 0; t < Config::MAX_TRACKS; t++)
-        for (int s = 0; s < Config::MAX_STEPS; s++)
-            patterns[slot].steps[t][s] = steps[t][s];
+    // The Master and P4 sequencer views are both fixed at 16 steps. Any
+    // multi-bar MIDI (up to 64 steps = 4 bars) is folded onto a single bar
+    // by OR-ing bar 2/3/4 hits onto bar 1. We MUST apply the same fold to
+    // the S3-local pattern so its on-screen grid matches what the master
+    // actually plays and what the P4 shows. Previous code stored the raw
+    // 64-step grid here, which made the S3 display disagree with audio.
+    (void)patternLength;  // ignored — we always store folded 16 steps
+    for (int t = 0; t < Config::MAX_TRACKS; t++) {
+        for (int s = 0; s < Config::MAX_STEPS; s++) patterns[slot].steps[t][s] = false;
+        for (int s = 0; s < 16; s++) {
+            bool active = false;
+            for (int bar = 0; bar < 4; bar++) {
+                int idx = s + bar * 16;
+                if (idx >= 64) break;
+                if (steps[t][idx]) { active = true; break; }
+            }
+            patterns[slot].steps[t][s] = active;
+        }
+    }
     patterns[slot].name = name;
-    patterns[slot].length = len;
+    patterns[slot].length = 16;   // folded view
 
     // Select this pattern locally
     currentPattern = slot;
@@ -583,18 +597,15 @@ void handleMidiPatternLoaded(int slot, const bool steps[16][64], const char* nam
     // Design: the P4 is the sole owner of the Master UDP channel for
     // freshly-loaded MIDI patterns. S3 parses the SMF (it has the SD card
     // and the parser) and sends the packed pattern to P4 via MSG_PATTERN_PUSH.
-    // The P4 then:
-    //   1. Updates its local p4.steps[][] so its sequencer view is correct.
-    //   2. Broadcasts the pattern to Master via UDP (selectPattern + clear
-    //      + setStep active:true for each hit + start).
-    // This eliminates the old race between S3's UDP burst and P4's UART
-    // view, and the confusing "two sequencers disagree" symptom.
+    // P4 then broadcasts it to Master over UDP (non-blocking drain from loop).
+    // The packed-push helper also folds bars 2-4 onto bar 1, so both sides
+    // see the same folded 16-step pattern.
     uart_bridge_send_pattern(slot);                                    // SYS_PATTERN
     uart_bridge_send_pattern_push(slot, patterns[slot].steps,          // MSG_PATTERN_PUSH
                                    Config::MAX_TRACKS);
 
-    RED808_LOG_PRINTF("[MIDI] Loaded pattern %d '%s' len=%d \u2192 P4 (P4 will push to Master)\n",
-                      slot + 1, name, len);
+    RED808_LOG_PRINTF("[MIDI] Loaded pattern %d '%s' (folded to 16 steps) \u2192 P4\n",
+                      slot + 1, name);
 }
 
 // =============================================================================

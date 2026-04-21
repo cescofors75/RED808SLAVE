@@ -14,6 +14,10 @@ void uart_handler_init(void);
 // Returns number of packets processed.
 int uart_handler_process(void);
 
+// Drain any pending MIDI→Master UDP burst a few packets at a time so it
+// never blocks the main loop. No-op when idle. Call every loop().
+void uart_handler_tick_pending_push(void);
+
 // Send a basic command to S3 (P4→S3 touch commands)
 void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value);
 

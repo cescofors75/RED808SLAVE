@@ -29,6 +29,32 @@ static HardwareSerial UartS3(UART_S3_PORT);
 static uint8_t rxBuf[UART_RX_BUF];
 static int rxHead = 0;
 
+// -----------------------------------------------------------------------------
+// Deferred "pattern push to Master" — avoids blocking the main loop (~260 ms)
+// when a MIDI pattern arrives via MSG_PATTERN_PUSH. The heavy UDP burst
+// (selectPattern + 256 clear setSteps + active setSteps + start) is staged
+// here and drained a few packets at a time from uart_handler_process().
+// -----------------------------------------------------------------------------
+enum PendingPushPhase {
+    PP_IDLE = 0,
+    PP_SELECT,
+    PP_CLEAR,
+    PP_ACTIVE,
+    PP_START,
+};
+struct PendingPush {
+    PendingPushPhase phase;
+    uint8_t  slot;
+    int      idx;          // index within current phase
+    uint32_t next_ms;      // earliest millis() to send next packet
+    bool     step_bits[16][16];  // snapshot of steps to broadcast
+};
+static PendingPush s_push = {PP_IDLE, 0, 0, 0, {{false}}};
+
+// Tunables — small delays keep WiFi/stack happy without stalling the loop.
+static constexpr int PP_PACKETS_PER_TICK = 6;   // packets drained per loop()
+static constexpr uint32_t PP_INTER_MS    = 2;   // pacing between bursts
+
 // =============================================================================
 // INIT
 // =============================================================================
@@ -384,7 +410,7 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
         int slot = (int)id;
         if (slot < 0 || slot > 15) return;
 
-        // 1) decode
+        // 1) decode into local UI state (authoritative for P4 display)
         for (int track = 0; track < 16; track++) {
             uint16_t row = ((uint16_t)payload[track * 2] << 8) | payload[track * 2 + 1];
             for (int step = 0; step < 16; step++) {
@@ -399,40 +425,16 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
             return;
         }
 
-        // 2) selectPattern
-        udp_send_select_pattern(slot);
-        delay(30);
-
-        // 3) clear slot (16 tracks × 16 steps = 256 false-setStep packets,
-        //    throttled every 16 packets)
-        int cleared = 0;
-        for (int t = 0; t < 16; t++) {
-            for (int s = 0; s < 16; s++) {
-                udp_send_set_step(t, s, false);
-                if ((++cleared % 16) == 0) delay(8);
-            }
-        }
-        delay(30);
-
-        // 4) broadcast active steps (throttled every 8)
-        int sent = 0;
-        int activeCount = 0;
-        for (int t = 0; t < 16; t++) {
-            for (int s = 0; s < 16; s++) {
-                if (p4.steps[t][s]) {
-                    udp_send_set_step(t, s, true);
-                    activeCount++;
-                    if ((++sent % 8) == 0) delay(10);
-                }
-            }
-        }
-        delay(50);
-
-        // 5) start playback
-        if (!p4.is_playing) {
-            udp_send_start();
-            p4.is_playing = true;
-        }
+        // 2) Stage a deferred push to Master. The heavy UDP burst is drained
+        //    a few packets per main-loop tick by uart_handler_tick_pending_push()
+        //    so LVGL / touch / pad queue never stall.
+        s_push.phase   = PP_SELECT;
+        s_push.slot    = (uint8_t)slot;
+        s_push.idx     = 0;
+        s_push.next_ms = millis();
+        for (int t = 0; t < 16; t++)
+            for (int s = 0; s < 16; s++)
+                s_push.step_bits[t][s] = p4.steps[t][s];
     }
     else if (type == MSG_SD_DATA) {
         switch (id) {
@@ -614,4 +616,76 @@ int uart_handler_process(void) {
 #endif
 
     return s_processed;
+}
+
+// Drain a few UDP packets per main-loop tick so MIDI loads don't stall the UI.
+// Safe no-op when idle. Called from main loop().
+void uart_handler_tick_pending_push(void) {
+    if (s_push.phase == PP_IDLE) return;
+    if (!udp_wifi_connected()) { s_push.phase = PP_IDLE; return; }
+
+    uint32_t now = millis();
+    if ((int32_t)(now - s_push.next_ms) < 0) return;
+
+    int budget = PP_PACKETS_PER_TICK;
+
+    while (budget > 0 && s_push.phase != PP_IDLE) {
+        switch (s_push.phase) {
+            case PP_SELECT:
+                udp_send_select_pattern(s_push.slot);
+                s_push.phase = PP_CLEAR;
+                s_push.idx   = 0;
+                budget--;
+                break;
+
+            case PP_CLEAR: {
+                // 256 clear packets (16 tracks × 16 steps)
+                int t = s_push.idx / 16;
+                int st = s_push.idx % 16;
+                udp_send_set_step(t, st, false);
+                s_push.idx++;
+                budget--;
+                if (s_push.idx >= 256) {
+                    s_push.phase = PP_ACTIVE;
+                    s_push.idx   = 0;
+                }
+                break;
+            }
+
+            case PP_ACTIVE: {
+                // Scan forward to next active step
+                bool sent = false;
+                while (s_push.idx < 256) {
+                    int t = s_push.idx / 16;
+                    int st = s_push.idx % 16;
+                    s_push.idx++;
+                    if (s_push.step_bits[t][st]) {
+                        udp_send_set_step(t, st, true);
+                        budget--;
+                        sent = true;
+                        break;
+                    }
+                }
+                if (!sent || s_push.idx >= 256) {
+                    if (s_push.idx >= 256) s_push.phase = PP_START;
+                }
+                break;
+            }
+
+            case PP_START:
+                if (!p4.is_playing) {
+                    udp_send_start();
+                    p4.is_playing = true;
+                }
+                s_push.phase = PP_IDLE;
+                budget--;
+                break;
+
+            default:
+                s_push.phase = PP_IDLE;
+                break;
+        }
+    }
+
+    s_push.next_ms = millis() + PP_INTER_MS;
 }

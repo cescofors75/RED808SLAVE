@@ -186,11 +186,21 @@ static lv_obj_t* create_header_button(lv_obj_t* parent, int x, int y, int w, int
 
 static void header_play_cb(lv_event_t* e) {
     LV_UNUSED(e);
+    // Debounce — LVGL can double-fire on a sloppy tap, causing visible
+    // start/stop/start flicker and duplicate UDP bursts.
+    static uint32_t last_ms = 0;
+    uint32_t now = millis();
+    if (now - last_ms < 250) return;
+    last_ms = now;
+
     bool next_play = !p4.is_playing;
-    // Send to Master (sound) AND S3 (state sync)
+    // P4 is the UDP owner for its own play/pause toggle — send once.
     if (next_play) udp_send_start();
-    else udp_send_stop();
-    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_PLAY_TOGGLE, 0);
+    else           udp_send_stop();
+    // Notify S3 of the new state so its UI & isPlaying mirror us WITHOUT
+    // triggering another UDP start/stop from S3 (that duplication is what
+    // made the two sequencers fall out of sync on every P4 tap).
+    uart_send_to_s3(MSG_SYSTEM, SYS_PLAY_STATE, next_play ? 1 : 0);
     p4.is_playing = next_play;
 }
 
