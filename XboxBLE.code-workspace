@@ -1,0 +1,25 @@
+{
+    "folders": [
+        {
+            "name": "XboxBLE (root wrapper → S3)",
+            "path": "."
+        },
+        {
+            "name": "BlueSlaveV2 (ESP32-S3)",
+            "path": "BlueSlaveV2"
+        },
+        {
+            "name": "BlueSlaveP4 (ESP32-P4)",
+            "path": "BlueSlaveP4"
+        }
+    ],
+    "settings": {
+        "platformio-ide.activateOnlyOnPlatformIOProject": false,
+        "platformio-ide.useBuiltinPIOCore": true
+    },
+    "extensions": {
+        "recommendations": [
+            "platformio.platformio-ide"
+        ]
+    }
+}

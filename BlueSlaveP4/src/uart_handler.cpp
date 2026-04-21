@@ -29,6 +29,10 @@ static HardwareSerial UartS3(UART_S3_PORT);
 static uint8_t rxBuf[UART_RX_BUF];
 static int rxHead = 0;
 
+// Tempo lock: absolute millis() until which incoming BPM updates from S3 are
+// ignored (set by uart_lock_tempo() after applying a MIDI-file tempo).
+static uint32_t s_tempo_lock_until_ms = 0;
+
 // -----------------------------------------------------------------------------
 // Deferred "pattern push to Master" — avoids blocking the main loop (~260 ms)
 // when a MIDI pattern arrives via MSG_PATTERN_PUSH. The heavy UDP burst
@@ -228,9 +232,14 @@ static void process_basic(const UartBasicPacket* pkt) {
         case MSG_SYSTEM:
             switch (id) {
                 case SYS_BPM_INT:
+                    // Tempo lock window: ignore S3-initiated BPM updates for
+                    // a short time after we applied a MIDI file's tempo, so
+                    // the S3's stale cached BPM doesn't overwrite it.
+                    if (millis() < s_tempo_lock_until_ms) break;
                     p4.bpm_int = val;
                     break;
                 case SYS_BPM_FRAC:
+                    if (millis() < s_tempo_lock_until_ms) break;
                     p4.bpm_frac = val;
                     // Relay BPM to Master (frac arrives after int)
                     if (udp_wifi_connected()) {
@@ -618,13 +627,41 @@ int uart_handler_process(void) {
     return s_processed;
 }
 
+void uart_lock_tempo(uint32_t duration_ms) {
+    s_tempo_lock_until_ms = millis() + duration_ms;
+}
+
+// Stage a pattern push to the Master from a raw 16×16 step grid.
+// Used by the MEM MIDI loader on P4 — keeps P4 as the sole owner of the
+// master UDP channel regardless of whether the MIDI came from SD (via S3)
+// or from local SPIFFS.
+void uart_stage_pattern_push_from_steps(uint8_t slot, const bool steps[16][16]) {
+    if (slot > 15) return;
+
+    // 1) Update local UI state immediately
+    for (int t = 0; t < 16; t++)
+        for (int s = 0; s < 16; s++)
+            p4.steps[t][s] = steps[t][s];
+    p4.current_pattern = slot;
+
+    // 2) Skip staging if no Wi-Fi link to Master — UI is still correct.
+    if (!udp_wifi_connected()) return;
+
+    // 3) Arm deferred drain
+    s_push.phase   = PP_SELECT;
+    s_push.slot    = slot;
+    s_push.idx     = 0;
+    s_push.next_ms = millis();
+    for (int t = 0; t < 16; t++)
+        for (int s = 0; s < 16; s++)
+            s_push.step_bits[t][s] = steps[t][s];
+}
+
 // Drain a few UDP packets per main-loop tick so MIDI loads don't stall the UI.
 // Safe no-op when idle. Called from main loop().
 void uart_handler_tick_pending_push(void) {
     if (s_push.phase == PP_IDLE) return;
-    if (!udp_wifi_connected()) { s_push.phase = PP_IDLE; return; }
-
-    uint32_t now = millis();
+    if (!udp_wifi_connected()) { s_push.phase = PP_IDLE; return; }    uint32_t now = millis();
     if ((int32_t)(now - s_push.next_ms) < 0) return;
 
     int budget = PP_PACKETS_PER_TICK;

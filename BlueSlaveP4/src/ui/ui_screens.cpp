@@ -8,6 +8,7 @@
 #include "../udp_handler.h"
 #include "../uart_handler.h"
 #include "../dsp_task.h"
+#include "../mem_midi_loader.h"
 #include "config.h"
 #include <Arduino.h>
 #include <atomic>
@@ -1197,6 +1198,20 @@ static lv_obj_t* seq_status_step_lbl    = NULL; // bottom "STEP 05 / 16"
 static lv_obj_t* seq_status_pat_lbl     = NULL; // bottom "PATTERN 01"
 static int        seq_step_x[16]        = {};  // precomputed step column X
 
+// ── Multi-bar pagination (populated by MEM-MIDI load with raw grid) ────────
+static bool       seq_raw_grid[16][64]  = {};   // up to 4 bars of raw steps
+static int        seq_raw_len           = 16;   // 16/32/48/64
+static int        seq_page              = 0;    // 0..3
+static lv_obj_t*  seq_page_btns[4]      = {};
+static lv_obj_t*  seq_page_lbls[4]      = {};
+// Sequencer-local header buttons
+static lv_obj_t*  seq_hdr_play_btn      = NULL;
+static lv_obj_t*  seq_hdr_play_lbl      = NULL;
+static lv_obj_t*  seq_hdr_pat_lbl       = NULL;
+
+static void seq_apply_page_styles(void);
+static void seq_copy_page_to_p4(int page);
+
 // Layout — landscape 1024×600 (LCD native, LVGL canvas)
 static const int SEQ_RULER_Y    = 44;   // ruler starts below header
 static const int SEQ_RULER_H    = 14;   // ruler height
@@ -1225,6 +1240,9 @@ static void seq_step_cb(lv_event_t* e) {
         if (ui_use_udp_transport()) udp_send_set_step(track, step, next);
         // Push updated pattern to S3 (so S3 pad-sync sees the change)
         uart_send_pattern_to_s3(p4.current_pattern, p4.steps);
+        // Mirror into raw multi-bar grid so manual edits persist across pages.
+        int idx = seq_page * 16 + step;
+        if (idx < 64) seq_raw_grid[track][idx] = next;
     }
 }
 
@@ -1247,11 +1265,166 @@ static void seq_solo_cb(lv_event_t* e) {
     if (ui_use_udp_transport()) udp_send_solo(track, newSolo);
 }
 
+// ── Pagination helpers ─────────────────────────────────────────────────────
+// Copy the 16 steps of the given raw-grid page into p4.steps, stage the
+// resulting bar to the Master, and sync to S3. Used when the user taps P1..P4.
+static void seq_copy_page_to_p4(int page) {
+    if (page < 0 || page > 3) return;
+    int base = page * 16;
+    int num_pages = (seq_raw_len + 15) / 16;
+    if (num_pages < 1) num_pages = 1;
+    if (page >= num_pages) return;
+    for (int t = 0; t < 16; t++)
+        for (int s = 0; s < 16; s++)
+            p4.steps[t][s] = seq_raw_grid[t][base + s];
+    seq_page = page;
+    uart_stage_pattern_push_from_steps((uint8_t)p4.current_pattern, p4.steps);
+    uart_send_pattern_to_s3(p4.current_pattern, p4.steps);
+}
+
+// Refresh page button highlighting + enable/disable based on seq_raw_len.
+static void seq_apply_page_styles(void) {
+    int num_pages = (seq_raw_len + 15) / 16;
+    if (num_pages < 1) num_pages = 1;
+    for (int p = 0; p < 4; p++) {
+        if (!seq_page_btns[p]) continue;
+        bool enabled = (p < num_pages);
+        bool active  = enabled && (p == seq_page);
+        lv_obj_set_style_bg_color(seq_page_btns[p],
+            active ? RED808_ACCENT : (enabled ? RED808_SURFACE : lv_color_hex(0x080808)), 0);
+        lv_obj_set_style_bg_opa(seq_page_btns[p],
+            enabled ? LV_OPA_COVER : LV_OPA_30, 0);
+        lv_obj_set_style_border_color(seq_page_btns[p],
+            active ? RED808_CYAN : RED808_BORDER, 0);
+        if (seq_page_lbls[p]) {
+            lv_obj_set_style_text_color(seq_page_lbls[p],
+                active ? lv_color_white() : (enabled ? RED808_TEXT : RED808_TEXT_DIM), 0);
+        }
+        if (enabled) lv_obj_clear_state(seq_page_btns[p], LV_STATE_DISABLED);
+        else         lv_obj_add_state  (seq_page_btns[p], LV_STATE_DISABLED);
+    }
+}
+
+static void seq_page_cb(lv_event_t* e) {
+    int page = (int)(intptr_t)lv_event_get_user_data(e);
+    int num_pages = (seq_raw_len + 15) / 16;
+    if (page < 0 || page >= num_pages) return;
+    if (page == seq_page) return;
+    seq_copy_page_to_p4(page);
+    seq_apply_page_styles();
+}
+
+// Called by MEM-MIDI loader after filling seq_raw_grid.
+static void seq_install_raw_and_show_page0(int raw_len) {
+    seq_raw_len = (raw_len < 16) ? 16 : (raw_len > 64 ? 64 : raw_len);
+    seq_page = 0;
+    seq_copy_page_to_p4(0);
+    seq_apply_page_styles();
+}
+
 static void create_sequencer_screen(void) {
     scr_sequencer = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_sequencer, RED808_BG, 0);
     lv_obj_clear_flag(scr_sequencer, LV_OBJ_FLAG_SCROLLABLE);
     ui_create_header(scr_sequencer);
+
+    // ── Sequencer-local header controls (Play/Pause + Pattern -/+ + Pages) ──
+    // Layout: [back 44px] [PLAY 90] [PAT- 44] [Pxx 80] [PAT+ 44] [P1..P4 50 each]
+    {
+        const int HY = 6;   // top padding
+        const int HH = 36;  // button height
+        int hx = 60;
+
+        // PLAY / PAUSE
+        seq_hdr_play_btn = lv_btn_create(scr_sequencer);
+        lv_obj_set_size(seq_hdr_play_btn, 90, HH);
+        lv_obj_set_pos(seq_hdr_play_btn, hx, HY);
+        lv_obj_set_style_radius(seq_hdr_play_btn, 8, 0);
+        lv_obj_set_style_bg_color(seq_hdr_play_btn,
+            p4.is_playing ? RED808_SUCCESS : RED808_ACCENT, 0);
+        lv_obj_set_style_border_width(seq_hdr_play_btn, 1, 0);
+        lv_obj_set_style_border_color(seq_hdr_play_btn,
+            p4.is_playing ? RED808_CYAN : RED808_ACCENT2, 0);
+        lv_obj_set_style_shadow_width(seq_hdr_play_btn, 0, 0);
+        lv_obj_add_event_cb(seq_hdr_play_btn, header_play_cb, LV_EVENT_CLICKED, NULL);
+        seq_hdr_play_lbl = lv_label_create(seq_hdr_play_btn);
+        lv_label_set_text(seq_hdr_play_lbl, p4.is_playing ? "PAUSE" : "PLAY");
+        lv_obj_set_style_text_font(seq_hdr_play_lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(seq_hdr_play_lbl, lv_color_white(), 0);
+        lv_obj_center(seq_hdr_play_lbl);
+        hx += 90 + 6;
+
+        // PATTERN -
+        lv_obj_t* pm = lv_btn_create(scr_sequencer);
+        lv_obj_set_size(pm, 44, HH);
+        lv_obj_set_pos(pm, hx, HY);
+        lv_obj_set_style_radius(pm, 8, 0);
+        lv_obj_set_style_bg_color(pm, RED808_SURFACE, 0);
+        lv_obj_set_style_border_width(pm, 1, 0);
+        lv_obj_set_style_border_color(pm, RED808_BORDER, 0);
+        lv_obj_set_style_shadow_width(pm, 0, 0);
+        lv_obj_add_event_cb(pm, header_pattern_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+        lv_obj_t* pml = lv_label_create(pm);
+        lv_label_set_text(pml, LV_SYMBOL_MINUS);
+        lv_obj_set_style_text_font(pml, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(pml, RED808_TEXT, 0);
+        lv_obj_center(pml);
+        hx += 44 + 4;
+
+        // PATTERN label
+        seq_hdr_pat_lbl = lv_label_create(scr_sequencer);
+        lv_obj_set_size(seq_hdr_pat_lbl, 70, HH);
+        lv_obj_set_pos(seq_hdr_pat_lbl, hx, HY);
+        lv_label_set_text_fmt(seq_hdr_pat_lbl, "P%02d", p4.current_pattern + 1);
+        lv_obj_set_style_text_font(seq_hdr_pat_lbl, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(seq_hdr_pat_lbl, RED808_ACCENT, 0);
+        lv_obj_set_style_text_align(seq_hdr_pat_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_pad_top(seq_hdr_pat_lbl, 6, 0);
+        hx += 70 + 4;
+
+        // PATTERN +
+        lv_obj_t* pp = lv_btn_create(scr_sequencer);
+        lv_obj_set_size(pp, 44, HH);
+        lv_obj_set_pos(pp, hx, HY);
+        lv_obj_set_style_radius(pp, 8, 0);
+        lv_obj_set_style_bg_color(pp, RED808_SURFACE, 0);
+        lv_obj_set_style_border_width(pp, 1, 0);
+        lv_obj_set_style_border_color(pp, RED808_BORDER, 0);
+        lv_obj_set_style_shadow_width(pp, 0, 0);
+        lv_obj_add_event_cb(pp, header_pattern_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
+        lv_obj_t* ppl = lv_label_create(pp);
+        lv_label_set_text(ppl, LV_SYMBOL_PLUS);
+        lv_obj_set_style_text_font(ppl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(ppl, RED808_TEXT, 0);
+        lv_obj_center(ppl);
+        hx += 44 + 18;
+
+        // Separator dot
+        lv_obj_t* sep = lv_label_create(scr_sequencer);
+        lv_label_set_text(sep, "SONG PAGE:");
+        lv_obj_set_style_text_font(sep, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(sep, RED808_TEXT_DIM, 0);
+        lv_obj_set_pos(sep, hx, HY + 10);
+        hx += 90;
+
+        // P1..P4 page buttons
+        for (int p = 0; p < 4; p++) {
+            seq_page_btns[p] = lv_btn_create(scr_sequencer);
+            lv_obj_set_size(seq_page_btns[p], 50, HH);
+            lv_obj_set_pos(seq_page_btns[p], hx + p * 54, HY);
+            lv_obj_set_style_radius(seq_page_btns[p], 8, 0);
+            lv_obj_set_style_border_width(seq_page_btns[p], 1, 0);
+            lv_obj_set_style_shadow_width(seq_page_btns[p], 0, 0);
+            lv_obj_add_event_cb(seq_page_btns[p], seq_page_cb,
+                                LV_EVENT_CLICKED, (void*)(intptr_t)p);
+            seq_page_lbls[p] = lv_label_create(seq_page_btns[p]);
+            char pb[6]; snprintf(pb, sizeof(pb), "P%d", p + 1);
+            lv_label_set_text(seq_page_lbls[p], pb);
+            lv_obj_set_style_text_font(seq_page_lbls[p], &lv_font_montserrat_16, 0);
+            lv_obj_center(seq_page_lbls[p]);
+        }
+        seq_apply_page_styles();
+    }
 
     // ── Precompute step X positions ──
     {
@@ -1469,6 +1642,21 @@ static void update_sequencer_screen(void) {
     int step = p4.current_step;
     bool playing = p4.is_playing;
 
+    // ── Auto-advance pages on bar wrap (song mode) ──
+    // When a MEM-MIDI with multiple bars is loaded (seq_raw_len > 16), we
+    // walk the pages in a loop: each time the Master's step wraps from 15→0
+    // we push the next bar into the Master's single pattern slot.
+    static int prev_step = -1;
+    if (playing && seq_raw_len > 16) {
+        int num_pages = (seq_raw_len + 15) / 16;
+        if (num_pages > 1 && prev_step >= 0 && step == 0 && prev_step == 15) {
+            int next_page = (seq_page + 1) % num_pages;
+            seq_copy_page_to_p4(next_page);
+            seq_apply_page_styles();
+        }
+    }
+    prev_step = step;
+
     // ── Move / show glowing playhead line ──
     if (seq_playhead_line) {
         if (playing && step >= 0 && step < 16) {
@@ -1489,6 +1677,18 @@ static void update_sequencer_screen(void) {
     }
     if (seq_status_pat_lbl) {
         lv_label_set_text_fmt(seq_status_pat_lbl, "PATTERN %02d", p4.current_pattern + 1);
+    }
+
+    // ── Sequencer header play/pause + pattern number ──
+    if (seq_hdr_play_btn && seq_hdr_play_lbl) {
+        lv_label_set_text(seq_hdr_play_lbl, playing ? "PAUSE" : "PLAY");
+        lv_obj_set_style_bg_color(seq_hdr_play_btn,
+            playing ? RED808_SUCCESS : RED808_ACCENT, 0);
+        lv_obj_set_style_border_color(seq_hdr_play_btn,
+            playing ? RED808_CYAN : RED808_ACCENT2, 0);
+    }
+    if (seq_hdr_pat_lbl) {
+        lv_label_set_text_fmt(seq_hdr_pat_lbl, "P%02d", p4.current_pattern + 1);
     }
 
     // ── Per-track updates ──
@@ -1749,6 +1949,58 @@ static void sd_refresh_ui(void);
 static void sd_switch_panel_mode(bool midi_mode);
 static void sd_midi_pat_btn_cb(lv_event_t* e);
 static void sd_midi_load_btn_cb(lv_event_t* e);
+static void show_midi_load_summary(const char* title, int slot,
+                                   int steps, int raw_len, float bpm,
+                                   int tracks_used);
+
+// ── MEM MIDI source (P4 SPIFFS /mid/*.mid) ──────────────────────────────────
+// sd_source: 0 = SD (remote via S3), 1 = MEM (P4 internal flash)
+static int        sd_source            = 0;
+static lv_obj_t*  sd_src_sd_btn        = NULL;
+static lv_obj_t*  sd_src_mem_btn       = NULL;
+static char       sd_mem_files[64][48] = {};
+static int        sd_mem_count         = 0;
+static int        sd_mem_selected      = -1;
+
+static void sd_mem_refresh_list(void) {
+    sd_mem_count = mem_midi::list_midi_files("/mid", sd_mem_files, 64);
+    if (sd_mem_selected >= sd_mem_count) sd_mem_selected = -1;
+}
+
+static void sd_mem_file_btn_cb(lv_event_t* e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= sd_mem_count) return;
+    sd_mem_selected = idx;
+    if (sd_midi_info_lbl) lv_label_set_text(sd_midi_info_lbl, sd_mem_files[idx]);
+    if (sd_midi_load_btn) lv_obj_clear_state(sd_midi_load_btn, LV_STATE_DISABLED);
+    if (sd_midi_status_lbl) lv_label_set_text(sd_midi_status_lbl, "");
+    sd_refresh_ui();
+}
+
+static void sd_source_btn_cb(lv_event_t* e) {
+    int src = (int)(intptr_t)lv_event_get_user_data(e);
+    if (src == sd_source) return;
+    sd_source = src;
+    sd_mem_selected = -1;
+    if (sd_midi_info_lbl) lv_label_set_text(sd_midi_info_lbl, "");
+    if (sd_midi_status_lbl) lv_label_set_text(sd_midi_status_lbl, "");
+    if (sd_midi_load_btn) lv_obj_add_state(sd_midi_load_btn, LV_STATE_DISABLED);
+    if (src == 1) {
+        sd_mem_refresh_list();
+        sd_switch_panel_mode(true);   // MEM is MIDI-only
+    } else {
+        sd_switch_panel_mode(false);  // default SD view
+    }
+    if (sd_src_sd_btn) {
+        lv_obj_set_style_bg_color(sd_src_sd_btn,
+            src == 0 ? RED808_CYAN : lv_color_hex(0x1A2A3A), 0);
+    }
+    if (sd_src_mem_btn) {
+        lv_obj_set_style_bg_color(sd_src_mem_btn,
+            src == 1 ? RED808_WARNING : lv_color_hex(0x1A2A3A), 0);
+    }
+    sd_refresh_ui();
+}
 
 static void sd_switch_panel_mode(bool midi_mode) {
     sd_is_midi_mode = midi_mode;
@@ -1821,8 +2073,146 @@ static void sd_midi_pat_btn_cb(lv_event_t* e) {
     }
 }
 
+// ── MIDI load summary modal ─────────────────────────────────────────────────
+// Shown after a successful MEM-MIDI load. Displays filename, BPM, step count
+// and unique tracks. OK button dismisses and navigates to the sequencer.
+static lv_obj_t* midi_summary_modal = NULL;
+
+static void midi_summary_ok_cb(lv_event_t* e) {
+    (void)e;
+    if (midi_summary_modal) {
+        lv_obj_del(midi_summary_modal);
+        midi_summary_modal = NULL;
+    }
+    ui_navigate_to(3);   // screen 3 = SEQUENCER
+}
+
+static void show_midi_load_summary(const char* title, int slot,
+                                   int steps, int raw_len, float bpm,
+                                   int tracks_used) {
+    if (midi_summary_modal) {
+        lv_obj_del(midi_summary_modal);
+        midi_summary_modal = NULL;
+    }
+    lv_obj_t* scr = lv_layer_top();
+    midi_summary_modal = lv_obj_create(scr);
+    lv_obj_remove_style_all(midi_summary_modal);
+    lv_obj_set_size(midi_summary_modal, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(midi_summary_modal, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(midi_summary_modal, LV_OPA_60, 0);
+    lv_obj_add_flag(midi_summary_modal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(midi_summary_modal, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* card = lv_obj_create(midi_summary_modal);
+    lv_obj_set_size(card, 520, 320);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, RED808_PANEL, 0);
+    lv_obj_set_style_border_color(card, RED808_ACCENT, 0);
+    lv_obj_set_style_border_width(card, 2, 0);
+    lv_obj_set_style_radius(card, 10, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* t = lv_label_create(card);
+    lv_label_set_text(t, LV_SYMBOL_OK "  MIDI Loaded");
+    lv_obj_set_style_text_color(t, RED808_SUCCESS, 0);
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_24, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 10);
+
+    lv_obj_t* fn = lv_label_create(card);
+    char fnbuf[96];
+    snprintf(fnbuf, sizeof(fnbuf), "File: %s", title ? title : "(unknown)");
+    lv_label_set_text(fn, fnbuf);
+    lv_obj_set_style_text_color(fn, RED808_TEXT, 0);
+    lv_obj_set_style_text_font(fn, &lv_font_montserrat_18, 0);
+    lv_obj_align(fn, LV_ALIGN_TOP_LEFT, 20, 58);
+
+    lv_obj_t* l1 = lv_label_create(card);
+    char b1[160];
+    snprintf(b1, sizeof(b1),
+        "Pattern slot:  P%02d\n"
+        "Tempo:         %.1f BPM\n"
+        "Steps (bar1):  %d\n"
+        "Raw length:    %d steps (%d bars)\n"
+        "Tracks used:   %d / 16",
+        slot, bpm, steps, raw_len, raw_len / 16, tracks_used);
+    lv_label_set_text(l1, b1);
+    lv_obj_set_style_text_color(l1, RED808_TEXT, 0);
+    lv_obj_set_style_text_font(l1, &lv_font_montserrat_18, 0);
+    lv_obj_align(l1, LV_ALIGN_TOP_LEFT, 20, 96);
+
+    lv_obj_t* ok = lv_btn_create(card);
+    lv_obj_set_size(ok, 240, 56);
+    lv_obj_align(ok, LV_ALIGN_BOTTOM_MID, 0, -18);
+    lv_obj_set_style_bg_color(ok, RED808_ACCENT, 0);
+    lv_obj_set_style_radius(ok, 8, 0);
+    lv_obj_add_event_cb(ok, midi_summary_ok_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* okl = lv_label_create(ok);
+    lv_label_set_text(okl, LV_SYMBOL_OK "  Go to Sequencer");
+    lv_obj_set_style_text_color(okl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(okl, &lv_font_montserrat_18, 0);
+    lv_obj_center(okl);
+}
+
 static void sd_midi_load_btn_cb(lv_event_t* e) {
     (void)e;
+    // MEM branch — parse from P4 SPIFFS and stage directly to Master.
+    if (sd_source == 1) {
+        if (sd_mem_selected < 0 || sd_mem_selected >= sd_mem_count) return;
+        char path[80];
+        snprintf(path, sizeof(path), "/mid/%s", sd_mem_files[sd_mem_selected]);
+        if (sd_midi_status_lbl) {
+            lv_label_set_text(sd_midi_status_lbl, "Loading MEM MIDI...");
+            lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_WARNING, 0);
+        }
+        // Parse RAW (up to 64 steps) so pagination works and the whole tune
+        // actually plays via page auto-advance.
+        char name[16];
+        int  steps_found = 0, raw_len = 0;
+        float bpm = 0;
+        bool ok = mem_midi::load_pattern_raw(path, seq_raw_grid, name, sizeof(name),
+                                             &steps_found, &bpm, &raw_len);
+        if (!ok) {
+            if (sd_midi_status_lbl) {
+                lv_label_set_text(sd_midi_status_lbl, "MEM parse failed");
+                lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_ACCENT, 0);
+            }
+            return;
+        }
+        // Install raw grid + switch to page 0 (this also stages bar 1 to Master
+        // and mirrors to S3).
+        p4.current_pattern = sd_midi_target_slot;
+        seq_install_raw_and_show_page0(raw_len);
+
+        if (sd_midi_status_lbl) {
+            char buf[64];
+            snprintf(buf, sizeof(buf),
+                "Loaded \xe2\x86\x92 Pat %02d (%d hits, %d bars)",
+                sd_midi_target_slot + 1, steps_found, raw_len / 16);
+            lv_label_set_text(sd_midi_status_lbl, buf);
+            lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_SUCCESS, 0);
+        }
+        // Apply MIDI tempo to local state + Master (if present in the SMF)
+        if (bpm >= 40.0f && bpm <= 240.0f) {
+            p4.bpm_int  = (int)bpm;
+            p4.bpm_frac = (int)((bpm - p4.bpm_int) * 10);
+            // Lock tempo so the S3's stale cached BPM (sent via UART on
+            // reconnect / on its own periodic updates) doesn't overwrite
+            // the MIDI tempo we just applied.
+            uart_lock_tempo(3000);
+            if (ui_use_udp_transport()) udp_send_tempo(bpm);
+        }
+        // Count unique tracks for summary (across full raw grid)
+        int tracks_used = 0;
+        for (int t = 0; t < 16; t++)
+            for (int s = 0; s < raw_len; s++)
+                if (seq_raw_grid[t][s]) { tracks_used++; break; }
+        show_midi_load_summary(sd_mem_files[sd_mem_selected],
+                               sd_midi_target_slot + 1,
+                               steps_found, raw_len, bpm, tracks_used);
+        return;
+    }
+
+    // SD branch — delegate to S3 over UART (existing path).
     if (p4sd.selected_file[0] == '\0') return;
     if (sd_midi_status_lbl) lv_label_set_text(sd_midi_status_lbl, "Loading MIDI...");
     uart_send_sd_load_midi((uint8_t)sd_midi_target_slot);
@@ -1838,6 +2228,58 @@ static void sd_refresh_ui(void) {
     if (!sd_file_list) return;
     lv_obj_clean(sd_file_list);
 
+    // ── MEM branch: list P4's own /mid/*.mid from SPIFFS ────────────────
+    if (sd_source == 1) {
+        if (sd_status_lbl) {
+            char sbuf[24];
+            snprintf(sbuf, sizeof(sbuf), "MEM %d MIDI", sd_mem_count);
+            lv_label_set_text(sd_status_lbl, sbuf);
+            lv_obj_set_style_text_color(sd_status_lbl, RED808_WARNING, 0);
+        }
+        if (sd_path_lbl) lv_label_set_text(sd_path_lbl, "/mid (flash)");
+
+        // Enable/disable LOAD button based on MEM selection
+        if (sd_midi_load_btn) {
+            if (sd_mem_selected >= 0)
+                lv_obj_clear_state(sd_midi_load_btn, LV_STATE_DISABLED);
+            else
+                lv_obj_add_state(sd_midi_load_btn, LV_STATE_DISABLED);
+        }
+
+        if (sd_mem_count == 0) {
+            lv_obj_t* lbl = lv_label_create(sd_file_list);
+            lv_label_set_text(lbl,
+                "No MIDIs in flash.\nPut .mid in BlueSlaveP4/data/mid/\nand run Upload Filesystem P4.");
+            lv_obj_set_style_text_color(lbl, RED808_TEXT_DIM, 0);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+            return;
+        }
+        for (int i = 0; i < sd_mem_count; i++) {
+            lv_obj_t* btn = lv_btn_create(sd_file_list);
+            lv_obj_set_size(btn, 580, 44);
+            lv_obj_set_style_radius(btn, 6, 0);
+            bool sel = (i == sd_mem_selected);
+            lv_obj_set_style_bg_color(btn,
+                sel ? RED808_ACCENT : lv_color_hex(0x3A2A00), 0);
+            lv_obj_set_style_bg_color(btn, lv_color_hex(0x886622), LV_STATE_PRESSED);
+
+            lv_obj_t* lbl = lv_label_create(btn);
+            char display[64];
+            snprintf(display, sizeof(display),
+                LV_SYMBOL_FILE "  %s [MEM]", sd_mem_files[i]);
+            lv_label_set_text(lbl, display);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+            lv_obj_set_style_text_color(lbl,
+                sel ? lv_color_white() : RED808_WARNING, 0);
+            lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
+
+            lv_obj_add_event_cb(btn, sd_mem_file_btn_cb, LV_EVENT_CLICKED,
+                                (void*)(intptr_t)i);
+        }
+        return;
+    }
+
+    // ── SD branch (remote via S3) ───────────────────────────────────────
     // Update status
     if (sd_status_lbl) {
         lv_label_set_text(sd_status_lbl, p4sd.mounted ? "READY" : "NO SD CARD");
@@ -1975,6 +2417,41 @@ static void create_sdcard_screen(void) {
     lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(title_lbl, RED808_CYAN, 0);
     lv_obj_set_pos(title_lbl, 8, 4);
+
+    // Source toggle: [SD] [MEM]
+    {
+        int btn_w = 70, btn_h = 28;
+        int bx = 240, by = 4;
+        sd_src_sd_btn = lv_btn_create(sd_left_panel);
+        lv_obj_set_size(sd_src_sd_btn, btn_w, btn_h);
+        lv_obj_set_pos(sd_src_sd_btn, bx, by);
+        lv_obj_set_style_bg_color(sd_src_sd_btn, RED808_CYAN, 0);
+        lv_obj_set_style_radius(sd_src_sd_btn, 6, 0);
+        lv_obj_set_style_border_width(sd_src_sd_btn, 1, 0);
+        lv_obj_set_style_border_color(sd_src_sd_btn, lv_color_hex(0x334455), 0);
+        lv_obj_t* l1 = lv_label_create(sd_src_sd_btn);
+        lv_label_set_text(l1, "SD");
+        lv_obj_set_style_text_font(l1, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(l1, lv_color_black(), 0);
+        lv_obj_center(l1);
+        lv_obj_add_event_cb(sd_src_sd_btn, sd_source_btn_cb,
+                            LV_EVENT_CLICKED, (void*)(intptr_t)0);
+
+        sd_src_mem_btn = lv_btn_create(sd_left_panel);
+        lv_obj_set_size(sd_src_mem_btn, btn_w, btn_h);
+        lv_obj_set_pos(sd_src_mem_btn, bx + btn_w + 6, by);
+        lv_obj_set_style_bg_color(sd_src_mem_btn, lv_color_hex(0x1A2A3A), 0);
+        lv_obj_set_style_radius(sd_src_mem_btn, 6, 0);
+        lv_obj_set_style_border_width(sd_src_mem_btn, 1, 0);
+        lv_obj_set_style_border_color(sd_src_mem_btn, lv_color_hex(0x334455), 0);
+        lv_obj_t* l2 = lv_label_create(sd_src_mem_btn);
+        lv_label_set_text(l2, "MEM");
+        lv_obj_set_style_text_font(l2, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(l2, RED808_WARNING, 0);
+        lv_obj_center(l2);
+        lv_obj_add_event_cb(sd_src_mem_btn, sd_source_btn_cb,
+                            LV_EVENT_CLICKED, (void*)(intptr_t)1);
+    }
 
     // Status label
     sd_status_lbl = lv_label_create(sd_left_panel);

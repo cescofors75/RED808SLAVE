@@ -18,6 +18,18 @@ int uart_handler_process(void);
 // never blocks the main loop. No-op when idle. Call every loop().
 void uart_handler_tick_pending_push(void);
 
+// Stage a pattern push to the Master from a raw 16×16 step grid.
+// Used by the MEM MIDI loader (P4-local flash) so it can reuse the same
+// non-blocking UDP drainer as the S3→P4 MSG_PATTERN_PUSH path.
+// Updates p4.steps and p4.current_pattern before staging.
+void uart_stage_pattern_push_from_steps(uint8_t slot, const bool steps[16][16]);
+
+// Lock tempo for the given duration (ms). Incoming BPM updates from S3
+// (MSG_SYSTEM/SYS_BPM_INT/FRAC) are ignored while the lock is active.
+// Used when loading a MIDI file so the S3's cached tempo doesn't override
+// the tempo just sent to the Master.
+void uart_lock_tempo(uint32_t duration_ms);
+
 // Send a basic command to S3 (P4→S3 touch commands)
 void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value);
 

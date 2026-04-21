@@ -6,6 +6,7 @@
 // =============================================================================
 
 #include <Arduino.h>
+#include <SPIFFS.h>
 #include "../include/config.h"
 #include "drivers/display_init.h"
 #include "drivers/lvgl_port.h"
@@ -55,6 +56,17 @@ void setup() {
     // 7. Start UART1 (optional S3 connection)
     P4_LOG_PRINTLN("[INIT] UART bridge to S3 (optional)...");
     uart_handler_init();
+
+    // 7b. Mount SPIFFS for MEM MIDI storage (/mid/*.mid). Non-fatal if absent.
+    P4_LOG_PRINTLN("[INIT] Mounting SPIFFS...");
+    if (SPIFFS.begin(false, "/spiffs", 10)) {
+#if P4_ENABLE_DEBUG_LOG
+        Serial.printf("[INIT] SPIFFS OK — %u / %u bytes used\n",
+                      (unsigned)SPIFFS.usedBytes(), (unsigned)SPIFFS.totalBytes());
+#endif
+    } else {
+        P4_LOG_PRINTLN("[INIT] SPIFFS mount failed (run uploadfs once)");
+    }
 
 #if P4_USB_CDC_ENABLED
     // 8. Start USB Host CDC (S3 via USB-C OTG port)
