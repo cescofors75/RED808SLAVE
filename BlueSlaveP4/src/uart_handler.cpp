@@ -263,9 +263,11 @@ static void process_basic(const UartBasicPacket* pkt) {
                     if (!p4.is_playing) p4.current_step = 0;
                     break;
                 case SYS_STEP:
-                    // Only accept step updates while actually playing — prevents
-                    // the step counter from ticking on boot / pause / disconnect
-                    // if a stray SYS_STEP arrives or SYS_PLAY_STATE was lost.
+                    // S3 drives the sequencer clock (local 16th-note timer)
+                    // and sends SYS_STEP over UART on every advance. This is
+                    // THE authoritative step signal — UART is low-latency and
+                    // lossless, unlike Master's 8 Hz UDP step_sync. Always
+                    // follow it while playing.
                     if (p4.is_playing) p4.current_step = val;
                     else               p4.current_step = 0;
                     break;

@@ -486,6 +486,11 @@ static void handleP4SdLoadMidi(uint8_t slot) {
         if (midi_bpm > 0.0f) {
             RED808_LOG_PRINTF("[MIDI] Tempo from file: %.1f BPM\n", midi_bpm);
             applyBPMPrecise(midi_bpm, true);
+        } else {
+            // MIDI file had no tempo meta: re-broadcast current BPM so the
+            // P4 sequencer header doesn't sit at 0.0 after loading.
+            RED808_LOG_PRINTLN("[MIDI] No tempo meta, re-sending current BPM");
+            applyBPMPrecise(currentBPMPrecise, true);
         }
         handleMidiPatternLoaded(slot, steps, name, plen);
     }

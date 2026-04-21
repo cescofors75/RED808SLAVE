@@ -377,7 +377,10 @@ static void processJson(const char* json, int len) {
     }
     // ----- Step update (visual tick from Master) -----
     else if (strcmp(cmd, "step_update") == 0 || strcmp(cmd, "step_sync") == 0) {
-        // Keep local step clock, just confirm Master is alive
+        // Master's UDP step_sync arrives at ~8 Hz and can be lossy.
+        // S3's UART SYS_STEP is the primary clock. Keep this handler as a
+        // NO-OP for step position to avoid fighting — just confirm Master
+        // is alive (already done above via lastMasterPacket).
     }
     // ----- Volume -----
     else if (strcmp(cmd, "volume_sync") == 0 || strcmp(cmd, "master_volume_sync") == 0 ||

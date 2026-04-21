@@ -1196,6 +1196,7 @@ static lv_obj_t* seq_beat_bg[4]         = {};  // beat group shading panels
 static lv_obj_t* seq_playhead_line      = NULL; // glowing vertical playhead
 static lv_obj_t* seq_status_step_lbl    = NULL; // bottom "STEP 05 / 16"
 static lv_obj_t* seq_status_pat_lbl     = NULL; // bottom "PATTERN 01"
+static lv_obj_t* seq_status_bpm_lbl     = NULL; // bottom "BPM 120.0"
 static int        seq_step_x[16]        = {};  // precomputed step column X
 
 // ── Multi-bar pagination (populated by MEM-MIDI load with raw grid) ────────
@@ -1209,8 +1210,21 @@ static lv_obj_t*  seq_hdr_play_btn      = NULL;
 static lv_obj_t*  seq_hdr_play_lbl      = NULL;
 static lv_obj_t*  seq_hdr_pat_lbl       = NULL;
 
+// Last-loaded MIDI info — kept so the info button in the sequencer header
+// can re-open the summary modal on demand.
+static char   seq_last_midi_name[64]   = "";
+static int    seq_last_midi_slot       = 0;   // 1-based pattern slot
+static int    seq_last_midi_steps      = 0;   // total active hits
+static int    seq_last_midi_raw_len    = 0;   // 16/32/48/64
+static float  seq_last_midi_bpm        = 0.0f;
+static int    seq_last_midi_tracks     = 0;
+static bool   seq_last_midi_valid      = false;
+
 static void seq_apply_page_styles(void);
 static void seq_copy_page_to_p4(int page);
+static void show_midi_load_summary(const char* title, int slot,
+                                   int steps, int raw_len, float bpm,
+                                   int tracks_used);
 
 // Layout — landscape 1024×600 (LCD native, LVGL canvas)
 static const int SEQ_RULER_Y    = 44;   // ruler starts below header
@@ -1252,17 +1266,49 @@ static void seq_mute_cb(lv_event_t* e) {
         bool next = !p4.track_muted[track];
         p4.track_muted[track] = next;
         if (ui_use_udp_transport()) udp_send_mute(track, next);
+        // Relay mute to S3 so the sequencer trigger engine honors it.
+        uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), next ? 1 : 0);
     }
 }
+
+// Saved mute state before a solo was engaged — restored on un-solo so the
+// user's prior mute selections aren't lost.
+static bool seq_saved_mute[16] = {};
+static bool seq_solo_engaged   = false;
 
 static void seq_solo_cb(lv_event_t* e) {
     int track = (int)(intptr_t)lv_event_get_user_data(e);
     if (track >= 16) return;
-    // Exclusive solo: toggle OFF if already soloed; otherwise clear all and solo this one
-    bool newSolo = !p4.track_solo[track];
-    for (int i = 0; i < 16; i++) p4.track_solo[i] = false;
-    p4.track_solo[track] = newSolo;
-    if (ui_use_udp_transport()) udp_send_solo(track, newSolo);
+    bool wasSolo = p4.track_solo[track];
+
+    if (wasSolo) {
+        // Un-solo: clear solo flag and restore saved mute states.
+        p4.track_solo[track] = false;
+        seq_solo_engaged = false;
+        for (int t = 0; t < 16; t++) {
+            p4.track_muted[t] = seq_saved_mute[t];
+            if (ui_use_udp_transport()) udp_send_mute(t, p4.track_muted[t]);
+            uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (t & 0x0F),
+                            p4.track_muted[t] ? 1 : 0);
+        }
+    } else {
+        // Engage solo: if first time, remember current mute state.
+        if (!seq_solo_engaged) {
+            for (int t = 0; t < 16; t++) seq_saved_mute[t] = p4.track_muted[t];
+            seq_solo_engaged = true;
+        }
+        // Exclusive: clear other solos, mute all non-solo tracks.
+        for (int i = 0; i < 16; i++) p4.track_solo[i] = false;
+        p4.track_solo[track] = true;
+        for (int t = 0; t < 16; t++) {
+            bool shouldMute = (t != track);
+            p4.track_muted[t] = shouldMute;
+            if (ui_use_udp_transport()) udp_send_mute(t, shouldMute);
+            uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (t & 0x0F),
+                            shouldMute ? 1 : 0);
+        }
+    }
+    if (ui_use_udp_transport()) udp_send_solo(track, p4.track_solo[track]);
 }
 
 // ── Pagination helpers ─────────────────────────────────────────────────────
@@ -1424,6 +1470,33 @@ static void create_sequencer_screen(void) {
             lv_obj_center(seq_page_lbls[p]);
         }
         seq_apply_page_styles();
+
+        // Info button (top-right corner) — re-opens the last MIDI summary.
+        {
+            const int IW = 40;
+            lv_obj_t* info = lv_btn_create(scr_sequencer);
+            lv_obj_set_size(info, IW, HH);
+            lv_obj_set_pos(info, LCD_H_RES - IW - 8, HY);
+            lv_obj_set_style_radius(info, 8, 0);
+            lv_obj_set_style_bg_color(info, RED808_SURFACE, 0);
+            lv_obj_set_style_border_width(info, 1, 0);
+            lv_obj_set_style_border_color(info, RED808_CYAN, 0);
+            lv_obj_set_style_shadow_width(info, 0, 0);
+            lv_obj_add_event_cb(info, [](lv_event_t*){
+                if (!seq_last_midi_valid) return;
+                show_midi_load_summary(seq_last_midi_name,
+                                       seq_last_midi_slot,
+                                       seq_last_midi_steps,
+                                       seq_last_midi_raw_len,
+                                       seq_last_midi_bpm,
+                                       seq_last_midi_tracks);
+            }, LV_EVENT_CLICKED, NULL);
+            lv_obj_t* il = lv_label_create(info);
+            lv_label_set_text(il, "i");
+            lv_obj_set_style_text_font(il, &lv_font_montserrat_20, 0);
+            lv_obj_set_style_text_color(il, RED808_CYAN, 0);
+            lv_obj_center(il);
+        }
     }
 
     // ── Precompute step X positions ──
@@ -1635,6 +1708,7 @@ static void create_sequencer_screen(void) {
         lv_obj_set_style_text_font(bpm_lbl, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(bpm_lbl, RED808_INFO, 0);
         lv_obj_set_pos(bpm_lbl, LCD_H_RES - 90, SEQ_STATUS_Y + 2);
+        seq_status_bpm_lbl = bpm_lbl;
     }
 }   // end create_sequencer_screen
 
@@ -1677,6 +1751,9 @@ static void update_sequencer_screen(void) {
     }
     if (seq_status_pat_lbl) {
         lv_label_set_text_fmt(seq_status_pat_lbl, "PATTERN %02d", p4.current_pattern + 1);
+    }
+    if (seq_status_bpm_lbl) {
+        lv_label_set_text_fmt(seq_status_bpm_lbl, "BPM %d.%d", p4.bpm_int, p4.bpm_frac);
     }
 
     // ── Sequencer header play/pause + pattern number ──
@@ -2090,6 +2167,16 @@ static void midi_summary_ok_cb(lv_event_t* e) {
 static void show_midi_load_summary(const char* title, int slot,
                                    int steps, int raw_len, float bpm,
                                    int tracks_used) {
+    // Remember last summary so the sequencer info button can re-open it.
+    snprintf(seq_last_midi_name, sizeof(seq_last_midi_name), "%s",
+             title ? title : "(unknown)");
+    seq_last_midi_slot    = slot;
+    seq_last_midi_steps   = steps;
+    seq_last_midi_raw_len = raw_len;
+    seq_last_midi_bpm     = bpm;
+    seq_last_midi_tracks  = tracks_used;
+    seq_last_midi_valid   = true;
+
     if (midi_summary_modal) {
         lv_obj_del(midi_summary_modal);
         midi_summary_modal = NULL;
@@ -2324,6 +2411,31 @@ static void sd_refresh_ui(void) {
             lv_label_set_text(sd_midi_status_lbl, buf);
             lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_SUCCESS, 0);
         }
+    }
+
+    // ── Trigger summary modal on SD-load success transition ──
+    // The SD path delegates parsing to S3; the pattern + BPM arrive via
+    // separate UART/UDP messages. When midi_load_result transitions from
+    // "in-progress" to a valid slot we show the same modal as the MEM
+    // path, counting hits from the already-applied p4.steps.
+    {
+        static int8_t s_prev_midi_load_result = -2;
+        int8_t r = p4sd.midi_load_result;
+        if (p4sd.selected_is_midi && r >= 0 && r < 16 &&
+            s_prev_midi_load_result != r) {
+            int hits = 0, tracks_used = 0;
+            for (int t = 0; t < 16; t++) {
+                bool used = false;
+                for (int s = 0; s < 16; s++) {
+                    if (p4.steps[t][s]) { hits++; used = true; }
+                }
+                if (used) tracks_used++;
+            }
+            float bpm = p4.bpm_int + p4.bpm_frac * 0.1f;
+            show_midi_load_summary(p4sd.selected_file, r + 1,
+                                   hits, 16, bpm, tracks_used);
+        }
+        s_prev_midi_load_result = r;
     }
 
     if (!p4sd.mounted) {
@@ -2759,6 +2871,7 @@ static void ui_reload_themed_screens(void) {
     seq_playhead_line = NULL;
     seq_status_step_lbl = NULL;
     seq_status_pat_lbl = NULL;
+    seq_status_bpm_lbl = NULL;
     for (int i = 0; i < 16; i++) {
         vol_sliders[i] = NULL; vol_labels[i] = NULL;
         vol_name_labels[i] = NULL; vol_mute_dots[i] = NULL;
