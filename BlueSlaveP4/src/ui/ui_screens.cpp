@@ -2020,6 +2020,11 @@ static lv_obj_t* sd_midi_info_lbl     = NULL;
 static lv_obj_t* sd_midi_status_lbl   = NULL;
 static int        sd_midi_target_slot  = 6;   // default: P07
 static bool       sd_is_midi_mode      = false;
+// 0 = PRO (merge all channels, dense drum sequencer feel)
+// 1 = STD (GM drum channel 9 only, closer to a standard MIDI player)
+static int        sd_midi_import_mode  = 0;
+static lv_obj_t*  sd_midi_mode_pro_btn = NULL;
+static lv_obj_t*  sd_midi_mode_std_btn = NULL;
 
 // Forward declarations
 static void sd_refresh_ui(void);
@@ -2257,7 +2262,8 @@ static void sd_midi_load_btn_cb(lv_event_t* e) {
         int  steps_found = 0, raw_len = 0;
         float bpm = 0;
         bool ok = mem_midi::load_pattern_raw(path, seq_raw_grid, name, sizeof(name),
-                                             &steps_found, &bpm, &raw_len);
+                                             &steps_found, &bpm, &raw_len,
+                                             sd_midi_import_mode);
         if (!ok) {
             if (sd_midi_status_lbl) {
                 lv_label_set_text(sd_midi_status_lbl, "MEM parse failed");
@@ -2744,6 +2750,74 @@ static void create_sdcard_screen(void) {
             sd_midi_pat_btns[i] = btn;
             lv_obj_add_event_cb(btn, sd_midi_pat_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)slot_id);
         }
+    }
+
+    // Import-mode selector: PRO / STD
+    {
+        lv_obj_t* ml = lv_label_create(sd_midi_section);
+        lv_label_set_text(ml, "IMPORT MODE:");
+        lv_obj_set_style_text_font(ml, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(ml, RED808_CYAN, 0);
+        lv_obj_set_pos(ml, 8, 258);
+
+        auto make_mode_btn = [](lv_obj_t* parent, int x, int y, int w, int h,
+                                const char* title, const char* subtitle,
+                                bool active) -> lv_obj_t* {
+            lv_obj_t* btn = lv_btn_create(parent);
+            lv_obj_set_size(btn, w, h);
+            lv_obj_set_pos(btn, x, y);
+            lv_obj_set_style_radius(btn, 8, 0);
+            lv_obj_set_style_border_width(btn, 2, 0);
+            lv_obj_set_style_bg_color(btn,
+                active ? RED808_ACCENT : lv_color_hex(0x1A2A3A), 0);
+            lv_obj_set_style_border_color(btn,
+                active ? RED808_CYAN : lv_color_hex(0x334455), 0);
+            lv_obj_t* t = lv_label_create(btn);
+            lv_label_set_text(t, title);
+            lv_obj_set_style_text_font(t, &lv_font_montserrat_18, 0);
+            lv_obj_set_style_text_color(t,
+                active ? lv_color_white() : RED808_TEXT, 0);
+            lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 6);
+            lv_obj_t* s = lv_label_create(btn);
+            lv_label_set_text(s, subtitle);
+            lv_obj_set_style_text_font(s, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(s,
+                active ? lv_color_white() : RED808_TEXT_DIM, 0);
+            lv_obj_align(s, LV_ALIGN_BOTTOM_MID, 0, -4);
+            return btn;
+        };
+
+        int mb_w = (RIGHT_W - 16 - 10) / 2;
+        int mb_h = 50;
+        sd_midi_mode_pro_btn = make_mode_btn(sd_midi_section,
+            0, 282, mb_w, mb_h, "PRO", "all channels",
+            sd_midi_import_mode == 0);
+        sd_midi_mode_std_btn = make_mode_btn(sd_midi_section,
+            mb_w + 10, 282, mb_w, mb_h, "STD", "GM drums only",
+            sd_midi_import_mode == 1);
+
+        lv_obj_add_event_cb(sd_midi_mode_pro_btn, [](lv_event_t*){
+            sd_midi_import_mode = 0;
+            if (sd_midi_mode_pro_btn) {
+                lv_obj_set_style_bg_color(sd_midi_mode_pro_btn, RED808_ACCENT, 0);
+                lv_obj_set_style_border_color(sd_midi_mode_pro_btn, RED808_CYAN, 0);
+            }
+            if (sd_midi_mode_std_btn) {
+                lv_obj_set_style_bg_color(sd_midi_mode_std_btn, lv_color_hex(0x1A2A3A), 0);
+                lv_obj_set_style_border_color(sd_midi_mode_std_btn, lv_color_hex(0x334455), 0);
+            }
+        }, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(sd_midi_mode_std_btn, [](lv_event_t*){
+            sd_midi_import_mode = 1;
+            if (sd_midi_mode_std_btn) {
+                lv_obj_set_style_bg_color(sd_midi_mode_std_btn, RED808_ACCENT, 0);
+                lv_obj_set_style_border_color(sd_midi_mode_std_btn, RED808_CYAN, 0);
+            }
+            if (sd_midi_mode_pro_btn) {
+                lv_obj_set_style_bg_color(sd_midi_mode_pro_btn, lv_color_hex(0x1A2A3A), 0);
+                lv_obj_set_style_border_color(sd_midi_mode_pro_btn, lv_color_hex(0x334455), 0);
+            }
+        }, LV_EVENT_CLICKED, NULL);
     }
 
     // LOAD MIDI PATTERN button

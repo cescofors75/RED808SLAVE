@@ -372,7 +372,8 @@ bool load_pattern_raw(const char* path,
                       int name_max,
                       int* steps_found_out,
                       float* bpm_out,
-                      int* raw_len_out) {
+                      int* raw_len_out,
+                      int mode) {
     for (int t = 0; t < 16; t++)
         for (int s = 0; s < 64; s++) raw_steps[t][s] = false;
 
@@ -394,11 +395,17 @@ bool load_pattern_raw(const char* path,
         return false;
     }
 
-    uint16_t tpq = parseFile(path, -2, &tempo_us);
+    // Mode 0 (PRO): merge all channels with per-channel kit mapping.
+    // Mode 1 (STD): only GM channel 9 (drum kit). If that yields zero
+    //               events, fall back to all-channels so the user still
+    //               gets something audible.
+    int primary_filter = (mode == 1) ? 9 : -2;
+    uint16_t tpq = parseFile(path, primary_filter, &tempo_us);
     if (tpq == 0) return false;
     if (s_evcount == 0) {
         s_evcount = 0;
         s_evbuf_overflow = false;
+        // Fallback: -1 (legacy any-channel, same path as load_pattern)
         tpq = parseFile(path, -1, &tempo_us);
         if (tpq == 0) return false;
     }

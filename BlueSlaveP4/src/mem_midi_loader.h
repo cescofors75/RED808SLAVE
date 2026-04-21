@@ -32,13 +32,19 @@ bool load_pattern(const char* path,
 // raw_steps[track][step] covers up to 64 steps (4 bars × 16). raw_len_out
 // returns the actually used length (16/32/48/64). Caller can page through
 // bars in the UI without re-parsing.
+//
+// mode: 0 = PRO (merge all channels, map each channel to a kit slot —
+//              dense, uses every instrument as percussion).
+//       1 = STD (parse ONLY GM channel 9 = drum kit — closest to what a
+//              standard MIDI player like Windows plays as drums).
 bool load_pattern_raw(const char* path,
                       bool raw_steps[16][64],
                       char* name_out,
                       int name_max,
                       int* steps_found_out = nullptr,
                       float* bpm_out = nullptr,
-                      int* raw_len_out = nullptr);
+                      int* raw_len_out = nullptr,
+                      int mode = 0);
 
 // List .mid files in a SPIFFS directory. Writes up to `cap` names (stems only,
 // no extension) truncated to 47 chars. Returns the count written (<= cap).
