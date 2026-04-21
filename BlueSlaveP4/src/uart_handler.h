@@ -113,6 +113,12 @@ struct P4SdState {
     char selected_file[64];
     int  selected_pad;
     bool selected_is_midi;   // true when selected entry is a .mid file
+    // MIDI load result status (for UI feedback):
+    //   -2 = idle / no request in flight
+    //   -1 = request in flight (waiting for S3 response)
+    //    0..N = loaded OK into pattern slot N
+    //  0x7F = parse/load failed on S3 (payload == 0xFF)
+    int8_t midi_load_result;
     P4SdEntry entries[P4_SD_MAX_ENTRIES];
     int  entry_count;
     bool list_complete;

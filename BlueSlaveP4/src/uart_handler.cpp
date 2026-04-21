@@ -47,6 +47,9 @@ void uart_handler_init(void) {
     p4.sample_rate_hz = 44100;
     for (int i = 0; i < 16; i++) p4.track_volume[i] = 75;
 
+    // SD / MIDI load state
+    p4sd.midi_load_result = -2;  // idle
+
     P4_LOG_PRINTF("[UART] Init port %d: TX=%d RX=%d @ %d baud\n",
                   UART_S3_PORT, UART_S3_TX_PIN, UART_S3_RX_PIN, UART_BAUD_RATE);
 }
@@ -138,6 +141,10 @@ void uart_send_sd_load(uint8_t pad) {
 }
 
 void uart_send_sd_load_midi(uint8_t slot) {
+    // Mark load as in-flight so the UI shows a waiting state until the
+    // S3 responds with SD_RESP_LOAD_OK (success slot) or 0xFF (fail).
+    p4sd.midi_load_result = -1;
+    p4sd.needs_refresh = true;
     uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SD_LOAD_MIDI, slot);
 }
 
@@ -400,11 +407,12 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
             case SD_RESP_LOAD_OK:
                 p4sd.needs_refresh = true;
                 // Update UI feedback from LVGL context (p4sd state read in sd_refresh_ui)
-                // The payload[0]==0xFF signals MIDI parse failure
+                // The payload[0]==0xFF signals MIDI parse failure.
+                // IMPORTANT: do NOT overwrite p4sd.selected_pad — that is the
+                // user-selected drum pad for WAV sample load. Use a dedicated
+                // status field so the two flows don't interfere.
                 if (len >= 1 && p4sd.selected_is_midi) {
-                    // Store result for UI to display
-                    // 0xFF = error, otherwise = slot number
-                    p4sd.selected_pad = (payload[0] == 0xFF) ? -1 : (int)payload[0];
+                    p4sd.midi_load_result = (payload[0] == 0xFF) ? 0x7F : (int8_t)payload[0];
                 }
                 break;
         }

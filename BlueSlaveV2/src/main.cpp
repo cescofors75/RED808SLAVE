@@ -579,13 +579,70 @@ void handleMidiPatternLoaded(int slot, const bool steps[16][64], const char* nam
     currentPattern = slot;
     needsFullRedraw = true;
 
-    // Send to Master via UDP: selectPattern + all active steps + pattern length
-    selectPatternOnMaster(slot);
+    // --- Push to Master via UDP ---------------------------------------------
+    // Order matters: stop → selectPattern → setPatternLength → clear residual
+    // steps → setStep (throttled) → small pause → start.
+    //
+    // The old code used selectPatternOnMaster() which also calls
+    // requestPatternFromMaster() — that triggered a pattern_sync echo with
+    // the master's (empty) slot content and could race with our setStep
+    // burst. Also a naive 256-packet UDP burst drops packets on WiFi; we
+    // throttle every 8 packets like sendFullPatternToMaster() does.
     if (udpConnected) {
-        // Notify master of actual pattern length
-        char lbuf[64];
-        snprintf(lbuf, sizeof(lbuf), "{\"cmd\":\"setPatternLength\",\"length\":%d}", len);
-        sendUDPCommand(lbuf);
+        // Stop current playback before swapping pattern so the audio engine
+        // never mixes the old pattern with a half-loaded new one.
+        bool wasPlaying = isPlaying;
+        if (wasPlaying) {
+            JsonDocument d(&sramAllocator);
+            d["cmd"] = "stop";
+            sendUDPCommand(d);
+            isPlaying = false;
+            uart_bridge_send_play_state(false);
+            delay(20);
+        }
+
+        // Select target pattern slot on master (no get_pattern echo).
+        {
+            JsonDocument d(&sramAllocator);
+            d["cmd"] = "selectPattern";
+            d["index"] = slot;
+            sendUDPCommand(d);
+        }
+        delay(20);
+
+        // Tell master the real pattern length (1..4 bars).
+        {
+            char lbuf[64];
+            snprintf(lbuf, sizeof(lbuf), "{\"cmd\":\"setPatternLength\",\"length\":%d}", len);
+            sendUDPCommand(lbuf);
+        }
+        delay(10);
+
+        // Clear any residual steps we previously had in this slot (based on
+        // the OLD patterns[slot] BEFORE we overwrite it with the MIDI).
+        // NOTE: patterns[slot] was already overwritten above with MIDI data,
+        // so we only clear positions that will NOT be active in the new
+        // pattern — this avoids leaving stale steps from a previous load.
+        // Since we've already overwritten, we rely on the master honoring
+        // setStep active:false for the positions we explicitly deactivate.
+        // To keep UDP traffic bounded we only deactivate the first `len`
+        // steps across all tracks that are NOT active in the new pattern.
+        int sent = 0;
+        for (int t = 0; t < Config::MAX_TRACKS; t++) {
+            for (int s = 0; s < len; s++) {
+                if (!steps[t][s]) {
+                    char buf[80];
+                    snprintf(buf, sizeof(buf),
+                        "{\"cmd\":\"setStep\",\"track\":%d,\"step\":%d,\"active\":false}", t, s);
+                    sendUDPCommand(buf);
+                    if ((++sent % 16) == 0) delay(5);
+                }
+            }
+        }
+        delay(20);
+
+        // Send active steps with throttling so nothing is dropped.
+        sent = 0;
         for (int t = 0; t < Config::MAX_TRACKS; t++) {
             for (int s = 0; s < len; s++) {
                 if (steps[t][s]) {
@@ -593,14 +650,35 @@ void handleMidiPatternLoaded(int slot, const bool steps[16][64], const char* nam
                     snprintf(buf, sizeof(buf),
                         "{\"cmd\":\"setStep\",\"track\":%d,\"step\":%d,\"active\":true}", t, s);
                     sendUDPCommand(buf);
+                    if ((++sent % 8) == 0) delay(10);
                 }
             }
+        }
+        delay(60);  // let master finish processing before start
+
+        // Always start playback — user just loaded a MIDI to play it.
+        {
+            JsonDocument d(&sramAllocator);
+            d["cmd"] = "start";
+            sendUDPCommand(d);
+        }
+        isPlaying = true;
+        uart_bridge_send_play_state(true);
+    } else {
+        // Offline: still update local play-state / UART to keep P4 in sync.
+        if (!isPlaying) {
+            isPlaying = true;
+            uart_bridge_send_play_state(true);
         }
     }
 
     // Send to P4 via UART: only first STEPS_PER_BANK steps (P4 protocol fixed at 16)
     uart_bridge_send_pattern(slot);
     uart_bridge_send_pattern_data(slot, patterns[slot].steps, Config::MAX_TRACKS);
+
+    // Navigate local UI to the sequencer so the user sees the freshly loaded
+    // pattern instead of staying on the SD browser.
+    navigateToScreen(SCREEN_SEQUENCER);
 
     RED808_LOG_PRINTF("[MIDI] Loaded pattern %d '%s' len=%d → Master + P4\n", slot + 1, name, len);
 }

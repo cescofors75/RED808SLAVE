@@ -1769,6 +1769,10 @@ static void sd_file_btn_cb(lv_event_t* e) {
         if (entry.is_midi && sd_midi_status_lbl) {
             lv_label_set_text(sd_midi_status_lbl, "");
         }
+        if (entry.is_midi) {
+            // Reset any stale load result when picking a new file
+            p4sd.midi_load_result = -2;
+        }
     }
     uart_send_sd_select((uint8_t)idx);
 }
@@ -1810,7 +1814,7 @@ static void sd_midi_pat_btn_cb(lv_event_t* e) {
 static void sd_midi_load_btn_cb(lv_event_t* e) {
     (void)e;
     if (p4sd.selected_file[0] == '\0') return;
-    if (sd_midi_status_lbl) lv_label_set_text(sd_midi_status_lbl, "Sending to S3...");
+    if (sd_midi_status_lbl) lv_label_set_text(sd_midi_status_lbl, "Loading MIDI...");
     uart_send_sd_load_midi((uint8_t)sd_midi_target_slot);
 }
 
@@ -1853,9 +1857,21 @@ static void sd_refresh_ui(void) {
         else
             lv_obj_add_state(sd_midi_load_btn, LV_STATE_DISABLED);
     }
-    // MIDI status: after load, selected_pad holds slot (-1=error) only for MIDI
-    if (sd_midi_status_lbl && p4sd.selected_is_midi && p4sd.selected_pad != (int)p4sd.selected_pad) {
-        // Nothing needed here — status set directly by file_btn_cb and load_btn_cb
+    // MIDI status: update label from midi_load_result set by uart_handler
+    if (sd_midi_status_lbl && p4sd.selected_is_midi) {
+        int8_t r = p4sd.midi_load_result;
+        if (r == -1) {
+            lv_label_set_text(sd_midi_status_lbl, "Loading MIDI...");
+            lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_WARNING, 0);
+        } else if (r == 0x7F) {
+            lv_label_set_text(sd_midi_status_lbl, "MIDI parse failed");
+            lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_ACCENT, 0);
+        } else if (r >= 0) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "Loaded \u2192 Pat %02d", r + 1);
+            lv_label_set_text(sd_midi_status_lbl, buf);
+            lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_SUCCESS, 0);
+        }
     }
 
     if (!p4sd.mounted) {
