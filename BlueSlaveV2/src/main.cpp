@@ -2536,8 +2536,22 @@ void handleM5Encoders() {
 // =============================================================================
 // FX ENCODER LED SYNC — write clamped value back to DFRobot hardware ring
 // =============================================================================
+static int fxLaneToDfEncoder(int lane) {
+    if (lane == 0) return 3;  // Chorus
+    if (lane == 1) return 1;  // Delay
+    if (lane == 2) return 2;  // Reverb
+    return -1;
+}
+
+static int dfEncoderToFxLane(int enc) {
+    if (enc == 1) return 1;  // Delay
+    if (enc == 2) return 2;  // Reverb
+    if (enc == 3) return 0;  // Chorus
+    return -1;
+}
+
 static void syncFxEncoderLED(int lane) {
-    int enc = lane + 1;  // lane 0→enc 1, lane 1→enc 2, lane 2→enc 3
+    int enc = fxLaneToDfEncoder(lane);
     if (enc >= DFROBOT_ENCODER_COUNT || !dfEncoderConnected[enc]) return;
     int ch = dfRobotHubChannel[enc];
     if (ch < 0) return;
@@ -2586,15 +2600,6 @@ static void toggleDfFxMute(int lane) {
 void handleDFRobotEncoders() {
     static unsigned long lastBtnMs[DFROBOT_ENCODER_COUNT] = {};
     static int laneStoredValue[3] = {0, 0, 0};
-
-    // Maps DFRobot encoder index → FX lane: enc1→Delay(1), enc2→Reverb(2), enc3→Chorus(0)
-    // Encoder 0 is BPM (no lane).
-    auto encToLane = [](int enc) -> int {
-        if (enc == 1) return 1;  // Delay
-        if (enc == 2) return 2;  // Reverb
-        if (enc == 3) return 0;  // Chorus
-        return -1;
-    };
 
     auto syncMasterEnabled = [&]() {
         masterFilter.enabled = (masterFilter.chorusAmount > 0 ||
@@ -2667,13 +2672,16 @@ void handleDFRobotEncoders() {
         }
         else {
             // DFRobot #1/#2/#3: FX lanes (Flanger / Delay / Reverb)
-            int lane = encToLane(i);
+            int lane = dfEncoderToFxLane(i);
             if (lane < 0) continue;
 
             int logical_delta = quantizeDFDelta(i, delta);
             if (logical_delta != 0) {
                 int step = Config::DF_FX_STEP;
-                laneStoredValue[lane] = constrain(laneStoredValue[lane] + logical_delta * step, 0, 127);
+                int change = logical_delta * step;
+                if (laneStoredValue[lane] == 0 && change < 0) change = -change;
+                else if (laneStoredValue[lane] == 127 && change > 0) change = -change;
+                laneStoredValue[lane] = constrain(laneStoredValue[lane] + change, 0, 127);
                 sendFxLane(lane, laneStoredValue[lane], dfFxMuted[lane]);
 
                 // Sync LED ring to clamped value (write back to DFRobot hardware)
@@ -2687,7 +2695,7 @@ void handleDFRobotEncoders() {
                     i2c_unlock();
                 }
 
-                RED808_LOG_PRINTF("[DFRobot] FX lane %d val=%d (delta=%d)\n", lane, laneStoredValue[lane], logical_delta);
+                RED808_LOG_PRINTF("[DFRobot] FX enc %d -> lane %d val=%d (delta=%d change=%d)\n", i, lane, laneStoredValue[lane], logical_delta, change);
             }
             if (buttonPressed && (millis() - lastBtnMs[i]) > Config::DF_BUTTON_GUARD_MS) {
                 lastBtnMs[i] = millis();

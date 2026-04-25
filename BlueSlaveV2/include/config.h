@@ -143,9 +143,9 @@
 #define DFROBOT_ENCODER_COUNT  4    // 4 DFRobot ring-LED rotaries via PCA9548A
 #define DFROBOT_ENCODER_ADDR   0x54  // All encoders same addr, separated by hub
 // DFRobot #1 (CH2): BPM coarse      (button = reset to default BPM)
-// DFRobot #2 (CH3): FX Flanger      (button = mute/unmute Flanger)
-// DFRobot #3 (CH4): FX Delay        (button = mute/unmute Delay)
-// DFRobot #4 (CH5): FX Reverb       (button = mute/unmute Reverb)
+// DFRobot #2 (CH3): FX Delay        (button = mute/unmute Delay)
+// DFRobot #3 (CH4): FX Reverb       (button = mute/unmute Reverb)
+// DFRobot #4 (CH5): FX Chorus       (button = mute/unmute Chorus)
 
 // M5 Unit ByteButton (up to 2x via hub channels)
 #define BYTEBUTTON_COUNT       2
