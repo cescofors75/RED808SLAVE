@@ -38,12 +38,18 @@ LV_FONT_DECLARE(lv_font_montserrat_10)
 static volatile uint16_t s_pad_q[32];
 static std::atomic<uint8_t> s_pad_qh{0};
 static std::atomic<uint8_t> s_pad_qt{0};
+static std::atomic<uint32_t> s_pad_q_drops{0};
 
 // Direct touch bypass: flag used by touch_task to early-out when not on LIVE
 static std::atomic<bool> g_live_screen_active{false};
 
 static inline void enqueue_pad_event(uint8_t pad, uint8_t velocity) {
     uint8_t h = s_pad_qh.load(std::memory_order_relaxed);
+    uint8_t t = s_pad_qt.load(std::memory_order_acquire);
+    if ((uint8_t)(h - t) >= 32) {
+        s_pad_q_drops.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     s_pad_q[h & 0x1F] = (uint16_t)((velocity << 8) | pad);
     s_pad_qh.store(h + 1, std::memory_order_release);
 }
@@ -922,7 +928,8 @@ static void update_live_screen(void) {
 
     // Spectrum bars — read from DSP task
     {
-        const SpectrumData& sp = dsp_get_spectrum();
+        SpectrumData sp;
+        dsp_get_spectrum(&sp);
         static uint8_t prev_bar_h[16] = {};
         const int MAX_BAR_H = 60;  // max bar height in pixels (pad is 143px)
         for (int i = 0; i < 16; i++) {
@@ -958,7 +965,7 @@ static lv_obj_t* fx_page_dot[2]    = {};  // page indicator dots
 static lv_obj_t* fx_page_lbl       = NULL;
 
 // FX metadata (page × 3)
-static const char*    fx_names[6]  = {"FLANGER","DELAY","REVERB","DRIVE","CUTOFF","RESONANCE"};
+static const char*    fx_names[6]  = {"CHORUS","DELAY","REVERB","DRIVE","CUTOFF","RESONANCE"};
 static const uint32_t fx_colors[6] = {0x58A6FF, 0xB58BFF, 0x39D2C0,
                                        0xFF6B35, 0xFFD700, 0xFF8F5A};
 static const char*    fx_src[6]    = {"ENC 1","ENC 2","ENC 3","POT","POT","POT"};
@@ -968,7 +975,7 @@ static void fx_toggle_cb(lv_event_t* e) {
     int cell = (int)(intptr_t)lv_event_get_user_data(e);
     if (cell < 0 || cell > 5) return;
     if (cell < 3) {
-        // Encoder FX (0=Flanger, 1=Delay, 2=Reverb)
+        // Encoder FX (0=Chorus, 1=Delay, 2=Reverb)
         int enc_id = cell;  // direct 1:1 mapping
         p4.enc_muted[enc_id] = !p4.enc_muted[enc_id];
         bool m = p4.enc_muted[enc_id];

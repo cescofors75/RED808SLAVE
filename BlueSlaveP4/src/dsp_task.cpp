@@ -9,6 +9,7 @@
 #include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/portmacro.h>
 
 // =============================================================================
 // CONFIGURATION
@@ -24,6 +25,7 @@ static constexpr uint8_t DECAY_RATE   = 6;       // amplitude units per tick
 // SHARED STATE
 // =============================================================================
 static SpectrumData s_spectrum = {};
+static portMUX_TYPE s_spectrum_mux = portMUX_INITIALIZER_UNLOCKED;
 static std::atomic<uint32_t> s_bpm_q16{(uint32_t)(120.0f * 65536.0f)};
 
 // Per-pad trigger energy — written from any core (UI/UART callbacks) and
@@ -34,8 +36,11 @@ static std::atomic<uint8_t> s_padEnergy[16] = {};
 // =============================================================================
 // PUBLIC API
 // =============================================================================
-const SpectrumData& dsp_get_spectrum() {
-    return s_spectrum;
+void dsp_get_spectrum(SpectrumData* out) {
+    if (!out) return;
+    portENTER_CRITICAL(&s_spectrum_mux);
+    *out = s_spectrum;
+    portEXIT_CRITICAL(&s_spectrum_mux);
 }
 
 void dsp_notify_pad(uint8_t pad, uint8_t velocity) {
@@ -59,6 +64,7 @@ static void dsp_task_func(void* /*arg*/) {
     for (;;) {
         bool changed = false;
 
+        portENTER_CRITICAL(&s_spectrum_mux);
         for (int i = 0; i < SPECTRUM_BARS; i++) {
             // Atomic read-and-clear of the trigger energy.
             uint8_t energy = s_padEnergy[i].exchange(0, std::memory_order_relaxed);
@@ -80,6 +86,7 @@ static void dsp_task_func(void* /*arg*/) {
         }
 
         s_spectrum.dirty = changed;
+        portEXIT_CRITICAL(&s_spectrum_mux);
 
         vTaskDelayUntil(&xLastWake, pdMS_TO_TICKS(DSP_TICK_MS));
     }
@@ -89,7 +96,7 @@ static void dsp_task_func(void* /*arg*/) {
 // INIT
 // =============================================================================
 void dsp_task_init() {
-    xTaskCreatePinnedToCore(
+    BaseType_t ok = xTaskCreatePinnedToCore(
         dsp_task_func,
         "dsp",
         DSP_TASK_STACK,
@@ -98,5 +105,9 @@ void dsp_task_init() {
         nullptr,
         DSP_CORE
     );
-    P4_LOG_PRINTLN("[DSP] Task started on Core 0");
+    if (ok == pdPASS) {
+        P4_LOG_PRINTLN("[DSP] Task started on Core 0");
+    } else {
+        P4_LOG_PRINTLN("[DSP] Failed to create task");
+    }
 }

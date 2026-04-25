@@ -113,6 +113,17 @@
 #endif
 
 // =============================================================================
+// NETWORK — ESP32-C6 hosted WiFi link to RED808 Master
+// Override these with build_flags or a local config overlay when needed.
+// =============================================================================
+#ifndef P4_WIFI_SSID
+#define P4_WIFI_SSID "RED808"
+#endif
+#ifndef P4_WIFI_PASS
+#define P4_WIFI_PASS "red808esp32"
+#endif
+
+// =============================================================================
 // UART — Connection to ESP32-S3 (binary protocol, fallback when USB disabled)
 // =============================================================================
 #ifndef UART_S3_TX_PIN

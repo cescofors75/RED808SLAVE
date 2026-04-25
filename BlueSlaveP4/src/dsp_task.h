@@ -12,8 +12,8 @@ struct SpectrumData {
     bool    dirty;          // true when new data available for UI
 };
 
-// Access current spectrum snapshot (thread-safe read from UI)
-const SpectrumData& dsp_get_spectrum();
+// Copy current spectrum snapshot (thread-safe read from UI)
+void dsp_get_spectrum(SpectrumData* out);
 
 // Notify DSP task that a pad was triggered (call from any core)
 void dsp_notify_pad(uint8_t pad, uint8_t velocity);

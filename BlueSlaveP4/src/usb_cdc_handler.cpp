@@ -8,9 +8,11 @@
 #include "usb_cdc_handler.h"
 #include "../include/config.h"
 #include <Arduino.h>
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <freertos/portmacro.h>
 #include "usb/usb_host.h"
 #include "usb/cdc_acm_host.h"
 
@@ -23,6 +25,7 @@
 static uint8_t  usbRxBuf[USB_RX_BUF_SIZE];
 static volatile int usbRxHead = 0;
 static volatile int usbRxTail = 0;
+static portMUX_TYPE s_usb_rx_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // CDC device handle
 static cdc_acm_dev_hdl_t s_cdc_dev = NULL;
@@ -33,11 +36,12 @@ static const unsigned long OPEN_RETRY_MS = 2000;
 static int s_open_attempts = 0;
 
 // Diagnostic counters (persist across connections)
-static volatile int s_connect_count = 0;
-static volatile int s_disconnect_count = 0;
-static volatile int s_dev_detect_count = 0;
-static volatile int s_last_open_err = 0;
-static volatile int s_last_dtr_err = 0;
+static std::atomic<int> s_connect_count{0};
+static std::atomic<int> s_disconnect_count{0};
+static std::atomic<int> s_dev_detect_count{0};
+static std::atomic<int> s_last_open_err{0};
+static std::atomic<int> s_last_dtr_err{0};
+static std::atomic<uint32_t> s_rx_drop_count{0};
 static char s_status_buf[128] = "not-init";
 
 // =============================================================================
@@ -46,13 +50,17 @@ static char s_status_buf[128] = "not-init";
 
 // Called by CDC driver when data arrives from S3
 static bool on_cdc_rx(const uint8_t *data, size_t data_len, void *user_arg) {
+    portENTER_CRITICAL(&s_usb_rx_mux);
     for (size_t i = 0; i < data_len; i++) {
         int next = (usbRxHead + 1) % USB_RX_BUF_SIZE;
         if (next != usbRxTail) {  // drop if full
             usbRxBuf[usbRxHead] = data[i];
             usbRxHead = next;
+        } else {
+            s_rx_drop_count.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    portEXIT_CRITICAL(&s_usb_rx_mux);
     return true;
 }
 
@@ -61,15 +69,17 @@ static void on_cdc_event(const cdc_acm_host_dev_event_data_t *event, void *user_
     char buf[128];
     switch (event->type) {
         case CDC_ACM_HOST_DEVICE_DISCONNECTED:
-            s_disconnect_count++;
+            {
+            int disconnect_count = s_disconnect_count.fetch_add(1, std::memory_order_relaxed) + 1;
             snprintf(buf, sizeof(buf), "[USB-CDC] DISCONNECTED (#%d) at %lums\n",
-                     s_disconnect_count, millis());
+                     disconnect_count, millis());
             P4_LOG_PRINT(buf);
             if (s_cdc_dev) {
                 cdc_acm_host_close(s_cdc_dev);
                 s_cdc_dev = NULL;
             }
             s_usb_connected = false;
+            }
             break;
         case CDC_ACM_HOST_ERROR:
             snprintf(buf, sizeof(buf), "[USB-CDC] ERROR: %d at %lums\n",
@@ -86,7 +96,7 @@ static void on_cdc_event(const cdc_acm_host_dev_event_data_t *event, void *user_
 
 // Called when ANY new USB device is detected by the host
 static void on_new_dev(usb_device_handle_t usb_dev) {
-    s_dev_detect_count++;
+    s_dev_detect_count.fetch_add(1, std::memory_order_relaxed);
     // Use snprintf to build one message at a time (avoids race conditions on Serial)
     char buf[256];
 
@@ -189,17 +199,17 @@ void usb_cdc_init(void) {
 // Helper: finalize connection after successful open
 static void finalize_connection(const char* method) {
     s_usb_connected = true;
-    s_connect_count++;
+    int connect_count = s_connect_count.fetch_add(1, std::memory_order_relaxed) + 1;
 
     char buf[128];
     snprintf(buf, sizeof(buf), "[USB-CDC] CONNECTED #%d via %s at %lums\n",
-             s_connect_count, method, millis());
+             connect_count, method, millis());
     P4_LOG_PRINT(buf);
 
     // DO NOT assert DTR — CH343 auto-reset circuit pulses ESP32-S3 EN on DTR=true
     // With DTR=false the CDC data channel still works normally
     esp_err_t err = cdc_acm_host_set_control_line_state(s_cdc_dev, false, false);
-    s_last_dtr_err = err;
+    s_last_dtr_err.store((int)err, std::memory_order_relaxed);
     snprintf(buf, sizeof(buf), "[USB-CDC] DTR/RTS (no-reset): 0x%x (%s)\n", err, esp_err_to_name(err));
     P4_LOG_PRINT(buf);
 
@@ -290,15 +300,23 @@ bool usb_cdc_connected(void) {
 }
 
 int usb_cdc_available(void) {
+    portENTER_CRITICAL(&s_usb_rx_mux);
     int h = usbRxHead;
     int t = usbRxTail;
-    return (h - t + USB_RX_BUF_SIZE) % USB_RX_BUF_SIZE;
+    int available = (h - t + USB_RX_BUF_SIZE) % USB_RX_BUF_SIZE;
+    portEXIT_CRITICAL(&s_usb_rx_mux);
+    return available;
 }
 
 int usb_cdc_read(void) {
-    if (usbRxHead == usbRxTail) return -1;
+    portENTER_CRITICAL(&s_usb_rx_mux);
+    if (usbRxHead == usbRxTail) {
+        portEXIT_CRITICAL(&s_usb_rx_mux);
+        return -1;
+    }
     uint8_t b = usbRxBuf[usbRxTail];
     usbRxTail = (usbRxTail + 1) % USB_RX_BUF_SIZE;
+    portEXIT_CRITICAL(&s_usb_rx_mux);
     return b;
 }
 
@@ -311,9 +329,13 @@ size_t usb_cdc_write(const uint8_t* data, size_t len) {
 const char* usb_cdc_status_str(void) {
     // Update status buffer with current counters
     snprintf(s_status_buf, sizeof(s_status_buf),
-             "init=%d det=%d conn=%d/%d att=%d dtr=0x%x",
-             (int)s_usb_init_ok, s_dev_detect_count,
-             s_connect_count, s_disconnect_count,
-             s_open_attempts, s_last_dtr_err);
+             "init=%d det=%d conn=%d/%d att=%d dtr=0x%x drop=%lu",
+             (int)s_usb_init_ok,
+             s_dev_detect_count.load(std::memory_order_relaxed),
+             s_connect_count.load(std::memory_order_relaxed),
+             s_disconnect_count.load(std::memory_order_relaxed),
+             s_open_attempts,
+             s_last_dtr_err.load(std::memory_order_relaxed),
+             (unsigned long)s_rx_drop_count.load(std::memory_order_relaxed));
     return s_status_buf;
 }

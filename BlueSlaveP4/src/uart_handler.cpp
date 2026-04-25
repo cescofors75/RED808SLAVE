@@ -25,9 +25,16 @@ UartStats uart_stats = {};
 // UART instance
 static HardwareSerial UartS3(UART_S3_PORT);
 
-// Circular receive buffer
-static uint8_t rxBuf[UART_RX_BUF];
-static int rxHead = 0;
+// Independent receive parsers per transport. UART and USB can be active at the
+// same time during bring-up, so they must not share framing state.
+struct RxParser {
+    uint8_t buf[UART_RX_BUF];
+    int head;
+};
+static RxParser s_uart_rx = {{0}, 0};
+#if P4_USB_CDC_ENABLED
+static RxParser s_usb_rx = {{0}, 0};
+#endif
 
 // Tempo lock: absolute millis() until which incoming BPM updates from S3 are
 // ignored (set by uart_lock_tempo() after applying a MIDI-file tempo).
@@ -498,12 +505,12 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
 static int s_totalDiscarded = 0;
 static int s_processed = 0;
 
-// Feed one byte into the protocol parser (shared by UART and USB sources)
-static void feed_byte(uint8_t b) {
-    rxBuf[rxHead] = b;
+// Feed one byte into one transport's protocol parser.
+static void feed_byte(RxParser& parser, uint8_t b) {
+    parser.buf[parser.head] = b;
 
     // Look for start byte
-    if (rxHead == 0) {
+    if (parser.head == 0) {
         if (b != UART_START_BASIC && b != UART_START_EXTENDED) {
             s_totalDiscarded++;
             uart_stats.rx_framing_errors++;
@@ -514,54 +521,54 @@ static void feed_byte(uint8_t b) {
         }
     }
 
-    rxHead++;
+    parser.head++;
 
     // Basic packet complete?
-    if (rxBuf[0] == UART_START_BASIC && rxHead >= UART_BASIC_LEN) {
-        UartBasicPacket* pkt = (UartBasicPacket*)rxBuf;
-        if (uart_validate_basic(pkt)) {
+    if (parser.buf[0] == UART_START_BASIC && parser.head >= UART_BASIC_LEN) {
+        UartBasicPacket* pkt = (UartBasicPacket*)parser.buf;
+        if (uart_validate_packet(pkt)) {
             process_basic(pkt);
             uart_stats.rx_packets++;
             s_processed++;
         } else {
             uart_stats.rx_checksum_errors++;
         }
-        rxHead = 0;
+        parser.head = 0;
     }
 
     // Extended packet header complete?
-    if (rxBuf[0] == UART_START_EXTENDED && rxHead >= UART_EXT_HEADER_LEN) {
-        UartExtendedHeader* hdr = (UartExtendedHeader*)rxBuf;
+    if (parser.buf[0] == UART_START_EXTENDED && parser.head >= UART_EXT_HEADER_LEN) {
+        UartExtendedHeader* hdr = (UartExtendedHeader*)parser.buf;
         int payload_len = ((int)hdr->len_h << 8) | hdr->len_l;
         int total = UART_EXT_HEADER_LEN + payload_len + 1; // +1 for checksum
 
         // Reject oversized payload up front (also catches garbage in len bytes)
-        if (payload_len > UART_EXT_MAX_PAYLOAD || total > (int)sizeof(rxBuf)) {
+        if (payload_len > UART_EXT_MAX_PAYLOAD || total > (int)sizeof(parser.buf)) {
             // Packet too large — discard and resync
             uart_stats.rx_checksum_errors++;
-            rxHead = 0;
+            parser.head = 0;
             return;
         }
 
-        if (rxHead >= total) {
+        if (parser.head >= total) {
             // Validate checksum (sum of all bytes)
             uint8_t sum = 0;
-            for (int i = 0; i < total - 1; i++) sum += rxBuf[i];
-            if (sum == rxBuf[total - 1]) {
+            for (int i = 0; i < total - 1; i++) sum += parser.buf[i];
+            if (sum == parser.buf[total - 1]) {
                 process_extended(hdr->type, hdr->id,
-                                 &rxBuf[UART_EXT_HEADER_LEN], payload_len);
+                                 &parser.buf[UART_EXT_HEADER_LEN], payload_len);
                 uart_stats.rx_packets++;
                 s_processed++;
             } else {
                 uart_stats.rx_checksum_errors++;
             }
-            rxHead = 0;
+            parser.head = 0;
         }
     }
 
     // Guard against buffer overflow
-    if (rxHead >= (int)sizeof(rxBuf)) {
-        rxHead = 0;
+    if (parser.head >= (int)sizeof(parser.buf)) {
+        parser.head = 0;
     }
 }
 
@@ -611,14 +618,14 @@ int uart_handler_process(void) {
 
     // Read from UART
     while (UartS3.available()) {
-        feed_byte((uint8_t)UartS3.read());
+        feed_byte(s_uart_rx, (uint8_t)UartS3.read());
     }
 
 #if P4_USB_CDC_ENABLED
     // Read from USB CDC (S3 via USB-C)
     while (usb_cdc_available()) {
         int b = usb_cdc_read();
-        if (b >= 0) feed_byte((uint8_t)b);
+        if (b >= 0) feed_byte(s_usb_rx, (uint8_t)b);
     }
 #endif
 

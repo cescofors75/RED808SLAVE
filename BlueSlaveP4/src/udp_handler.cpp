@@ -15,8 +15,8 @@
 // =============================================================================
 // CONFIGURATION
 // =============================================================================
-static const char*     WIFI_SSID      = "RED808";
-static const char*     WIFI_PASS      = "red808esp32";
+static const char*     WIFI_SSID      = P4_WIFI_SSID;
+static const char*     WIFI_PASS      = P4_WIFI_PASS;
 static const IPAddress MASTER_IP(192, 168, 4, 1);
 static const uint16_t  UDP_PORT       = 8888;
 
@@ -32,13 +32,24 @@ static WiFiUDP udp;
 static bool wifiConnected     = false;
 static bool udpStarted        = false;
 static bool masterAlive        = false;
-static bool syncRequested      = false;
 static unsigned long lastWifiAttempt  = 0;
 static unsigned long lastMasterPacket = 0;
 static unsigned long lastSyncRequest  = 0;
 
 // JSON parse buffer
 static char rxBuf[1024];
+
+static int clamp_int(int value, int lo, int hi) {
+    if (value < lo) return lo;
+    if (value > hi) return hi;
+    return value;
+}
+
+static float clamp_float(float value, float lo, float hi) {
+    if (value < lo) return lo;
+    if (value > hi) return hi;
+    return value;
+}
 
 // =============================================================================
 // SEND HELPERS
@@ -287,7 +298,6 @@ void udp_request_master_sync(void) {
     sendJson("{\"cmd\":\"setFilter\",\"type\":0}");
     sendJson("{\"cmd\":\"setDistortion\",\"value\":0.0}");
 
-    syncRequested = true;
     lastSyncRequest = millis();
 }
 
@@ -315,7 +325,7 @@ static void processJson(const char* json, int len) {
 
     // ----- Pattern sync -----
     if (strcmp(cmd, "pattern_sync") == 0) {
-        int pat = doc["pattern"] | p4.current_pattern;
+        int pat = clamp_int(doc["pattern"] | p4.current_pattern, 0, 15);
         JsonArray data = doc["data"];
         if (data) {
             // Check if incoming is all-empty
@@ -378,7 +388,7 @@ static void processJson(const char* json, int len) {
     }
     // ----- Tempo -----
     else if (strcmp(cmd, "tempo_sync") == 0 || strcmp(cmd, "tempo") == 0) {
-        float bpm = doc["value"] | 120.0f;
+        float bpm = clamp_float(doc["value"] | 120.0f, 40.0f, 240.0f);
         p4.bpm_int = (int)bpm;
         p4.bpm_frac = (int)((bpm - p4.bpm_int) * 10);
     }
@@ -389,16 +399,16 @@ static void processJson(const char* json, int len) {
     // ----- Volume -----
     else if (strcmp(cmd, "volume_sync") == 0 || strcmp(cmd, "master_volume_sync") == 0 ||
              strcmp(cmd, "volume_master_sync") == 0 || strcmp(cmd, "setVolume") == 0) {
-        int v = doc["value"] | 75;
+        int v = clamp_int(doc["value"] | 75, 0, 150);
         p4.master_volume = v;
         p4.seq_volume = v;
         p4.live_volume = v;
     }
     else if (strcmp(cmd, "volume_seq_sync") == 0 || strcmp(cmd, "setSequencerVolume") == 0) {
-        p4.seq_volume = doc["value"] | 75;
+        p4.seq_volume = clamp_int(doc["value"] | 75, 0, 150);
     }
     else if (strcmp(cmd, "volume_live_sync") == 0 || strcmp(cmd, "setLiveVolume") == 0) {
-        p4.live_volume = doc["value"] | 75;
+        p4.live_volume = clamp_int(doc["value"] | 75, 0, 150);
     }
     // ----- Track volumes -----
     else if (strcmp(cmd, "trackVolumes") == 0 || strcmp(cmd, "track_volumes") == 0 ||
@@ -411,41 +421,41 @@ static void processJson(const char* json, int len) {
             int i = 0;
             for (JsonVariant v : arr) {
                 if (i >= 16) break;
-                p4.track_volume[i] = v.as<int>();
+                p4.track_volume[i] = clamp_int(v.as<int>(), 0, 150);
                 i++;
             }
         }
     }
     else if (strcmp(cmd, "trackVolume") == 0 || strcmp(cmd, "getTrackVolume") == 0) {
         int trk = doc["track"] | 0;
-        int vol = doc["volume"] | doc["value"] | 75;
+        int vol = clamp_int(doc["volume"] | doc["value"] | 75, 0, 150);
         if (trk >= 0 && trk < 16) p4.track_volume[trk] = vol;
     }
     // ----- FX -----
     else if (strcmp(cmd, "setFilter") == 0) {
-        p4.filter_type = doc["type"] | doc["value"] | 0;
+        p4.filter_type = clamp_int(doc["type"] | doc["value"] | 0, 0, 4);
     }
     else if (strcmp(cmd, "setFilterCutoff") == 0) {
-        p4.cutoff_hz = doc["value"] | 20000;
+        p4.cutoff_hz = clamp_int(doc["value"] | 20000, 20, 20000);
     }
     else if (strcmp(cmd, "setFilterResonance") == 0) {
-        float r = doc["value"] | 1.0f;
+        float r = clamp_float(doc["value"] | 1.0f, 1.0f, 10.0f);
         p4.resonance_x10 = (int)(r * 10);
     }
     else if (strcmp(cmd, "setBitCrush") == 0) {
-        p4.bitcrush_bits = doc["value"] | 16;
+        p4.bitcrush_bits = clamp_int(doc["value"] | 16, 4, 16);
     }
     else if (strcmp(cmd, "setDistortion") == 0) {
-        float d = doc["value"] | 0.0f;
+        float d = clamp_float(doc["value"] | 0.0f, 0.0f, 1.0f);
         p4.distortion_pct = (int)(d * 100);
     }
     else if (strcmp(cmd, "setSampleRate") == 0) {
-        p4.sample_rate_hz = doc["value"] | 44100;
+        p4.sample_rate_hz = clamp_int(doc["value"] | 44100, 1000, 44100);
     }
     // ----- Pattern selection -----
     else if (strcmp(cmd, "selectPattern") == 0 || strcmp(cmd, "pattern_select") == 0 ||
              strcmp(cmd, "current_pattern") == 0) {
-        int idx = doc["index"] | doc["pattern"] | 0;
+        int idx = clamp_int(doc["index"] | doc["pattern"] | 0, 0, 15);
         if (idx != p4.current_pattern) {
             p4.current_pattern = idx;
             udp_send_get_pattern(idx);
@@ -486,7 +496,6 @@ static void onWiFiDisconnected(void) {
         wifiConnected = false;
         udpStarted = false;
         masterAlive = false;
-        syncRequested = false;
         p4.wifi_connected = false;
         p4.master_connected = false;
         // Clear FX latches so they are re-sent after reconnect (LP filter, etc.)
@@ -571,7 +580,7 @@ void udp_handler_process(void) {
     }
 
     // --- Re-request sync if no response ---
-    if (udpStarted && !syncRequested && !masterAlive) {
+    if (udpStarted && !masterAlive) {
         if (now - lastSyncRequest > SYNC_REQUEST_MS) {
             udp_request_master_sync();
         }

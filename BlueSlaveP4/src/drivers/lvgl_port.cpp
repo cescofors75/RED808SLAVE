@@ -236,6 +236,10 @@ void lvgl_port_init(void) {
     lvgl_mutex    = xSemaphoreCreateMutex();
     sem_vsync_end = xSemaphoreCreateBinary();
     sem_gui_ready = xSemaphoreCreateBinary();
+    if (!lvgl_mutex || !sem_vsync_end || !sem_gui_ready) {
+        P4_LOG_PRINTLN("[LVGL] Failed to create synchronization primitives");
+        return;
+    }
 
     lv_init();
 
@@ -271,7 +275,10 @@ void lvgl_port_init(void) {
     // Higher priority than LVGL render (5) so pad taps are detected immediately
     // even when LVGL is flushing a frame.
     gt911_init();
-    xTaskCreatePinnedToCore(touch_task, "touch", 4096, NULL, 6, NULL, 0);
+    BaseType_t touch_ok = xTaskCreatePinnedToCore(touch_task, "touch", 4096, NULL, 6, NULL, 0);
+    if (touch_ok != pdPASS) {
+        P4_LOG_PRINTLN("[LVGL] Failed to create touch task");
+    }
 
     // Register 5 LVGL input devices (read from cached touch_data — instant)
     for (int i = 0; i < MAX_TOUCH_POINTS; i++) {
@@ -284,7 +291,10 @@ void lvgl_port_init(void) {
 
     // LVGL rendering task — Core 0, priority 5
     // Core 1 stays free for Arduino loop (WiFi/UDP/UART)
-    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 16384, NULL, 5, NULL, 0);
+    BaseType_t lvgl_ok = xTaskCreatePinnedToCore(lvgl_task, "lvgl", 16384, NULL, 5, NULL, 0);
+    if (lvgl_ok != pdPASS) {
+        P4_LOG_PRINTLN("[LVGL] Failed to create render task");
+    }
 
     P4_LOG_PRINTF("[LVGL] Ready: %dx%d, zero-copy, vsync, touch+lvgl@Core0, wifi@Core1\n",
                   LCD_H_RES, LCD_V_RES);
@@ -295,11 +305,12 @@ void lvgl_port_update(void) {
 }
 
 bool lvgl_port_lock(int timeout_ms) {
+    if (!lvgl_mutex) return false;
     return xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 
 void lvgl_port_unlock(void) {
-    xSemaphoreGive(lvgl_mutex);
+    if (lvgl_mutex) xSemaphoreGive(lvgl_mutex);
 }
 
 void lvgl_port_task_start(void) {
