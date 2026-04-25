@@ -86,7 +86,7 @@ int uart_bridge_receive(void) {
             uint8_t buf[UART_BASIC_LEN];
             P4Serial.readBytes(buf, UART_BASIC_LEN);
             UartBasicPacket* pkt = (UartBasicPacket*)buf;
-            if (!uart_validate_basic(pkt)) { uart_stats.rx_checksum_errors++; continue; }
+            if (!uart_validate_packet(pkt)) { uart_stats.rx_checksum_errors++; continue; }
             uart_stats.rx_packets++;
             if (pkt->type == MSG_TOUCH_CMD) {
                 extern void handleP4TouchCommand(uint8_t cmdId, uint8_t value);

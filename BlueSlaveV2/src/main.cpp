@@ -19,6 +19,8 @@
 #include <DFRobot_VisualRotaryEncoder.h>
 #include <SD_MMC.h>
 #include "lvgl.h"
+#include <atomic>
+#include <freertos/portmacro.h>
 
 #include "../include/system_state.h"
 
@@ -89,8 +91,8 @@ VolumeMode volumeMode = VOL_SEQUENCER;
 bool trackMuted[Config::MAX_TRACKS];
 bool trackSolo[Config::MAX_TRACKS];
 bool livePadPressed[Config::MAX_SAMPLES];
-volatile uint32_t pendingLivePadTriggerMask = 0;
-volatile bool livePadsVisualDirty = false;
+std::atomic<uint32_t> pendingLivePadTriggerMask{0};
+std::atomic<bool> livePadsVisualDirty{false};
 
 // Filters
 TrackFilter trackFilters[Config::MAX_TRACKS];
@@ -196,6 +198,7 @@ unsigned long livePadFlashUntilMs[Config::MAX_SAMPLES];
 unsigned long livePadHoldStartMs[Config::MAX_SAMPLES];
 static uint8_t livePadRemainingRepeats[Config::MAX_SAMPLES] = {};
 static unsigned long livePadNextRepeatMs[Config::MAX_SAMPLES] = {};
+static portMUX_TYPE s_live_pad_state_mux = portMUX_INITIALIZER_UNLOCKED;
 uint8_t prevByteButtonState[BYTEBUTTON_COUNT] = {0, 0};
 bool byteButtonLivePressed[BYTEBUTTON_TOTAL_BUTTONS] = {};
 uint32_t byteButtonLedCache[BYTEBUTTON_COUNT][BYTEBUTTON_BUTTONS + 1] = {};
@@ -223,6 +226,18 @@ const char* const byteButtonActionNames[] = {
     "BPM +1",            // BB_ACTION_BPM_UP
     "BPM -1",            // BB_ACTION_BPM_DOWN
 };
+
+void resetLivePadRuntimeState() {
+    taskENTER_CRITICAL(&s_live_pad_state_mux);
+    memset(livePadPressed, 0, sizeof(bool) * Config::MAX_SAMPLES);
+    memset(livePadReleaseMs, 0, sizeof(livePadReleaseMs));
+    memset(livePadFlashUntilMs, 0, sizeof(unsigned long) * Config::MAX_SAMPLES);
+    memset(livePadHoldStartMs, 0, sizeof(unsigned long) * Config::MAX_SAMPLES);
+    memset(livePadRemainingRepeats, 0, sizeof(livePadRemainingRepeats));
+    memset(livePadNextRepeatMs, 0, sizeof(livePadNextRepeatMs));
+    taskEXIT_CRITICAL(&s_live_pad_state_mux);
+    pendingLivePadTriggerMask.store(0, std::memory_order_release);
+}
 // ─── BB MODULE 1 (I2C Hub CH4): Transport + FX mute controls ───────────────
 // ─── BB MODULE 2 (I2C Hub CH5): Navigation + BPM control ────────────────────
 uint8_t byteButtonActionMap[BYTEBUTTON_TOTAL_BUTTONS] = {
@@ -490,6 +505,12 @@ static void handleP4SdLoadMidi(uint8_t slot) {
     uint8_t resp = ok ? slot : 0xFF;
     uart_bridge_send_extended(MSG_SD_DATA, SD_RESP_LOAD_OK, &resp, 1);
     if (ok) {
+        if (midi_last_load_truncated()) {
+            diagInfo.lastError = "MIDI pattern truncated";
+            RED808_LOG_PRINTF("[MIDI] WARNING: %s truncated to internal event buffer\n", path);
+        } else {
+            diagInfo.lastError = "";
+        }
         if (midi_bpm > 0.0f) {
             RED808_LOG_PRINTF("[MIDI] Tempo from file: %.1f BPM\n", midi_bpm);
             applyBPMPrecise(midi_bpm, true);
@@ -500,6 +521,8 @@ static void handleP4SdLoadMidi(uint8_t slot) {
             applyBPMPrecise(currentBPMPrecise, true);
         }
         handleMidiPatternLoaded(slot, steps, name, plen);
+    } else {
+        diagInfo.lastError = "MIDI load failed";
     }
 }
 
@@ -714,8 +737,9 @@ static void nvs_load_settings() {
 
     if (nvs_get_u8(h, "theme", &val8) == ESP_OK && val8 < THEME_COUNT)
         currentTheme = (VisualTheme)val8;
-    // Force OCEAN as default regardless of NVS
-    currentTheme = THEME_OCEAN;
+    if (currentTheme == THEME_OCEAN) {
+        currentTheme = THEME_RED808;
+    }
     if (nvs_get_i32(h, "masterVol", &val32) == ESP_OK) {
         masterVolume = constrain((int)val32, 0, Config::MAX_VOLUME);
         hasMasterVol = true;
@@ -912,13 +936,13 @@ static int16_t filterDFDeltaJitter(int index, int16_t delta) {
 static void handleLivePadTouchMatrix(unsigned long now) {
     bool new_state[Config::MAX_SAMPLES] = {};
     if (currentScreen != SCREEN_LIVE || !gt911_is_ready()) {
-        memset(livePadPressed, 0, sizeof(bool) * Config::MAX_SAMPLES);
+        resetLivePadRuntimeState();
         return;
     }
 
     // Guard period after entering LIVE screen — ignore stale touches
     if ((now - liveScreenEnteredMs) < LIVE_TOUCH_GUARD_MS) {
-        memset(livePadPressed, 0, sizeof(bool) * Config::MAX_SAMPLES);
+        resetLivePadRuntimeState();
         return;
     }
 
@@ -936,13 +960,14 @@ static void handleLivePadTouchMatrix(unsigned long now) {
     }
 
     bool anyChanged = false;
+    taskENTER_CRITICAL(&s_live_pad_state_mux);
     for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
         if (new_state[pad]) {
             // Finger is on pad — reset release timer
             livePadReleaseMs[pad] = 0;
             if (!livePadPressed[pad]) {
                 // Rising edge — new press
-                pendingLivePadTriggerMask |= (1UL << pad);
+                pendingLivePadTriggerMask.fetch_or((1UL << pad), std::memory_order_release);
                 lastLivePadTriggerMs[pad] = now;
                 livePadFlashUntilMs[pad] = now + LIVE_PAD_FLASH_MS;
                 livePadHoldStartMs[pad] = now;
@@ -965,10 +990,11 @@ static void handleLivePadTouchMatrix(unsigned long now) {
             // else: still within debounce window — keep pad pressed (ignore brief gap)
         }
     }
+    taskEXIT_CRITICAL(&s_live_pad_state_mux);
 
     // Mark visual dirty — LVGL task (Core 1) will pick it up on next cycle (~10ms)
     if (anyChanged) {
-        livePadsVisualDirty = true;
+        livePadsVisualDirty.store(true, std::memory_order_release);
     }
 }
 
@@ -1042,8 +1068,7 @@ static bool navigateToScreen(Screen screen) {
     // Guard BEFORE screen change: prevent race with touch handler
     if (screen == SCREEN_LIVE) {
         liveScreenEnteredMs = millis();
-        memset(livePadPressed, 0, sizeof(livePadPressed));
-        pendingLivePadTriggerMask = 0;
+        resetLivePadRuntimeState();
         // Sync ByteButton edge detection: assume all buttons were pressed so
         // no phantom edges fire on the first handleByteButton() after entry.
         for (int m = 0; m < BYTEBUTTON_COUNT; m++) prevByteButtonState[m] = 0xFF;
@@ -1127,7 +1152,7 @@ void initState() {
         dfRobotPotCalMax[i] = 0;
     }
     for (int m = 0; m < BYTEBUTTON_COUNT; m++) prevByteButtonState[m] = 0;
-    pendingLivePadTriggerMask = 0;
+    resetLivePadRuntimeState();
     memset(byteButtonLivePressed, 0, sizeof(byteButtonLivePressed));
     memset(byteButtonLedCache, 0xFF, sizeof(byteButtonLedCache));
     memset(byteButtonLedInitialized, 0, sizeof(byteButtonLedInitialized));
@@ -3060,16 +3085,16 @@ void setup() {
 
     // 11. Encoder task — pri 1 = same as loop → round-robin time-slicing
     //     loop() no longer starved; gets CPU every 1ms tick for touch triggers
-    xTaskCreatePinnedToCore(encoder_task, "enc", 6144, NULL, 1, NULL, 0);
-    RED808_LOG_PRINTLN("[ENC] Encoder task started (Core 0, pri 1)");
+    BaseType_t encTaskOk = xTaskCreatePinnedToCore(encoder_task, "enc", 6144, NULL, 1, NULL, 0);
+    RED808_LOG_PRINTF("[ENC] Encoder task %s (Core 0, pri 1)\n", encTaskOk == pdPASS ? "started" : "FAILED");
 
     // 12. Touch task — highest I2C priority, preempts encoder via priority inheritance
-    xTaskCreatePinnedToCore(touch_task, "touch", 4096, NULL, 3, NULL, 0);
-    RED808_LOG_PRINTLN("[TOUCH] Touch task started (Core 0, pri 3)");
+    BaseType_t touchTaskOk = xTaskCreatePinnedToCore(touch_task, "touch", 4096, NULL, 3, NULL, 0);
+    RED808_LOG_PRINTF("[TOUCH] Touch task %s (Core 0, pri 3)\n", touchTaskOk == pdPASS ? "started" : "FAILED");
 
     // 13. Pad trigger task — prio 2, preempts loop/enc but yields to touch
-    xTaskCreatePinnedToCore(pad_trigger_task, "pads", 4096, NULL, 2, NULL, 0);
-    RED808_LOG_PRINTLN("[PADS] Pad trigger task started (Core 0, pri 2)");
+    BaseType_t padsTaskOk = xTaskCreatePinnedToCore(pad_trigger_task, "pads", 4096, NULL, 2, NULL, 0);
+    RED808_LOG_PRINTF("[PADS] Pad trigger task %s (Core 0, pri 2)\n", padsTaskOk == pdPASS ? "started" : "FAILED");
 
     // 14. Microtiming engine — seed PRNG from hardware RNG
     microtiming_init();
@@ -3110,36 +3135,45 @@ static void pad_trigger_task(void* arg) {
 
         const int padVelocity = map(constrain(livePadsVolume, 0, Config::MAX_VOLUME), 0, Config::MAX_VOLUME, 32, 127);
 
-        uint32_t mask = pendingLivePadTriggerMask;
+        uint32_t mask = pendingLivePadTriggerMask.exchange(0, std::memory_order_acq_rel);
         if (mask != 0) {
-            pendingLivePadTriggerMask = 0;
             for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
                 if ((mask & (1UL << pad)) == 0) continue;
                 sendLivePadTrigger(pad, padVelocity);
                 uart_bridge_send_pad_trigger(pad, (uint8_t)padVelocity);
+                taskENTER_CRITICAL(&s_live_pad_state_mux);
                 lastLivePadTriggerMs[pad] = now;
                 livePadFlashUntilMs[pad] = now + LIVE_PAD_FLASH_MS;
+                taskEXIT_CRITICAL(&s_live_pad_state_mux);
             }
             if (currentScreen == SCREEN_LIVE) {
-                livePadsVisualDirty = true;
+                livePadsVisualDirty.store(true, std::memory_order_release);
             }
         }
 
         // Repeat triggers (hold-to-repeat)
-        bool repeated = false;
+        uint32_t repeatMask = 0;
+        taskENTER_CRITICAL(&s_live_pad_state_mux);
         for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
             if (livePadRemainingRepeats[pad] == 0) continue;
             if (now < livePadNextRepeatMs[pad]) continue;
-            sendLivePadTrigger(pad, padVelocity);
-            uart_bridge_send_pad_trigger(pad, (uint8_t)padVelocity);
             lastLivePadTriggerMs[pad] = now;
             livePadFlashUntilMs[pad] = now + LIVE_PAD_FLASH_MS;
             livePadRemainingRepeats[pad]--;
             livePadNextRepeatMs[pad] = now + LIVE_PAD_REPEAT_INTERVAL_MS;
-            repeated = true;
+            repeatMask |= (1UL << pad);
         }
-        if (repeated && currentScreen == SCREEN_LIVE) {
-            livePadsVisualDirty = true;
+        taskEXIT_CRITICAL(&s_live_pad_state_mux);
+
+        if (repeatMask != 0) {
+            for (int pad = 0; pad < Config::MAX_SAMPLES; pad++) {
+                if ((repeatMask & (1UL << pad)) == 0) continue;
+                sendLivePadTrigger(pad, padVelocity);
+                uart_bridge_send_pad_trigger(pad, (uint8_t)padVelocity);
+            }
+        }
+        if (repeatMask != 0 && currentScreen == SCREEN_LIVE) {
+            livePadsVisualDirty.store(true, std::memory_order_release);
         }
 
         vTaskDelay(pdMS_TO_TICKS(1));  // ~1kHz — matches GT911 500Hz update rate

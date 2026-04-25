@@ -8,7 +8,7 @@
 SemaphoreHandle_t i2c_bus_mutex = NULL;
 
 bool i2c_lock(int timeout_ms) {
-    if (!i2c_bus_mutex) return true; // Before init, allow access
+    if (!i2c_bus_mutex) return false;
     return xSemaphoreTake(i2c_bus_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 
@@ -19,6 +19,10 @@ void i2c_unlock() {
 void i2c_init() {
     if (!i2c_bus_mutex) {
         i2c_bus_mutex = xSemaphoreCreateMutex();
+    }
+    if (!i2c_bus_mutex) {
+        RED808_LOG_PRINTLN("[I2C] ERROR: mutex creation failed");
+        return;
     }
     Wire.begin(I2C_SDA, I2C_SCL, I2C_FREQ);
     Wire.setBufferSize(256);  // Arduino 3.x: increase I2C buffer from default 128

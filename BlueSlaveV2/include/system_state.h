@@ -5,6 +5,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <atomic>
 #include "config.h"
 
 // =============================================================================
@@ -149,8 +150,8 @@ extern bool livePadPressed[];
 extern unsigned long livePadFlashUntilMs[];
 extern bool byteButtonLivePressed[];
 extern uint8_t prevByteButtonState[];  // per-module ByteButton bitmask state for edge detection
-extern volatile uint32_t pendingLivePadTriggerMask;
-extern volatile bool livePadsVisualDirty;
+extern std::atomic<uint32_t> pendingLivePadTriggerMask;
+extern std::atomic<bool> livePadsVisualDirty;
 extern VolumeMode volumeMode;
 
 // Filters
@@ -207,6 +208,8 @@ extern unsigned long lastWiFiConnectedMs;
 extern unsigned long lastMasterPacketMs;
 extern unsigned long lastStepUpdateMs;
 extern unsigned long lastLocalStepMs;
+
+void resetLivePadRuntimeState();
 
 // Track names
 extern const char* trackNames[];

@@ -570,8 +570,7 @@ static void nav_to(Screen screen, lv_obj_t* scr) {
     if (screen == SCREEN_LIVE) {
         extern unsigned long liveScreenEnteredMs;
         liveScreenEnteredMs = millis();
-        memset(livePadPressed, 0, sizeof(bool) * Config::MAX_SAMPLES);
-        pendingLivePadTriggerMask = 0;
+        resetLivePadRuntimeState();
         // Sync ByteButton edge-detection state: assume all buttons "were pressed"
         // so no phantom edge fires on first handleByteButton() after entering LIVE.
         for (int m = 0; m < BYTEBUTTON_COUNT; m++) prevByteButtonState[m] = 0xFF;

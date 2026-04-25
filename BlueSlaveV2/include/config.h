@@ -97,6 +97,16 @@
 // Each buffer: 20480px × 2B = 40KB SRAM. Total: 80KB internal SRAM.
 #define LCD_BOUNCE_BUF (SCREEN_WIDTH * 20)
 
+// LVGL portrait render tuning. Keep the draw buffers small and prefer internal
+// SRAM so LCD DMA and LVGL rendering do not fight over PSRAM bandwidth.
+#ifndef S3_LVGL_PORT_BUF_LINES
+#define S3_LVGL_PORT_BUF_LINES 20
+#endif
+
+#ifndef S3_LVGL_TASK_PERIOD_MS
+#define S3_LVGL_TASK_PERIOD_MS 16
+#endif
+
 // =============================================================================
 // I2C BUS (shared: GT911 touch + CH32V003 IO + PCA9548A hub)
 // =============================================================================

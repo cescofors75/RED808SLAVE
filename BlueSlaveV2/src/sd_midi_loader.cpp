@@ -409,3 +409,7 @@ bool midi_load_pattern(const char* path, bool steps[Config::MAX_TRACKS][Config::
 
     return total > 0;
 }
+
+bool midi_last_load_truncated() {
+    return s_evbuf_overflow;
+}

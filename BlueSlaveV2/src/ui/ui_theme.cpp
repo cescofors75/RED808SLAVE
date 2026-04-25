@@ -4,7 +4,7 @@
 #include "ui_theme.h"
 #include "../../include/config.h"
 
-VisualTheme currentTheme = THEME_OCEAN;
+VisualTheme currentTheme = THEME_RED808;
 
 // Mutable track colors — updated on theme change
 lv_color_t inst_colors[16] = {};

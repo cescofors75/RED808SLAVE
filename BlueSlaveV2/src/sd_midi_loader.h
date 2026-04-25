@@ -32,3 +32,5 @@ bool midi_load_pattern(const char* path,
                        float*      bpm_out         = nullptr,
                        int         midi_channel    = 9,
                        int*        length_out      = nullptr);
+
+bool midi_last_load_truncated();

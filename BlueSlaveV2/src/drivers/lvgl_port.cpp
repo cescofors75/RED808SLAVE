@@ -76,6 +76,10 @@ static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t*
 #if PORTRAIT_MODE
 static void disp_flush_portrait_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
     esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)drv->user_data;
+    if (area->x2 < 0 || area->y2 < 0 || area->x1 >= SCREEN_WIDTH || area->y1 >= SCREEN_HEIGHT) {
+        lv_disp_flush_ready(drv);
+        return;
+    }
     esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1, color_p);
     lv_disp_flush_ready(drv);
 }
@@ -114,16 +118,14 @@ static void lvgl_task(void* arg) {
 
         if (lvgl_port_lock(15)) {
             // Check if live pads need visual refresh (set by Core 0 loop)
-            if (livePadsVisualDirty && currentScreen == SCREEN_LIVE) {
-                livePadsVisualDirty = false;
+            if (livePadsVisualDirty.exchange(false) && currentScreen == SCREEN_LIVE) {
                 ui_update_live_pads();
             }
             lv_timer_handler();
             lvgl_port_unlock();
         }
-        // 10ms period — faster LVGL tick for snappier pad/step response.
-        // With the conservative 16MHz large-porch profile the display refresh stays near 17.5Hz.
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(10));
+        // Match the stable LCD profile more closely to avoid PSRAM/RGB bus saturation.
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(S3_LVGL_TASK_PERIOD_MS));
     }
 }
 
@@ -133,19 +135,32 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     lvgl_mutex    = xSemaphoreCreateMutex();
     sem_vsync_end = xSemaphoreCreateBinary();
     sem_gui_ready = xSemaphoreCreateBinary();
+    if (!lvgl_mutex || !sem_vsync_end || !sem_gui_ready) {
+        ESP_LOGE(TAG, "Failed to create LVGL synchronization primitives");
+        return;
+    }
 
     lv_init();
     rgb_lcd_register_vsync_cb(lcd_panel, lvgl_on_vsync, NULL);
 
 #if PORTRAIT_MODE
     // Portrait mode: partial rendering + sw_rotate.
-    // Allocate two render buffers in PSRAM (not the panel FBs).
-    // 60 lines (was 100) cuts PSRAM by ~80KB while still giving LVGL a full
-    // sub-frame to compose without visible tearing on the 17Hz refresh path.
-    static constexpr size_t PORT_BUF_LINES = 60;
-    const size_t buf_px = SCREEN_WIDTH * PORT_BUF_LINES;  // 1024 * 60 = 61440 px (~120KB)
-    lv_color_t* buf_a = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    lv_color_t* buf_b = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    // Prefer small internal-SRAM buffers to reduce PSRAM contention with RGB DMA.
+    static constexpr size_t PORT_BUF_LINES = S3_LVGL_PORT_BUF_LINES;
+    const size_t buf_px = SCREEN_WIDTH * PORT_BUF_LINES;
+    lv_color_t* buf_a = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    lv_color_t* buf_b = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!buf_a || !buf_b) {
+        if (buf_a) heap_caps_free(buf_a);
+        if (buf_b) heap_caps_free(buf_b);
+        buf_a = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        buf_b = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        ESP_LOGW(TAG, "Portrait draw buffers fell back to PSRAM");
+    }
+    if (!buf_a || !buf_b) {
+        ESP_LOGE(TAG, "Failed to allocate portrait draw buffers");
+        return;
+    }
     lv_disp_draw_buf_init(&draw_buf, buf_a, buf_b, buf_px);
 
     lv_disp_drv_init(&disp_drv);
@@ -167,6 +182,10 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     void* fb0 = NULL;
     void* fb1 = NULL;
     rgb_lcd_get_frame_buffers(lcd_panel, &fb0, &fb1);
+    if (!fb0 || !fb1) {
+        ESP_LOGE(TAG, "Panel framebuffers unavailable");
+        return;
+    }
 
     const size_t buf_pixels = SCREEN_WIDTH * SCREEN_HEIGHT;
     lv_disp_draw_buf_init(&draw_buf, fb0, fb1, buf_pixels);
@@ -192,7 +211,10 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     lv_indev_drv_register(&indev_drv);
 
     // LVGL task — core 1, priority 3 (higher = less preemption during flush)
-    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 12288, NULL, 3, NULL, 1);
+    BaseType_t task_ok = xTaskCreatePinnedToCore(lvgl_task, "lvgl", 12288, NULL, 3, NULL, 1);
+    if (task_ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create LVGL task");
+    }
 
     ESP_LOGI(TAG, "LVGL port: %dx%d %s, %s",
              UI_W, UI_H,
@@ -201,11 +223,12 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
 }
 
 bool lvgl_port_lock(int timeout_ms) {
+    if (!lvgl_mutex) return false;
     return xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 
 void lvgl_port_unlock() {
-    xSemaphoreGive(lvgl_mutex);
+    if (lvgl_mutex) xSemaphoreGive(lvgl_mutex);
 }
 
 void lvgl_port_task_start() {
