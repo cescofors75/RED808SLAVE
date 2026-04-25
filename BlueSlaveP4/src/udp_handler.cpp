@@ -35,6 +35,7 @@ static bool masterAlive        = false;
 static unsigned long lastWifiAttempt  = 0;
 static unsigned long lastMasterPacket = 0;
 static unsigned long lastSyncRequest  = 0;
+static bool sessionCleanSent = false;
 
 // JSON parse buffer
 static char rxBuf[1024];
@@ -184,8 +185,7 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
     char buf[96];
     bool active = (!muted && value > 0);
     float norm = (float)value / 127.0f;
-    // sqrt curve with a strong floor so the first clicks are immediately audible.
-    float mix = 0.25f + 0.75f * sqrtf(norm);
+    float mix = 0.05f + 0.45f * norm;
 
     // Resend ALL params on every active value change. FX controls are low-rate,
     // and this avoids silent states if Master missed an activation/config packet.
@@ -201,8 +201,8 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
             sendJson(buf);
             if (active) {
                 if (fullSend) {
-                    sendJson("{\"cmd\":\"setChorusRate\",\"value\":0.6}");
-                    sendJson("{\"cmd\":\"setChorusDepth\",\"value\":0.75}");
+                    sendJson("{\"cmd\":\"setChorusRate\",\"value\":1.5}");
+                    sendJson("{\"cmd\":\"setChorusDepth\",\"value\":0.5}");
                     sendJson("{\"cmd\":\"setChorusStereo\",\"value\":1}");
                 }
                 snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusMix\",\"value\":%.3f}", mix);
@@ -215,7 +215,7 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
             if (active) {
                 if (fullSend) {
                     sendJson("{\"cmd\":\"setDelayTime\",\"value\":300}");
-                    sendJson("{\"cmd\":\"setDelayFeedback\",\"value\":0.60}");
+                    sendJson("{\"cmd\":\"setDelayFeedback\",\"value\":0.35}");
                     sendJson("{\"cmd\":\"setDelayStereo\",\"value\":1}");
                 }
                 snprintf(buf, sizeof(buf), "{\"cmd\":\"setDelayMix\",\"value\":%.3f}", mix);
@@ -227,10 +227,10 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
             sendJson(buf);
             if (active) {
                 if (fullSend) {
-                    sendJson("{\"cmd\":\"setReverbFeedback\",\"value\":0.82}");
-                    sendJson("{\"cmd\":\"setReverbLpFreq\",\"value\":5000}");
+                    sendJson("{\"cmd\":\"setReverbFeedback\",\"value\":0.6}");
+                    sendJson("{\"cmd\":\"setReverbLpFreq\",\"value\":4000}");
                     sendJson("{\"cmd\":\"setEarlyRefActive\",\"value\":1}");
-                    sendJson("{\"cmd\":\"setEarlyRefMix\",\"value\":0.45}");
+                    sendJson("{\"cmd\":\"setEarlyRefMix\",\"value\":0.2}");
                 }
                 snprintf(buf, sizeof(buf), "{\"cmd\":\"setReverbMix\",\"value\":%.3f}", mix);
                 sendJson(buf);
@@ -288,6 +288,21 @@ void udp_reset_fx_latch(void) { s_fx_lp_filter_enabled = false; }
 void udp_request_master_sync(void) {
     P4_LOG_PRINTLN("[UDP] Requesting Master sync...");
     sendJson("{\"cmd\":\"hello\",\"device\":\"P4_DISPLAY\"}");
+
+    if (!sessionCleanSent) {
+        for (int track = 0; track < 16; track++) {
+            p4.track_solo[track] = false;
+            p4.track_muted[track] = false;
+            char buf[64];
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"solo\",\"track\":%d,\"value\":false}", track);
+            sendJson(buf);
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"mute\",\"track\":%d,\"value\":false}", track);
+            sendJson(buf);
+            uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), 0);
+        }
+        sessionCleanSent = true;
+    }
+
     udp_send_get_pattern(p4.current_pattern);
     sendJson("{\"cmd\":\"getTrackVolumes\"}");
 
@@ -489,6 +504,7 @@ static void onWiFiDisconnected(void) {
         wifiConnected = false;
         udpStarted = false;
         masterAlive = false;
+        sessionCleanSent = false;
         p4.wifi_connected = false;
         p4.master_connected = false;
         // Clear FX latches so they are re-sent after reconnect (LP filter, etc.)
@@ -568,6 +584,7 @@ void udp_handler_process(void) {
     // --- Master timeout ---
     if (masterAlive && (now - lastMasterPacket > MASTER_TIMEOUT_MS)) {
         masterAlive = false;
+        sessionCleanSent = false;
         p4.master_connected = false;
         P4_LOG_PRINTLN("[UDP] Master timeout!");
     }
