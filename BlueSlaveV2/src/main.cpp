@@ -687,9 +687,9 @@ static void set_master_drive_percent(int percent, bool sendToMaster) {
     fxDistortionPercent = constrain(percent, 0, 100);
     nvs_dirty = true;
 
-    // Mirror on P4/S3 bridge lane 2 so both surfaces show coherent FX state.
-    uint8_t encValue = (uint8_t)constrain((int)lroundf((fxDistortionPercent / 100.0f) * 127.0f), 0, 127);
-    uart_bridge_send_encoder(2, encValue);
+    // Mirror drive through the POT protocol. Encoder lane 2 is Reverb on P4.
+    uint8_t driveMidi = (uint8_t)constrain((int)lroundf((fxDistortionPercent / 100.0f) * 127.0f), 0, 127);
+    uart_bridge_send_pot(POT_DRIVE, driveMidi);
 
     if (!sendToMaster || !udpConnected) return;
     JsonDocument doc(&sramAllocator);

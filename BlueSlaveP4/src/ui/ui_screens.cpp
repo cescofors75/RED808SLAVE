@@ -985,6 +985,11 @@ static void fx_toggle_cb(lv_event_t* e) {
         // Pot FX (cell3=pot1, cell4=pot2, cell5=pot3)
         int pot_idx = cell - 3;  // 0,1,2 → pot_muted[0,1,2]
         p4.pot_muted[pot_idx] = !p4.pot_muted[pot_idx];
+        if (udp_wifi_connected()) {
+            if (pot_idx == 0) udp_send_fx_pot(0, p4.pot_value[3], p4.pot_muted[0]);
+            else if (pot_idx == 1) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
+            else udp_send_fx_pot(2, p4.pot_value[2], p4.pot_muted[2]);
+        }
     }
 }
 

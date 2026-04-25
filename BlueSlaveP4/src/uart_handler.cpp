@@ -312,9 +312,18 @@ static void process_basic(const UartBasicPacket* pkt) {
                     p4.enc_muted[2] = (val != 0);
                     if (udp_wifi_connected()) udp_send_fx_enc(2, p4.enc_value[2], p4.enc_muted[2]);
                     break;
-                case FX_POT0_MUTE:    p4.pot_muted[0] = (val != 0);       break;
-                case FX_POT1_MUTE:    p4.pot_muted[1] = (val != 0);       break;
-                case FX_POT2_MUTE:    p4.pot_muted[2] = (val != 0);       break;
+                case FX_POT0_MUTE:
+                    p4.pot_muted[0] = (val != 0);
+                    if (udp_wifi_connected()) udp_send_fx_pot(0, p4.pot_value[3], p4.pot_muted[0]);
+                    break;
+                case FX_POT1_MUTE:
+                    p4.pot_muted[1] = (val != 0);
+                    if (udp_wifi_connected()) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
+                    break;
+                case FX_POT2_MUTE:
+                    p4.pot_muted[2] = (val != 0);
+                    if (udp_wifi_connected()) udp_send_fx_pot(2, p4.pot_value[2], p4.pot_muted[2]);
+                    break;
                 case FX_FILTER_TYPE:  p4.filter_type = val;                break;
                 // 16-bit values arrive as two packets (H then L). Accumulate
                 // into a staging variable and commit to p4.* only when the

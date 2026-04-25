@@ -181,19 +181,15 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
     if (enc_id < 0 || enc_id > 2) return;
 
     static bool was_active[3] = {false, false, false};
-    static unsigned long last_full_send[3] = {0, 0, 0};
     char buf[96];
     bool active = (!muted && value > 0);
     float norm = (float)value / 127.0f;
-    // sqrt curve: value=2→0.13, value=10→0.28, value=30→0.49, value=60→0.69
-    // Plus 15% floor so first click is ~25% mix (clearly audible)
-    float mix = 0.15f + 0.85f * sqrtf(norm);
+    // sqrt curve with a strong floor so the first clicks are immediately audible.
+    float mix = 0.25f + 0.75f * sqrtf(norm);
 
-    bool justActivated = (active && !was_active[enc_id]);
-    unsigned long now = millis();
-    // Resend ALL params on activation OR every 2s (survive UDP drops)
-    bool fullSend = justActivated || (active && (now - last_full_send[enc_id] > 2000));
-    if (fullSend) last_full_send[enc_id] = now;
+    // Resend ALL params on every active value change. FX controls are low-rate,
+    // and this avoids silent states if Master missed an activation/config packet.
+    bool fullSend = active;
     was_active[enc_id] = active;
 
     P4_LOG_PRINTF("[FX] enc%d val=%d muted=%d active=%d mix=%.2f full=%d\n",
@@ -206,7 +202,7 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
             if (active) {
                 if (fullSend) {
                     sendJson("{\"cmd\":\"setChorusRate\",\"value\":0.6}");
-                    sendJson("{\"cmd\":\"setChorusDepth\",\"value\":0.5}");
+                    sendJson("{\"cmd\":\"setChorusDepth\",\"value\":0.75}");
                     sendJson("{\"cmd\":\"setChorusStereo\",\"value\":1}");
                 }
                 snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusMix\",\"value\":%.3f}", mix);
@@ -219,7 +215,7 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
             if (active) {
                 if (fullSend) {
                     sendJson("{\"cmd\":\"setDelayTime\",\"value\":300}");
-                    sendJson("{\"cmd\":\"setDelayFeedback\",\"value\":0.45}");
+                    sendJson("{\"cmd\":\"setDelayFeedback\",\"value\":0.60}");
                     sendJson("{\"cmd\":\"setDelayStereo\",\"value\":1}");
                 }
                 snprintf(buf, sizeof(buf), "{\"cmd\":\"setDelayMix\",\"value\":%.3f}", mix);
@@ -231,10 +227,10 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
             sendJson(buf);
             if (active) {
                 if (fullSend) {
-                    sendJson("{\"cmd\":\"setReverbFeedback\",\"value\":0.7}");
+                    sendJson("{\"cmd\":\"setReverbFeedback\",\"value\":0.82}");
                     sendJson("{\"cmd\":\"setReverbLpFreq\",\"value\":5000}");
                     sendJson("{\"cmd\":\"setEarlyRefActive\",\"value\":1}");
-                    sendJson("{\"cmd\":\"setEarlyRefMix\",\"value\":0.3}");
+                    sendJson("{\"cmd\":\"setEarlyRefMix\",\"value\":0.45}");
                 }
                 snprintf(buf, sizeof(buf), "{\"cmd\":\"setReverbMix\",\"value\":%.3f}", mix);
                 sendJson(buf);
@@ -248,20 +244,26 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
 static bool s_fx_lp_filter_enabled = false;
 
 void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
-    if (!udpStarted || muted) return;
+    if (!udpStarted) return;
     char buf[96];
     float norm = (float)value / 127.0f;
     switch (pot_id) {
         case 0: {  // Distortion/Drive
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setDistortion\",\"value\":%.3f}", norm);
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setDistortion\",\"value\":%.3f}", muted ? 0.0f : norm);
             sendJson(buf); break;
         }
         case 1: {  // Cutoff (20-20000 Hz, log)
+            if (muted) break;
             int hz = (int)(20.0f * powf(1000.0f, norm));
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterCutoff\",\"value\":%d}", hz);
             sendJson(buf); break;
         }
         case 2: {  // Resonance (1.0-10.0 Q) — LP filter must be active to hear it.
+            if (muted) {
+                sendJson("{\"cmd\":\"setFilter\",\"type\":0}");
+                s_fx_lp_filter_enabled = false;
+                break;
+            }
             // Mirror S3 behaviour: auto-enable LowPass so the Q is audible.
             // Latch is cleared in onWiFiDisconnected() so it re-sends after
             // any master/link drop.
@@ -288,15 +290,6 @@ void udp_request_master_sync(void) {
     sendJson("{\"cmd\":\"hello\",\"device\":\"P4_DISPLAY\"}");
     udp_send_get_pattern(p4.current_pattern);
     sendJson("{\"cmd\":\"getTrackVolumes\"}");
-
-    // Reset ALL FX to safe defaults
-    sendJson("{\"cmd\":\"setFlangerActive\",\"value\":0}");
-    sendJson("{\"cmd\":\"setDelayActive\",\"value\":0}");
-    sendJson("{\"cmd\":\"setReverbActive\",\"value\":0}");
-    sendJson("{\"cmd\":\"setChorusActive\",\"value\":0}");
-    sendJson("{\"cmd\":\"setTremoloActive\",\"value\":0}");
-    sendJson("{\"cmd\":\"setFilter\",\"type\":0}");
-    sendJson("{\"cmd\":\"setDistortion\",\"value\":0.0}");
 
     lastSyncRequest = millis();
 }
