@@ -49,6 +49,7 @@ static uint32_t s_tempo_lock_until_ms = 0;
 enum PendingPushPhase {
     PP_IDLE = 0,
     PP_SELECT,
+    PP_RESET_MIX,
     PP_CLEAR,
     PP_ACTIVE,
     PP_START,
@@ -688,10 +689,28 @@ void uart_handler_tick_pending_push(void) {
         switch (s_push.phase) {
             case PP_SELECT:
                 udp_send_select_pattern(s_push.slot);
-                s_push.phase = PP_CLEAR;
+                s_push.phase = PP_RESET_MIX;
                 s_push.idx   = 0;
                 budget--;
                 break;
+
+            case PP_RESET_MIX: {
+                int trk = s_push.idx & 0x0F;
+                if (s_push.idx < 16) {
+                    p4.track_solo[trk] = false;
+                    udp_send_solo(trk, false);
+                } else {
+                    p4.track_muted[trk] = false;
+                    udp_send_mute(trk, false);
+                }
+                s_push.idx++;
+                budget--;
+                if (s_push.idx >= 32) {
+                    s_push.phase = PP_CLEAR;
+                    s_push.idx   = 0;
+                }
+                break;
+            }
 
             case PP_CLEAR: {
                 // 256 clear packets (16 tracks × 16 steps)

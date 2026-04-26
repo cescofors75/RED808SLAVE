@@ -26,6 +26,7 @@ void udp_send_tempo(float bpm);
 void udp_send_select_pattern(int index);
 void udp_send_get_pattern(int pattern);
 void udp_send_set_step(int track, int step, bool active);
+void udp_send_set_step_velocity(int track, int step, int velocity);
 void udp_send_mute(int track, bool muted);
 void udp_send_set_volume(int value);
 void udp_send_set_seq_volume(int value);

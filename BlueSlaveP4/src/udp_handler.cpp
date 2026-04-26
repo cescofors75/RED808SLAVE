@@ -106,6 +106,14 @@ void udp_send_set_step(int track, int step, bool active) {
     sendJson(buf);
 }
 
+void udp_send_set_step_velocity(int track, int step, int velocity) {
+    char buf[96];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"setStepVelocity\",\"track\":%d,\"step\":%d,\"velocity\":%d}",
+             track, step, constrain(velocity, 1, 127));
+    sendJson(buf);
+}
+
 void udp_send_mute(int track, bool muted) {
     char buf[64];
     snprintf(buf, sizeof(buf),

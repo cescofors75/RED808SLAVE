@@ -214,6 +214,16 @@ static void header_play_cb(lv_event_t* e) {
     p4.is_playing = next_play;
 }
 
+static void header_clear_track_isolation(void) {
+    if (!udp_wifi_connected()) return;
+    for (int track = 0; track < 16; track++) {
+        p4.track_solo[track] = false;
+        p4.track_muted[track] = false;
+        udp_send_solo(track, false);
+        udp_send_mute(track, false);
+    }
+}
+
 static void header_pattern_cb(lv_event_t* e) {
     int delta = (int)(intptr_t)lv_event_get_user_data(e);
     int next_pattern = p4.current_pattern + delta;
@@ -221,10 +231,16 @@ static void header_pattern_cb(lv_event_t* e) {
     if (next_pattern >= Config::MAX_PATTERNS) next_pattern = 0;
 
     p4.current_pattern = next_pattern;
-    // Send to Master (sound) AND S3 (state sync)
-    udp_send_select_pattern(next_pattern);
-    udp_send_get_pattern(next_pattern);
-    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_PATTERN_SEL, (uint8_t)next_pattern);
+    header_clear_track_isolation();
+    if (udp_wifi_connected()) {
+        udp_send_select_pattern(next_pattern);
+        udp_send_get_pattern(next_pattern);
+    }
+    if (p4.s3_connected) {
+        // S3 owns local/demo patterns. Ask it to push the selected grid back
+        // through MSG_PATTERN_PUSH only when the slot has real local data.
+        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_PATTERN_SEL, (uint8_t)next_pattern);
+    }
 }
 
 // =============================================================================
@@ -1220,6 +1236,8 @@ static int        seq_raw_len           = 16;   // 16/32/48/64
 static int        seq_page              = 0;    // 0..3
 static lv_obj_t*  seq_page_btns[4]      = {};
 static lv_obj_t*  seq_page_lbls[4]      = {};
+static bool       seq_groove_base[16][16] = {};
+static bool       seq_groove_base_valid = false;
 // Sequencer-local header buttons
 static lv_obj_t*  seq_hdr_play_btn      = NULL;
 static lv_obj_t*  seq_hdr_play_lbl      = NULL;
@@ -1342,6 +1360,7 @@ static void seq_copy_page_to_p4(int page) {
         for (int s = 0; s < 16; s++)
             p4.steps[t][s] = seq_raw_grid[t][base + s];
     seq_page = page;
+    seq_groove_base_valid = false;
     uart_stage_pattern_push_from_steps((uint8_t)p4.current_pattern, p4.steps);
     uart_send_pattern_to_s3(p4.current_pattern, p4.steps);
 }
@@ -1383,11 +1402,71 @@ static void seq_update_mpc_ctrl_label(void) {
     lv_label_set_text_fmt(seq_ctrl_lbl, "SW%02d DR%02d", seq_ctrl_swing, seq_ctrl_drive);
 }
 
+static int seq_groove_velocity_for(int track, int step) {
+    int vel = (track == 0 || track == 1) ? 112 : 94;
+    if ((step % 4) == 0) vel += 15;
+    else if ((step % 4) == 2) vel += 6;
+
+    int swing_amt = seq_ctrl_swing - 50;
+    if (step & 1) vel -= swing_amt * 2;
+    else if ((step % 4) != 0) vel += swing_amt;
+
+    vel += seq_ctrl_drive / 3;
+    if (track == 2 || track == 9) vel += 8;
+    if (vel < 24) vel = 24;
+    if (vel > 127) vel = 127;
+    return vel;
+}
+
+static void seq_apply_master_groove(void) {
+    if (!udp_wifi_connected()) return;
+    for (int track = 0; track < 16; track++) {
+        for (int step = 0; step < 16; step++) {
+            if (p4.steps[track][step]) {
+                udp_send_set_step_velocity(track, step, seq_groove_velocity_for(track, step));
+            }
+        }
+    }
+}
+
+static void seq_capture_groove_base_if_needed(void) {
+    if (seq_groove_base_valid) return;
+    for (int track = 0; track < 16; track++)
+        for (int step = 0; step < 16; step++)
+            seq_groove_base[track][step] = p4.steps[track][step];
+    seq_groove_base_valid = true;
+}
+
+static void seq_apply_audible_swing_grid(void) {
+    seq_capture_groove_base_if_needed();
+
+    bool swung[16][16] = {};
+    int amt = seq_ctrl_swing - 50;
+    for (int track = 0; track < 16; track++) {
+        for (int step = 0; step < 16; step++) {
+            if (!seq_groove_base[track][step]) continue;
+            int dst = step;
+            if (amt >= 6 && (step & 1)) dst = (step + 1) & 0x0F;
+            if (amt >= 14 && (step % 4) == 2) dst = (step + 1) & 0x0F;
+            swung[track][dst] = true;
+        }
+    }
+
+    uart_stage_pattern_push_from_steps((uint8_t)p4.current_pattern, swung);
+    uart_send_pattern_to_s3(p4.current_pattern, swung);
+}
+
 static void seq_mpc_preset_cb(lv_event_t* e) {
     (void)e;
     uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MPC_PRESET, 0);
-    seq_ctrl_swing = 58;
-    seq_ctrl_drive = 18;
+    seq_ctrl_swing = 62;
+    seq_ctrl_drive = 55;
+    p4.distortion_pct = seq_ctrl_drive;
+    if (ui_use_udp_transport()) {
+        udp_send_set_distortion((float)seq_ctrl_drive / 100.0f);
+    }
+    seq_apply_audible_swing_grid();
+    seq_apply_master_groove();
     seq_update_mpc_ctrl_label();
 }
 
@@ -1402,6 +1481,9 @@ static void seq_swing_delta_cb(lv_event_t* e) {
     }
     if (seq_ctrl_swing < 50) seq_ctrl_swing = 50;
     if (seq_ctrl_swing > 75) seq_ctrl_swing = 75;
+    if (seq_ctrl_swing == 50) seq_groove_base_valid = false;
+    seq_apply_audible_swing_grid();
+    seq_apply_master_groove();
     seq_update_mpc_ctrl_label();
 }
 
@@ -1409,13 +1491,18 @@ static void seq_drive_delta_cb(lv_event_t* e) {
     int delta = (int)(intptr_t)lv_event_get_user_data(e);
     if (delta > 0) {
         uart_send_to_s3(MSG_TOUCH_CMD, TCMD_DRIVE_UP, 0);
-        seq_ctrl_drive += 2;
+        seq_ctrl_drive += 12;
     } else {
         uart_send_to_s3(MSG_TOUCH_CMD, TCMD_DRIVE_DOWN, 0);
-        seq_ctrl_drive -= 2;
+        seq_ctrl_drive -= 12;
     }
     if (seq_ctrl_drive < 0) seq_ctrl_drive = 0;
     if (seq_ctrl_drive > 100) seq_ctrl_drive = 100;
+    p4.distortion_pct = seq_ctrl_drive;
+    if (ui_use_udp_transport()) {
+        udp_send_set_distortion((float)seq_ctrl_drive / 100.0f);
+    }
+    seq_apply_master_groove();
     seq_update_mpc_ctrl_label();
 }
 
@@ -2490,14 +2577,14 @@ static void sd_refresh_ui(void) {
                 lv_obj_add_state(sd_midi_load_btn, LV_STATE_DISABLED);
         }
 
-        if (sd_mem_count == 0) {
+        if (sd_mem_count <= 0) {
             lv_obj_t* lbl = lv_label_create(sd_file_list);
-            lv_label_set_text(lbl,
-                "No MIDIs in flash.\nPut .mid in BlueSlaveP4/data/mid/\nand run Upload Filesystem P4.");
+            lv_label_set_text(lbl, "No MEM MIDI files");
             lv_obj_set_style_text_color(lbl, RED808_TEXT_DIM, 0);
             lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
             return;
         }
+
         for (int i = 0; i < sd_mem_count; i++) {
             lv_obj_t* btn = lv_btn_create(sd_file_list);
             lv_obj_set_size(btn, 580, 44);

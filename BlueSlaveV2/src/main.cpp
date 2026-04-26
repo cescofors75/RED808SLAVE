@@ -1324,11 +1324,18 @@ void sendPlayStateCommand(bool shouldPlay) {
 void selectPatternOnMaster(int patternIndex) {
     currentPattern = constrain(patternIndex, 0, Config::MAX_PATTERNS - 1);
 
-    // Forward pattern selection and local grid to P4. With S3 WiFi disabled,
-    // P4 is the only path that can make local/demo patterns audible on Master.
+    bool localHasData = false;
+    for (int t = 0; t < Config::MAX_TRACKS && !localHasData; t++)
+        for (int s = 0; s < Config::MAX_STEPS && !localHasData; s++)
+            if (patterns[currentPattern].steps[t][s]) localHasData = true;
+
+    // Forward pattern selection to P4. Only push the local grid when S3 really
+    // owns data for this slot; empty slots must not wipe a Master pattern.
     uart_bridge_send_pattern(currentPattern);
-    uart_bridge_send_pattern_push(currentPattern, patterns[currentPattern].steps,
-                                  Config::MAX_TRACKS);
+    if (localHasData) {
+        uart_bridge_send_pattern_push(currentPattern, patterns[currentPattern].steps,
+                                      Config::MAX_TRACKS);
+    }
 
     JsonDocument doc(&sramAllocator);
     doc["cmd"] = "selectPattern";
