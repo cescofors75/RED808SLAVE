@@ -260,14 +260,17 @@ static void process_basic(const UartBasicPacket* pkt) {
                     if (udp_wifi_connected()) udp_send_select_pattern(val);
                     break;
                 case SYS_PLAY_STATE:
-                    // State sync from S3 — do NOT re-send start/stop to
-                    // Master here. The origin UI (P4 header or S3 touch)
-                    // already sent the UDP command; echoing it would
-                    // duplicate traffic and can cause feedback loops.
-                    p4.is_playing = (val != 0);
+                    {
+                    bool next_play = (val != 0);
+                    if (udp_wifi_connected() && next_play != p4.is_playing) {
+                        if (next_play) udp_send_start();
+                        else udp_send_stop();
+                    }
+                    p4.is_playing = next_play;
                     // Snap local step counter when playback starts/stops
                     // so the fallback clock / UI label reset cleanly.
                     if (!p4.is_playing) p4.current_step = 0;
+                    }
                     break;
                 case SYS_STEP:
                     // P4 is authoritative clock; ignore external SYS_STEP
@@ -429,7 +432,8 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
         //   2. Select that pattern slot on Master.
         //   3. Clear the slot (setStep active:false for all 16 tracks × 16 steps).
         //   4. Send setStep active:true for every hit.
-        //   5. Send start so the pattern plays immediately.
+        //   5. If transport is already running, re-send start after the
+        //      final setStep so Master begins from a complete pattern.
         int slot = (int)id;
         if (slot < 0 || slot > 15) return;
 
@@ -724,9 +728,8 @@ void uart_handler_tick_pending_push(void) {
             }
 
             case PP_START:
-                if (!p4.is_playing) {
+                if (p4.is_playing) {
                     udp_send_start();
-                    p4.is_playing = true;
                 }
                 s_push.phase = PP_IDLE;
                 budget--;

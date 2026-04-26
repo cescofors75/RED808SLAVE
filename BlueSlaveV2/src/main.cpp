@@ -1324,8 +1324,11 @@ void sendPlayStateCommand(bool shouldPlay) {
 void selectPatternOnMaster(int patternIndex) {
     currentPattern = constrain(patternIndex, 0, Config::MAX_PATTERNS - 1);
 
-    // Forward pattern to P4
+    // Forward pattern selection and local grid to P4. With S3 WiFi disabled,
+    // P4 is the only path that can make local/demo patterns audible on Master.
     uart_bridge_send_pattern(currentPattern);
+    uart_bridge_send_pattern_push(currentPattern, patterns[currentPattern].steps,
+                                  Config::MAX_TRACKS);
 
     JsonDocument doc(&sramAllocator);
     doc["cmd"] = "selectPattern";
