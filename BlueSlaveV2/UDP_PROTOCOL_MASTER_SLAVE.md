@@ -1,5 +1,8 @@
 # Protocolo UDP Master-Slave - DrumMachine ESP32-S3
 
+> Documento historico. El contrato canonico actual esta en `../RED808_COMMAND_CONTRACT.md`.
+> Mantener este archivo solo como ejemplos extendidos; si hay conflicto, manda el contrato canonico.
+
 ## Configuración de Red
 
 ### MASTER (DrumMachine Principal)
@@ -19,13 +22,15 @@
 
 **Protocolo**: UDP (sin conexión, rápido, ideal para tiempo real)  
 **Formato de Datos**: JSON (texto plano)  
-**Tamaño Máximo**: 512 bytes por paquete  
+**Tamaño Máximo**: 4096 bytes por paquete  
 **Encoding**: UTF-8
 
 ### Respuesta Estándar del MASTER
 ```json
 {"status":"ok"}
 ```
+
+El firmware actual tambien puede responder con `{"s":"ok"}` y, para comandos de estado, con un paquete posterior `state_sync`.
 
 ### Respuesta de Error
 ```json
@@ -70,6 +75,7 @@
 ```
 - `track`: 0-15 (pista/instrumento)
 - `step`: 0-15 (posición en el patrón)
+- El contrato actual permite `step`: 0-63; algunas pantallas legacy solo renderizan 16.
 - `active`: true/false
 
 #### Silenciar/activar track

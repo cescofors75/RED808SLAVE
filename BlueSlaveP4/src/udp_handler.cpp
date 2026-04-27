@@ -38,7 +38,7 @@ static unsigned long lastSyncRequest  = 0;
 static bool sessionCleanSent = false;
 
 // JSON parse buffer
-static char rxBuf[1024];
+static char rxBuf[4096];
 
 static int clamp_int(int value, int lo, int hi) {
     if (value < lo) return lo;
@@ -338,6 +338,91 @@ static void processJson(const char* json, int len) {
 
     const char* cmd = doc["cmd"];
     if (!cmd) return;
+
+    if (strcmp(cmd, "state_sync") == 0) {
+        int pat = clamp_int(doc["pattern"] | p4.current_pattern, 0, 15);
+        p4.current_pattern = pat;
+        uart_send_to_s3(MSG_SYSTEM, SYS_PATTERN, (uint8_t)pat);
+
+        bool playing = doc["playing"] | p4.is_playing;
+        p4.is_playing = playing;
+        uart_send_to_s3(MSG_SYSTEM, SYS_PLAY_STATE, playing ? 1 : 0);
+
+        float bpm = clamp_float(doc["tempo"] | (float)(p4.bpm_int + p4.bpm_frac * 0.1f), 40.0f, 240.0f);
+        p4.bpm_int = (int)bpm;
+        p4.bpm_frac = (int)((bpm - p4.bpm_int) * 10.0f);
+        uart_send_to_s3(MSG_SYSTEM, SYS_BPM_INT, (uint8_t)p4.bpm_int);
+        uart_send_to_s3(MSG_SYSTEM, SYS_BPM_FRAC, (uint8_t)p4.bpm_frac);
+
+        int masterVol = clamp_int(doc["masterVolume"] | p4.master_volume, 0, 150);
+        p4.master_volume = masterVol;
+        p4.seq_volume = clamp_int(doc["sequencerVolume"] | p4.seq_volume, 0, 150);
+        p4.live_volume = clamp_int(doc["liveVolume"] | p4.live_volume, 0, 150);
+        uart_send_to_s3(MSG_SYSTEM, SYS_VOLUME, (uint8_t)masterVol);
+
+        JsonArray mute = doc["mute"];
+        if (mute) {
+            int track = 0;
+            for (JsonVariant value : mute) {
+                if (track >= 16) break;
+                p4.track_muted[track] = value.as<bool>();
+                uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), p4.track_muted[track] ? 1 : 0);
+                track++;
+            }
+        }
+
+        JsonArray solo = doc["solo"];
+        if (solo) {
+            int track = 0;
+            for (JsonVariant value : solo) {
+                if (track >= 16) break;
+                p4.track_solo[track] = value.as<bool>();
+                uart_send_to_s3(MSG_TRACK, TRK_SOLO_BIT | (track & 0x0F), p4.track_solo[track] ? 1 : 0);
+                track++;
+            }
+        }
+
+        JsonArray volumes = doc["trackVolumes"];
+        if (volumes) {
+            int track = 0;
+            for (JsonVariant value : volumes) {
+                if (track >= 16) break;
+                int vol = clamp_int(value.as<int>(), 0, 150);
+                p4.track_volume[track] = vol;
+                uart_send_to_s3(MSG_TRACK, TRK_VOLUME | (track & 0x0F), (uint8_t)clamp_int(vol, 0, 100));
+                track++;
+            }
+        }
+
+        JsonObject fx = doc["fx"];
+        if (fx) {
+            p4.filter_type = clamp_int(fx["filterType"] | p4.filter_type, 0, 4);
+            p4.cutoff_hz = clamp_int(fx["filterCutoff"] | p4.cutoff_hz, 20, 20000);
+            float resonance = clamp_float(fx["filterResonance"] | ((float)p4.resonance_x10 / 10.0f), 1.0f, 10.0f);
+            p4.resonance_x10 = (int)(resonance * 10.0f);
+            float distortion = clamp_float(fx["distortion"] | ((float)p4.distortion_pct / 100.0f), 0.0f, 1.0f);
+            p4.distortion_pct = (int)(distortion * 100.0f);
+            p4.bitcrush_bits = clamp_int(fx["bitCrush"] | p4.bitcrush_bits, 4, 16);
+            p4.sample_rate_hz = clamp_int(fx["sampleRate"] | p4.sample_rate_hz, 1000, 48000);
+        }
+
+        const char* kit = doc["kit"] | "";
+        strncpy(p4.kit_name, kit, sizeof(p4.kit_name) - 1);
+        p4.kit_name[sizeof(p4.kit_name) - 1] = '\0';
+        memset(p4.sample_loaded, 0, sizeof(p4.sample_loaded));
+        JsonArray samples = doc["samples"];
+        if (samples) {
+            for (JsonObject sample : samples) {
+                int pad = sample["pad"] | -1;
+                if (pad < 0 || pad >= 24) continue;
+                p4.sample_loaded[pad] = sample["loaded"] | false;
+                const char* name = sample["name"] | "";
+                strncpy(p4.sample_name[pad], name, sizeof(p4.sample_name[pad]) - 1);
+                p4.sample_name[pad][sizeof(p4.sample_name[pad]) - 1] = '\0';
+            }
+        }
+        return;
+    }
 
     // ----- Pattern sync -----
     if (strcmp(cmd, "pattern_sync") == 0) {

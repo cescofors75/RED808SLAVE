@@ -11,6 +11,14 @@
         {
             "name": "BlueSlaveP4 (ESP32-P4)",
             "path": "BlueSlaveP4"
+        },
+        {
+            "name": "RedMaster ESP32-S3",
+            "path": "RedMaster_ESP32S3"
+        },
+        {
+            "name": "RedMaster DaisySeed 64MB",
+            "path": "RedMaster_DaisySeed64MB"
         }
     ],
     "settings": {

@@ -105,6 +105,9 @@ int fxFilterResonanceX10 = 10;   // 1.0 Q — min
 int fxBitCrushBits = 16;
 int fxDistortionPercent = 0;
 int fxSampleRateHz = 44100;
+char masterKitName[32] = "";
+bool masterSampleLoaded[Config::MAX_SAMPLES] = {};
+char masterSampleName[Config::MAX_SAMPLES][32] = {};
 EncoderMode encoderMode = ENC_MODE_VOLUME;
 
 // I2C Hub
@@ -1287,7 +1290,7 @@ void sendUDPCommand(const char* cmd) {
 void sendUDPCommand(JsonDocument& doc) {
 #if S3_WIFI_ENABLED
     if (!udpConnected) return;
-    char buf[512];
+    static char buf[4096];
     size_t len = serializeJson(doc, buf, sizeof(buf));
     if (len > 0 && len < sizeof(buf)) {
         udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
@@ -1541,7 +1544,82 @@ void receiveUDPData() {
     const char* cmd = doc["cmd"];
     if (!cmd) return;
 
-    if (strcmp(cmd, "pattern_sync") == 0) {
+    if (strcmp(cmd, "state_sync") == 0) {
+        int pat = doc["pattern"] | currentPattern;
+        if (pat >= 0 && pat < Config::MAX_PATTERNS) {
+            currentPattern = pat;
+            uart_bridge_send_pattern(currentPattern);
+        }
+
+        bool playing = doc["playing"] | isPlaying;
+        if (playing && !isPlaying) {
+            currentStep = 0;
+            lastLocalStepMs = millis();
+            lastLocalStepUs = micros();
+        }
+        isPlaying = playing;
+        uart_bridge_send_play_state(isPlaying);
+
+        float tempo = doc["tempo"] | currentBPM;
+        applyBPMPrecise(tempo, false);
+        applyUnifiedMasterVolume(doc["masterVolume"] | currentVolume, false);
+
+        JsonArray mute = doc["mute"];
+        if (mute) {
+            int track = 0;
+            for (JsonVariant value : mute) {
+                if (track >= Config::MAX_TRACKS) break;
+                trackMuted[track++] = value.as<bool>();
+            }
+        }
+
+        JsonArray solo = doc["solo"];
+        if (solo) {
+            int track = 0;
+            for (JsonVariant value : solo) {
+                if (track >= Config::MAX_TRACKS) break;
+                trackSolo[track++] = value.as<bool>();
+            }
+        }
+
+        JsonArray volumes = doc["trackVolumes"];
+        if (volumes) {
+            int track = 0;
+            for (JsonVariant value : volumes) {
+                if (track >= Config::MAX_TRACKS) break;
+                trackVolumes[track++] = constrain(value.as<int>(), 0, Config::MAX_VOLUME);
+            }
+        }
+
+        JsonObject fx = doc["fx"];
+        if (fx) {
+            fxFilterType = constrain(fx["filterType"] | fxFilterType, 0, 4);
+            fxFilterCutoffHz = constrain(fx["filterCutoff"] | fxFilterCutoffHz, 20, 20000);
+            float resonance = fx["filterResonance"].is<float>() ? fx["filterResonance"].as<float>() : ((float)fxFilterResonanceX10 / 10.0f);
+            fxFilterResonanceX10 = constrain((int)lroundf(resonance * 10.0f), 1, 100);
+            float distortion = fx["distortion"].is<float>() ? fx["distortion"].as<float>() : ((float)fxDistortionPercent / 100.0f);
+            fxDistortionPercent = master_drive_percent_from_amount(distortion);
+            fxBitCrushBits = constrain(fx["bitCrush"] | fxBitCrushBits, 1, 16);
+            fxSampleRateHz = constrain(fx["sampleRate"] | fxSampleRateHz, 1000, 48000);
+        }
+
+        const char* kit = doc["kit"] | "";
+        strncpy(masterKitName, kit, sizeof(masterKitName) - 1);
+        masterKitName[sizeof(masterKitName) - 1] = '\0';
+        memset(masterSampleLoaded, 0, sizeof(masterSampleLoaded));
+        JsonArray samples = doc["samples"];
+        if (samples) {
+            for (JsonObject sample : samples) {
+                int pad = sample["pad"] | -1;
+                if (pad < 0 || pad >= Config::MAX_SAMPLES) continue;
+                masterSampleLoaded[pad] = sample["loaded"] | false;
+                const char* name = sample["name"] | "";
+                strncpy(masterSampleName[pad], name, sizeof(masterSampleName[pad]) - 1);
+                masterSampleName[pad][sizeof(masterSampleName[pad]) - 1] = '\0';
+            }
+        }
+    }
+    else if (strcmp(cmd, "pattern_sync") == 0) {
         int pat = doc["pattern"] | 0;
         if (pat >= 0 && pat < Config::MAX_PATTERNS) {
             JsonArray data = doc["data"];
@@ -1687,7 +1765,7 @@ void receiveUDPData() {
         fxDistortionPercent = master_drive_percent_from_amount(distortion);
     }
     else if (strcmp(cmd, "setSampleRate") == 0) {
-        fxSampleRateHz = constrain(doc["value"] | fxSampleRateHz, 1000, 44100);
+        fxSampleRateHz = constrain(doc["value"] | fxSampleRateHz, 1000, 48000);
     }
     else if (strcmp(cmd, "selectPattern") == 0 || strcmp(cmd, "pattern_select") == 0 ||
              strcmp(cmd, "current_pattern") == 0) {

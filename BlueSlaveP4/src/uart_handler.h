@@ -94,6 +94,11 @@ struct P4State {
     bool track_solo[16];
     int  track_volume[16];  // 0-100
 
+    // Master feedback
+    char kit_name[32];
+    bool sample_loaded[24];
+    char sample_name[24][32];
+
     // Pattern step data (updated via extended packets)
     bool steps[16][16];     // [track][step]
 
