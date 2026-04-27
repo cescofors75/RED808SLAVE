@@ -41,15 +41,15 @@ static RxParser s_usb_rx = {{0}, 0};
 static uint32_t s_tempo_lock_until_ms = 0;
 
 // -----------------------------------------------------------------------------
-// Deferred "pattern push to Master" — avoids blocking the main loop (~260 ms)
-// when a MIDI pattern arrives via MSG_PATTERN_PUSH. The heavy UDP burst
-// (selectPattern + 256 clear setSteps + active setSteps + start) is staged
-// here and drained a few packets at a time from uart_handler_process().
+// Deferred pattern push to Master. The first push for an unknown slot sends a
+// full clear+active refresh; later pushes use a per-slot cache and only send
+// changed steps, so sequencer page/swing edits don't flood UDP.
 // -----------------------------------------------------------------------------
 enum PendingPushPhase {
     PP_IDLE = 0,
     PP_SELECT,
     PP_RESET_MIX,
+    PP_DELTA,
     PP_CLEAR,
     PP_ACTIVE,
     PP_START,
@@ -62,10 +62,30 @@ struct PendingPush {
     bool     step_bits[16][16];  // snapshot of steps to broadcast
 };
 static PendingPush s_push = {PP_IDLE, 0, 0, 0, {{false}}};
+static bool s_master_step_cache[16][16][16] = {};
+static bool s_master_step_cache_valid[16] = {};
 
 // Tunables — small delays keep WiFi/stack happy without stalling the loop.
 static constexpr int PP_PACKETS_PER_TICK = 6;   // packets drained per loop()
 static constexpr uint32_t PP_INTER_MS    = 2;   // pacing between bursts
+
+static void stage_pattern_push(uint8_t slot, const bool steps[16][16]) {
+    s_push.phase   = PP_SELECT;
+    s_push.slot    = slot;
+    s_push.idx     = 0;
+    s_push.next_ms = millis();
+    for (int t = 0; t < 16; t++)
+        for (int s = 0; s < 16; s++)
+            s_push.step_bits[t][s] = steps[t][s];
+}
+
+static void remember_master_pattern(uint8_t slot, const bool steps[16][16]) {
+    if (slot > 15) return;
+    for (int t = 0; t < 16; t++)
+        for (int s = 0; s < 16; s++)
+            s_master_step_cache[slot][t][s] = steps[t][s];
+    s_master_step_cache_valid[slot] = true;
+}
 
 // =============================================================================
 // INIT
@@ -417,6 +437,7 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
                 p4.steps[track][step] = (row >> step) & 1;
             }
         }
+        if (id < 16) remember_master_pattern(id, p4.steps);
         // NOTE: do NOT forward the whole pattern as N×setStep to Master.
         // The Master already owns the canonical pattern and pushes it via
         // `pattern_sync` (see udp_handler.cpp). Re-broadcasting 256 UDP
@@ -456,13 +477,7 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
         // 2) Stage a deferred push to Master. The heavy UDP burst is drained
         //    a few packets per main-loop tick by uart_handler_tick_pending_push()
         //    so LVGL / touch / pad queue never stall.
-        s_push.phase   = PP_SELECT;
-        s_push.slot    = (uint8_t)slot;
-        s_push.idx     = 0;
-        s_push.next_ms = millis();
-        for (int t = 0; t < 16; t++)
-            for (int s = 0; s < 16; s++)
-                s_push.step_bits[t][s] = p4.steps[t][s];
+        stage_pattern_push((uint8_t)slot, p4.steps);
     }
     else if (type == MSG_SD_DATA) {
         switch (id) {
@@ -667,20 +682,18 @@ void uart_stage_pattern_push_from_steps(uint8_t slot, const bool steps[16][16]) 
     if (!udp_wifi_connected()) return;
 
     // 3) Arm deferred drain
-    s_push.phase   = PP_SELECT;
-    s_push.slot    = slot;
-    s_push.idx     = 0;
-    s_push.next_ms = millis();
-    for (int t = 0; t < 16; t++)
-        for (int s = 0; s < 16; s++)
-            s_push.step_bits[t][s] = steps[t][s];
+    stage_pattern_push(slot, steps);
 }
 
 // Drain a few UDP packets per main-loop tick so MIDI loads don't stall the UI.
 // Safe no-op when idle. Called from main loop().
 void uart_handler_tick_pending_push(void) {
     if (s_push.phase == PP_IDLE) return;
-    if (!udp_wifi_connected()) { s_push.phase = PP_IDLE; return; }    uint32_t now = millis();
+    if (!udp_wifi_connected()) {
+        s_push.phase = PP_IDLE;
+        return;
+    }
+    uint32_t now = millis();
     if ((int32_t)(now - s_push.next_ms) < 0) return;
 
     int budget = PP_PACKETS_PER_TICK;
@@ -689,7 +702,7 @@ void uart_handler_tick_pending_push(void) {
         switch (s_push.phase) {
             case PP_SELECT:
                 udp_send_select_pattern(s_push.slot);
-                s_push.phase = PP_RESET_MIX;
+                s_push.phase = s_master_step_cache_valid[s_push.slot] ? PP_DELTA : PP_RESET_MIX;
                 s_push.idx   = 0;
                 budget--;
                 break;
@@ -708,6 +721,27 @@ void uart_handler_tick_pending_push(void) {
                 if (s_push.idx >= 32) {
                     s_push.phase = PP_CLEAR;
                     s_push.idx   = 0;
+                }
+                break;
+            }
+
+            case PP_DELTA: {
+                bool sent = false;
+                while (s_push.idx < 256) {
+                    int t = s_push.idx / 16;
+                    int st = s_push.idx % 16;
+                    s_push.idx++;
+                    bool next = s_push.step_bits[t][st];
+                    if (s_master_step_cache[s_push.slot][t][st] != next) {
+                        udp_send_set_step(t, st, next);
+                        budget--;
+                        sent = true;
+                        break;
+                    }
+                }
+                if (!sent || s_push.idx >= 256) {
+                    remember_master_pattern(s_push.slot, s_push.step_bits);
+                    s_push.phase = PP_START;
                 }
                 break;
             }
@@ -741,7 +775,10 @@ void uart_handler_tick_pending_push(void) {
                     }
                 }
                 if (!sent || s_push.idx >= 256) {
-                    if (s_push.idx >= 256) s_push.phase = PP_START;
+                    if (s_push.idx >= 256) {
+                        remember_master_pattern(s_push.slot, s_push.step_bits);
+                        s_push.phase = PP_START;
+                    }
                 }
                 break;
             }

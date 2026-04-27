@@ -1321,13 +1321,18 @@ void sendPlayStateCommand(bool shouldPlay) {
     sendUDPCommand(doc);
 }
 
+static bool pattern_has_data(int patternIndex) {
+    if (patternIndex < 0 || patternIndex >= Config::MAX_PATTERNS) return false;
+    for (int t = 0; t < Config::MAX_TRACKS; t++)
+        for (int s = 0; s < Config::MAX_STEPS; s++)
+            if (patterns[patternIndex].steps[t][s]) return true;
+    return false;
+}
+
 void selectPatternOnMaster(int patternIndex) {
     currentPattern = constrain(patternIndex, 0, Config::MAX_PATTERNS - 1);
 
-    bool localHasData = false;
-    for (int t = 0; t < Config::MAX_TRACKS && !localHasData; t++)
-        for (int s = 0; s < Config::MAX_STEPS && !localHasData; s++)
-            if (patterns[currentPattern].steps[t][s]) localHasData = true;
+    bool localHasData = pattern_has_data(currentPattern);
 
     // Forward pattern selection to P4. Only push the local grid when S3 really
     // owns data for this slot; empty slots must not wipe a Master pattern.
@@ -1342,8 +1347,9 @@ void selectPatternOnMaster(int patternIndex) {
     doc["index"] = currentPattern;
     sendUDPCommand(doc);
 
-    // Request the new pattern data from master
-    requestPatternFromMaster();
+    // Only ask Master for data when S3 has no local grid for this slot. In the
+    // normal USB path P4 owns UDP, so sendUDPCommand is a no-op when WiFi is off.
+    if (!localHasData) requestPatternFromMaster();
 }
 
 // Send full local pattern to master (select pattern, send active steps, restore)
@@ -1552,11 +1558,7 @@ void receiveUDPData() {
                 // we already have local data, keep local and skip the overwrite.
                 // This prevents master→slave sync floods from wiping user edits.
                 if (incomingEmpty) {
-                    bool localHasData = false;
-                    for (int t = 0; t < Config::MAX_TRACKS && !localHasData; t++)
-                        for (int s = 0; s < Config::MAX_STEPS && !localHasData; s++)
-                            if (patterns[pat].steps[t][s]) localHasData = true;
-                    if (localHasData) {
+                    if (pattern_has_data(pat)) {
                         RED808_LOG_PRINTF("[UDP] Skipping empty pattern_sync for pattern %d\n", pat + 1);
                         return;  // skip this packet, keep local pattern
                     }

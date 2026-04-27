@@ -1287,6 +1287,7 @@ static void seq_step_cb(lv_event_t* e) {
     if (track < 16 && step < 16) {
         bool next = !p4.steps[track][step];
         p4.steps[track][step] = next;
+        seq_groove_base_valid = false;
         if (ui_use_udp_transport()) udp_send_set_step(track, step, next);
         // Push updated pattern to S3 (so S3 pad-sync sees the change)
         uart_send_pattern_to_s3(p4.current_pattern, p4.steps);
