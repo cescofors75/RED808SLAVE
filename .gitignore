@@ -3,3 +3,6 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+RedMaster_DaisySeed64MB/DaisySeed/build/
+RedMaster_DaisySeed64MB/DaisySeed/*.log
+RedMaster_DaisySeed64MB/DaisySeed/build_*.txt
