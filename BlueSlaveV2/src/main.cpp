@@ -1726,9 +1726,13 @@ void receiveUDPData() {
     }
     else if (strcmp(cmd, "melodyRecNote") == 0) {
         // v2.7 — incoming note from P4 piano (REC mode) → write into melody grid
+        // Must hold LVGL lock: melody_record_midi_note touches LVGL objects.
         int note = doc["note"] | -1;
         if (note >= 0 && note <= 127) {
-            melody_record_midi_note((uint8_t)note);
+            if (lvgl_port_lock(50)) {
+                melody_record_midi_note((uint8_t)note);
+                lvgl_port_unlock();
+            }
         }
     }
     else if (strcmp(cmd, "volume_sync") == 0 ||

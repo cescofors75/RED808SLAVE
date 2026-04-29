@@ -3502,54 +3502,67 @@ static void pp_slider_event_cb(lv_event_t* e) {
     }
 }
 
-// v2.8 — touch-first param cells: tap = +10% (wrap), long-press = reset.
-// Replaces the cramped sliders that were unreadable on the P4 portrait LCD.
+// v2.9 — Hold-to-increment with cell background tracking the value.
+// Press = step once. Hold = keep stepping (~10/s). RST badge resets.
 static lv_obj_t* s_pp_cell_bars[PP_MAX_PARAMS_P4] = {};
+
+static inline lv_color_t pp_value_color(float t) {
+    if (t < 0) t = 0; if (t > 1) t = 1;
+    uint8_t r = (uint8_t)(0x0A + t * (0xFF - 0x0A));
+    uint8_t g = (uint8_t)(0x18 + t * (0x14 - 0x18));
+    uint8_t b = (uint8_t)(0x40 + t * (0x93 - 0x40));
+    return lv_color_make(r, g, b);
+}
 
 static void pp_cell_redraw_value(int slot) {
     const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
     if (slot < 0 || slot >= (int)eng->param_count) return;
     const SynthParamDef* p = &eng->params[slot];
     float fv = s_pp_values[s_pp_engine_idx][slot];
+    float t = (fv - p->vmin) / (p->vmax - p->vmin);
+    if (t < 0) t = 0; if (t > 1) t = 1;
     if (s_pp_val_lbls[slot]) {
         char buf[24];
         pp_format_value(buf, sizeof(buf), p, fv);
         lv_label_set_text(s_pp_val_lbls[slot], buf);
     }
     if (s_pp_cell_bars[slot]) {
-        float t = (fv - p->vmin) / (p->vmax - p->vmin);
-        if (t < 0) t = 0; if (t > 1) t = 1;
-        // The bar parent has known width set when created; we stored full
-        // width as user_data on the bar itself.
         int full_w = (int)(intptr_t)lv_obj_get_user_data(s_pp_cell_bars[slot]);
         int w = (int)(full_w * t + 0.5f);
         if (w < 4) w = 4;
         lv_obj_set_width(s_pp_cell_bars[slot], w);
-        // Tint shifts from cyan (low) to magenta (high) for visual feedback.
         uint8_t r = (uint8_t)(0x00 + t * (0xFF - 0x00));
         uint8_t g = (uint8_t)(0xE5 - t * (0xE5 - 0x14));
         uint8_t b = (uint8_t)(0xFF - t * (0xFF - 0x93));
         lv_obj_set_style_bg_color(s_pp_cell_bars[slot], lv_color_make(r, g, b), 0);
     }
+    if (s_pp_sliders[slot]) {
+        lv_color_t bg = pp_value_color(t);
+        lv_obj_set_style_bg_color(s_pp_sliders[slot], bg, 0);
+        uint8_t r = (uint8_t)(0x00 + t * (0xFF - 0x00));
+        uint8_t g = (uint8_t)(0xE5 - t * (0xE5 - 0x14));
+        uint8_t b = (uint8_t)(0xFF - t * (0xFF - 0x93));
+        lv_obj_set_style_border_color(s_pp_sliders[slot], lv_color_make(r, g, b), 0);
+    }
 }
 
-static void pp_cell_click_cb(lv_event_t* e) {
-    int slot = (int)(intptr_t)lv_event_get_user_data(e);
+static void pp_cell_step(int slot) {
     const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
     if (slot < 0 || slot >= (int)eng->param_count) return;
     const SynthParamDef* p = &eng->params[slot];
     float fv = s_pp_values[s_pp_engine_idx][slot];
     float range = p->vmax - p->vmin;
     if (range <= 0.f) return;
-    // Discrete int params with small range -> step by 1 unit. Otherwise 10%.
     float step;
     if (p->step_int && range <= 20.f) {
         step = 1.f;
+    } else if (p->step_int) {
+        step = range * 0.04f;
     } else {
-        step = range * 0.10f;
+        step = range * 0.03f;
     }
     fv += step;
-    if (fv > p->vmax + 1e-3f) fv = p->vmin;  // wrap
+    if (fv > p->vmax + 1e-3f) fv = p->vmin;
     if (p->step_int) fv = (float)((int)(fv + 0.5f));
     s_pp_values[s_pp_engine_idx][slot] = fv;
     pp_cell_redraw_value(slot);
@@ -3558,7 +3571,15 @@ static void pp_cell_click_cb(lv_event_t* e) {
     }
 }
 
-static void pp_cell_longpress_cb(lv_event_t* e) {
+static void pp_cell_press_cb(lv_event_t* e) {
+    pp_cell_step((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void pp_cell_long_repeat_cb(lv_event_t* e) {
+    pp_cell_step((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void pp_cell_reset_cb(lv_event_t* e) {
     int slot = (int)(intptr_t)lv_event_get_user_data(e);
     const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
     if (slot < 0 || slot >= (int)eng->param_count) return;
@@ -3651,16 +3672,25 @@ static void pp_rebuild_param_grid(void) {
         lv_obj_align(vlbl, LV_ALIGN_CENTER, 0, 2);
         s_pp_val_lbls[i] = vlbl;
 
-        // Tap hint icon top-right ("RST" via long-press)
-        lv_obj_t* hint = lv_label_create(cell);
-        lv_label_set_text(hint, "TAP+ / HOLD=RST");
-        lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(hint, RED808_TEXT_DIM, 0);
-        lv_obj_align(hint, LV_ALIGN_TOP_RIGHT, -8, 10);
-        lv_obj_clear_flag(hint, LV_OBJ_FLAG_CLICKABLE);
+        // RST badge top-right — child button consumes its own click so the
+        // surrounding cell only sees press/hold events.
+        lv_obj_t* rst = lv_btn_create(cell);
+        lv_obj_set_size(rst, 50, 26);
+        lv_obj_align(rst, LV_ALIGN_TOP_RIGHT, -6, 6);
+        lv_obj_set_style_radius(rst, 6, 0);
+        lv_obj_set_style_bg_color(rst, lv_color_hex(0x222B40), 0);
+        lv_obj_set_style_border_color(rst, RED808_TEXT_DIM, 0);
+        lv_obj_set_style_border_width(rst, 1, 0);
+        lv_obj_set_style_shadow_width(rst, 0, 0);
+        lv_obj_t* rl = lv_label_create(rst);
+        lv_label_set_text(rl, "RST");
+        lv_obj_set_style_text_font(rl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(rl, RED808_TEXT, 0);
+        lv_obj_center(rl);
+        lv_obj_add_event_cb(rst, pp_cell_reset_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
 
-        lv_obj_add_event_cb(cell, pp_cell_click_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
-        lv_obj_add_event_cb(cell, pp_cell_longpress_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)i);
+        lv_obj_add_event_cb(cell, pp_cell_press_cb, LV_EVENT_PRESSED, (void*)(intptr_t)i);
+        lv_obj_add_event_cb(cell, pp_cell_long_repeat_cb, LV_EVENT_LONG_PRESSED_REPEAT, (void*)(intptr_t)i);
         s_pp_sliders[i] = cell;  // reuse the array slot for cleanup
 
         pp_cell_redraw_value(i);

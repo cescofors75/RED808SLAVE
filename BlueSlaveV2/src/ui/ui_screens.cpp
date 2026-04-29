@@ -4790,8 +4790,9 @@ static void mel_rec_cb(lv_event_t* e) {
 
 // Public — invoked from main.cpp's UDP receiver when "melodyRecNote" arrives.
 // Maps MIDI note → grid row at the current octave, lights cell, advances step.
+// Records unconditionally: the gate lives on the sender side (P4 piano REC
+// only sends when its own REC button is active), so S3 just captures.
 bool melody_record_midi_note(uint8_t midi) {
-    if (!s_mel_recording) return false;
     int rel = (int)midi - (s_mel_octave + 1) * 12;
     // Snap into the active octave window if note is out of range.
     while (rel < 0)   rel += 12;
@@ -4807,6 +4808,12 @@ bool melody_record_midi_note(uint8_t midi) {
     s_mel_grid[col][row] = true;
     mel_redraw_cell(col, row);
     s_mel_rec_step = (col + 1) % 16;
+    // Auto-arm the visual REC indicator on first remote note so the user
+    // sees that recording is happening.
+    if (!s_mel_recording) {
+        s_mel_recording = true;
+        mel_rec_set_visual(true);
+    }
     return true;
 }
 
@@ -5096,76 +5103,197 @@ static void pp_slider_event_cb(lv_event_t* e) {
     pp_send_param(eng->engine, p->param_id, 0, fv);
 }
 
-// Rebuild grid of sliders for current engine (called on engine switch & init)
+// v2.9 — Hold-to-increment touch cells with background color tracking the value.
+// Press and hold = value rises smoothly (with wrap). Tap the small RST badge
+// in the corner = reset to default. The cell background fades from a deep
+// blue to a hot magenta so the value is readable at a glance during a show.
+static lv_obj_t* s_pp_cell_bars[PP_MAX_PARAMS] = {};
+
+static inline lv_color_t pp_value_color(float t) {
+    if (t < 0) t = 0; if (t > 1) t = 1;
+    // Two-stop gradient: deep blue (#0A1840) -> magenta-pink (#FF1493).
+    uint8_t r = (uint8_t)(0x0A + t * (0xFF - 0x0A));
+    uint8_t g = (uint8_t)(0x18 + t * (0x14 - 0x18));  // tiny dip
+    uint8_t b = (uint8_t)(0x40 + t * (0x93 - 0x40));
+    return lv_color_make(r, g, b);
+}
+
+static void pp_cell_redraw_value(int slot) {
+    const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
+    if (slot < 0 || slot >= (int)eng->param_count) return;
+    const SynthParamDef* p = &eng->params[slot];
+    float fv = s_pp_values[s_pp_engine_idx][slot];
+    float t = (fv - p->vmin) / (p->vmax - p->vmin);
+    if (t < 0) t = 0; if (t > 1) t = 1;
+    if (s_pp_val_lbls[slot]) {
+        char buf[24];
+        pp_format_value(buf, sizeof(buf), p, fv);
+        lv_label_set_text(s_pp_val_lbls[slot], buf);
+    }
+    if (s_pp_cell_bars[slot]) {
+        int full_w = (int)(intptr_t)lv_obj_get_user_data(s_pp_cell_bars[slot]);
+        int w = (int)(full_w * t + 0.5f);
+        if (w < 4) w = 4;
+        lv_obj_set_width(s_pp_cell_bars[slot], w);
+        uint8_t r = (uint8_t)(0x00 + t * (0xFF - 0x00));
+        uint8_t g = (uint8_t)(0xE5 - t * (0xE5 - 0x14));
+        uint8_t b = (uint8_t)(0xFF - t * (0xFF - 0x93));
+        lv_obj_set_style_bg_color(s_pp_cell_bars[slot], lv_color_make(r, g, b), 0);
+    }
+    if (s_pp_sliders[slot]) {
+        // Whole-cell background follows the value (the user-visible feedback).
+        lv_color_t bg = pp_value_color(t);
+        lv_obj_set_style_bg_color(s_pp_sliders[slot], bg, 0);
+        uint8_t r = (uint8_t)(0x00 + t * (0xFF - 0x00));
+        uint8_t g = (uint8_t)(0xE5 - t * (0xE5 - 0x14));
+        uint8_t b = (uint8_t)(0xFF - t * (0xFF - 0x93));
+        lv_obj_set_style_border_color(s_pp_sliders[slot], lv_color_make(r, g, b), 0);
+    }
+}
+
+static void pp_cell_step(int slot) {
+    const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
+    if (slot < 0 || slot >= (int)eng->param_count) return;
+    const SynthParamDef* p = &eng->params[slot];
+    float fv = s_pp_values[s_pp_engine_idx][slot];
+    float range = p->vmax - p->vmin;
+    if (range <= 0.f) return;
+    float step;
+    if (p->step_int && range <= 20.f) {
+        step = 1.f;                  // discrete options: one per repeat
+    } else if (p->step_int) {
+        step = range * 0.04f;        // bigger int ranges
+    } else {
+        step = range * 0.03f;        // smooth continuous params
+    }
+    fv += step;
+    if (fv > p->vmax + 1e-3f) fv = p->vmin;  // wrap to min
+    if (p->step_int) fv = (float)((int)(fv + 0.5f));
+    s_pp_values[s_pp_engine_idx][slot] = fv;
+    pp_cell_redraw_value(slot);
+    pp_send_param(eng->engine, p->param_id, 0, fv);
+}
+
+static void pp_cell_press_cb(lv_event_t* e) {
+    pp_cell_step((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void pp_cell_long_repeat_cb(lv_event_t* e) {
+    pp_cell_step((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void pp_cell_reset_cb(lv_event_t* e) {
+    int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
+    if (slot < 0 || slot >= (int)eng->param_count) return;
+    const SynthParamDef* p = &eng->params[slot];
+    s_pp_values[s_pp_engine_idx][slot] = p->vdef;
+    pp_cell_redraw_value(slot);
+    pp_send_param(eng->engine, p->param_id, 0, p->vdef);
+}
+
+// Rebuild grid of touch cells for current engine (called on engine switch & init)
 static void pp_rebuild_param_grid() {
     if (!s_pp_param_panel) return;
-    // wipe panel
     lv_obj_clean(s_pp_param_panel);
     for (int i = 0; i < PP_MAX_PARAMS; i++) {
         s_pp_sliders[i] = NULL;
         s_pp_val_lbls[i] = NULL;
         s_pp_name_lbls[i] = NULL;
+        s_pp_cell_bars[i] = NULL;
     }
     const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
     int count = eng->param_count;
-    int panel_w, panel_h;
-    panel_w = lv_obj_get_width(s_pp_param_panel);
-    panel_h = lv_obj_get_height(s_pp_param_panel);
-    int cols = PP_GRID_COLS_S3;
+
+    // Use known panel geometry directly: panel = (UI_W-24) × (UI_H-190).
+    int panel_w = UI_W - 24;
+    int panel_h = UI_H - 190;
+
+    int cols = 5;
     int rows = (count + cols - 1) / cols;
     if (rows < 1) rows = 1;
-    if (rows > PP_GRID_ROWS_S3) rows = PP_GRID_ROWS_S3;
-    int gap_x = 6, gap_y = 6;
-    int cell_w = (panel_w - (cols - 1) * gap_x - 8) / cols;
-    int cell_h = (panel_h - (rows - 1) * gap_y - 8) / rows;
-    if (cell_h < 70) cell_h = 70;
+    int gap = 8;
+    int pad = 6;
+    int cell_w = (panel_w - 2 * pad - (cols - 1) * gap) / cols;
+    int cell_h = (panel_h - 2 * pad - (rows - 1) * gap) / rows;
+    if (cell_h < 80) cell_h = 80;
 
     for (int i = 0; i < count && i < PP_MAX_PARAMS; i++) {
         int col = i % cols;
         int row = i / cols;
-        int x = 4 + col * (cell_w + gap_x);
-        int y = 4 + row * (cell_h + gap_y);
+        int x = pad + col * (cell_w + gap);
+        int y = pad + row * (cell_h + gap);
         const SynthParamDef* p = &eng->params[i];
 
-        lv_obj_t* cell = lv_obj_create(s_pp_param_panel);
+        // Whole-cell button — large touch target for live performance.
+        lv_obj_t* cell = lv_btn_create(s_pp_param_panel);
         lv_obj_set_size(cell, cell_w, cell_h);
         lv_obj_set_pos(cell, x, y);
-        lv_obj_set_style_radius(cell, 6, 0);
+        lv_obj_set_style_radius(cell, 10, 0);
         lv_obj_set_style_bg_color(cell, RED808_SURFACE, 0);
+        lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, 0);
         lv_obj_set_style_border_color(cell, RED808_BORDER, 0);
-        lv_obj_set_style_border_width(cell, 1, 0);
-        lv_obj_set_style_pad_all(cell, 4, 0);
+        lv_obj_set_style_border_width(cell, 2, 0);
+        lv_obj_set_style_shadow_width(cell, 0, 0);
+        lv_obj_set_style_pad_all(cell, 0, 0);
         lv_obj_clear_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
 
-        // Name
+        // Bottom horizontal fill bar — visualizes the current value.
+        int bar_full_w = cell_w - 14;
+        int bar_h = 14;
+        lv_obj_t* bar = lv_obj_create(cell);
+        lv_obj_set_size(bar, bar_full_w, bar_h);
+        lv_obj_set_pos(bar, 7, cell_h - bar_h - 8);
+        lv_obj_set_style_radius(bar, bar_h / 2, 0);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(0x00E5FF), 0);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(bar, 0, 0);
+        lv_obj_set_style_shadow_width(bar, 0, 0);
+        lv_obj_set_style_pad_all(bar, 0, 0);
+        lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_user_data(bar, (void*)(intptr_t)bar_full_w);
+        s_pp_cell_bars[i] = bar;
+
+        // Name (top-left, large)
         lv_obj_t* nlbl = lv_label_create(cell);
         lv_label_set_text(nlbl, p->name);
-        lv_obj_set_style_text_font(nlbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(nlbl, &lv_font_montserrat_18, 0);
         lv_obj_set_style_text_color(nlbl, RED808_TEXT, 0);
-        lv_obj_align(nlbl, LV_ALIGN_TOP_LEFT, 2, 2);
+        lv_obj_align(nlbl, LV_ALIGN_TOP_LEFT, 10, 8);
         s_pp_name_lbls[i] = nlbl;
 
-        // Value
+        // Value (centered, big yellow)
         lv_obj_t* vlbl = lv_label_create(cell);
-        lv_obj_set_style_text_font(vlbl, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(vlbl, lv_color_hex(0x00E5FF), 0);
-        char buf[24];
-        pp_format_value(buf, sizeof(buf), p, s_pp_values[s_pp_engine_idx][i]);
-        lv_label_set_text(vlbl, buf);
-        lv_obj_align(vlbl, LV_ALIGN_TOP_RIGHT, -2, 2);
+        lv_obj_set_style_text_font(vlbl, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(vlbl, lv_color_hex(0xFFE066), 0);
+        lv_obj_align(vlbl, LV_ALIGN_CENTER, 0, 2);
         s_pp_val_lbls[i] = vlbl;
 
-        // Slider
-        lv_obj_t* sl = lv_slider_create(cell);
-        lv_obj_set_size(sl, cell_w - 16, 20);
-        lv_obj_align(sl, LV_ALIGN_BOTTOM_MID, 0, -6);
-        lv_slider_set_range(sl, 0, 1000);
-        lv_slider_set_value(sl, pp_f2i(s_pp_values[s_pp_engine_idx][i], p->vmin, p->vmax), LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(sl, RED808_BG, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(sl, lv_color_hex(0x00E5FF), LV_PART_INDICATOR);
-        lv_obj_set_style_bg_color(sl, lv_color_hex(0x00E5FF), LV_PART_KNOB);
-        lv_obj_add_event_cb(sl, pp_slider_event_cb, LV_EVENT_VALUE_CHANGED, (void*)(intptr_t)i);
-        s_pp_sliders[i] = sl;
+        // RST badge — small button at top-right of cell. Catches its own
+        // clicks before they bubble up to the cell so the cell only gets
+        // the press/hold events for incrementing.
+        lv_obj_t* rst = lv_btn_create(cell);
+        lv_obj_set_size(rst, 50, 26);
+        lv_obj_align(rst, LV_ALIGN_TOP_RIGHT, -6, 6);
+        lv_obj_set_style_radius(rst, 6, 0);
+        lv_obj_set_style_bg_color(rst, lv_color_hex(0x222B40), 0);
+        lv_obj_set_style_border_color(rst, RED808_TEXT_DIM, 0);
+        lv_obj_set_style_border_width(rst, 1, 0);
+        lv_obj_set_style_shadow_width(rst, 0, 0);
+        lv_obj_t* rl = lv_label_create(rst);
+        lv_label_set_text(rl, "RST");
+        lv_obj_set_style_text_font(rl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(rl, RED808_TEXT, 0);
+        lv_obj_center(rl);
+        lv_obj_add_event_cb(rst, pp_cell_reset_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+
+        // Press once -> step. Then LONG_PRESSED_REPEAT keeps stepping while
+        // the finger is down (LVGL fires this every ~100ms by default).
+        lv_obj_add_event_cb(cell, pp_cell_press_cb, LV_EVENT_PRESSED, (void*)(intptr_t)i);
+        lv_obj_add_event_cb(cell, pp_cell_long_repeat_cb, LV_EVENT_LONG_PRESSED_REPEAT, (void*)(intptr_t)i);
+        s_pp_sliders[i] = cell;  // reuse slot for cleanup tracking
+
+        pp_cell_redraw_value(i);
     }
 }
 
