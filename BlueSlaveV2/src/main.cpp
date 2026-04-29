@@ -1724,6 +1724,13 @@ void receiveUDPData() {
         float bpm = doc["value"].is<float>() ? doc["value"].as<float>() : (float)(doc["value"] | Config::DEFAULT_BPM);
         applyBPMPrecise(bpm, false);
     }
+    else if (strcmp(cmd, "melodyRecNote") == 0) {
+        // v2.7 — incoming note from P4 piano (REC mode) → write into melody grid
+        int note = doc["note"] | -1;
+        if (note >= 0 && note <= 127) {
+            melody_record_midi_note((uint8_t)note);
+        }
+    }
     else if (strcmp(cmd, "volume_sync") == 0 ||
              strcmp(cmd, "master_volume_sync") == 0 ||
              strcmp(cmd, "volume_master_sync") == 0 ||
@@ -3176,6 +3183,7 @@ void setup() {
         ui_create_performance_screen();
         ui_create_samples_screen();
         ui_create_melody_screen();    // v2.6 — piano roll editor
+        ui_create_piano_params_screen();  // v2.7 — synth params editor
 
         // Start on boot animation; boot_timer_cb() will navigate to SCREEN_MENU when complete
         currentScreen = SCREEN_BOOT;

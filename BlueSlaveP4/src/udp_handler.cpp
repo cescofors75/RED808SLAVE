@@ -96,6 +96,37 @@ void udp_send_synth_note_off(uint8_t engine, uint8_t track) {
     sendJson(buf);
 }
 
+void udp_send_synth_param(uint8_t engine, uint8_t instrument, uint8_t paramId, float value) {
+    char buf[160];
+    if (engine == 3) {
+        // TB-303 uses dedicated command
+        snprintf(buf, sizeof(buf),
+                 "{\"cmd\":\"synth303Param\",\"paramId\":%u,\"value\":%.4f}",
+                 (unsigned)paramId, value);
+    } else {
+        snprintf(buf, sizeof(buf),
+                 "{\"cmd\":\"synthParam\",\"engine\":%u,\"instrument\":%u,\"paramId\":%u,\"value\":%.4f}",
+                 (unsigned)engine, (unsigned)instrument, (unsigned)paramId, value);
+    }
+    sendJson(buf);
+}
+
+void udp_send_synth_preset(uint8_t engine, uint8_t preset) {
+    char buf[96];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"synthPreset\",\"engine\":%u,\"preset\":%u}",
+             (unsigned)engine, (unsigned)preset);
+    sendJson(buf);
+}
+
+void udp_send_melody_rec_note(uint8_t engine, uint8_t note) {
+    char buf[96];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"melodyRecNote\",\"engine\":%u,\"note\":%u}",
+             (unsigned)engine, (unsigned)note);
+    sendJson(buf);
+}
+
 void udp_send_start(void) { sendCmd("start"); }
 void udp_send_stop(void)  { sendCmd("stop"); }
 

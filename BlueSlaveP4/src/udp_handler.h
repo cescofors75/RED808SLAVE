@@ -53,5 +53,12 @@ void udp_send_synth_note_on_ex(uint8_t engine, uint8_t note, uint8_t velocity,
                                 bool accent, bool slide);
 void udp_send_synth_note_off(uint8_t engine, uint8_t track);
 
+// Synth parameter editor
+void udp_send_synth_param(uint8_t engine, uint8_t instrument, uint8_t paramId, float value);
+void udp_send_synth_preset(uint8_t engine, uint8_t preset);
+
+// v2.7 — record-mode note for the S3 melody screen (master forwards to all slaves)
+void udp_send_melody_rec_note(uint8_t engine, uint8_t note);
+
 // Request full sync from Master
 void udp_request_master_sync(void);

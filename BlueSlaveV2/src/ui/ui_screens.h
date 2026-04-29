@@ -20,6 +20,7 @@ extern lv_obj_t* scr_samples;
 extern lv_obj_t* scr_boot;
 extern lv_obj_t* scr_seq_circle;
 extern lv_obj_t* scr_melody;        // v2.6 — piano roll / score editor
+extern lv_obj_t* scr_piano_params;  // v2.7 — synth engine parameter editor
 
 // Create screens
 void ui_create_menu_screen();
@@ -36,6 +37,12 @@ void ui_create_samples_screen();
 void ui_create_boot_screen();
 void ui_create_seq_circle_screen();
 void ui_create_melody_screen();      // v2.6 — piano roll editor
+void ui_create_piano_params_screen(); // v2.7 — synth params editor
+
+// v2.7 — MELODY: write a MIDI note into the active step (called from
+// receiveUDPData when "melodyRecNote" arrives, or from local sources).
+// Returns true if recording is currently active (note was captured).
+bool melody_record_midi_note(uint8_t midi);
 
 // Update functions (called from timer)
 void ui_update_sequencer();

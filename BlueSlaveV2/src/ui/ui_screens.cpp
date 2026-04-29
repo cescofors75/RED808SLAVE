@@ -45,6 +45,7 @@ lv_obj_t* scr_samples = NULL;
 lv_obj_t* scr_boot = NULL;
 lv_obj_t* scr_seq_circle = NULL;
 lv_obj_t* scr_melody = NULL;        // v2.6 — piano roll / score editor
+lv_obj_t* scr_piano_params = NULL;  // v2.7 — synth engine parameter editor
 
 // Header widgets (updated live)
 static constexpr uint8_t HEADER_SLOT_COUNT = SCREEN_COUNT;
@@ -779,6 +780,7 @@ static void menu_btn_cb(lv_event_t* e) {
         case 6: nav_to(SCREEN_SETTINGS, scr_settings); break;
         case 7: nav_to(SCREEN_DIAGNOSTICS, scr_diagnostics); break;
         case 8: nav_to(SCREEN_MELODY, scr_melody); break;  // v2.6 — piano roll
+        case 9: nav_to(SCREEN_PIANO_PARAMS, scr_piano_params); break;  // v2.7 — synth params
     }
 }
 
@@ -798,16 +800,18 @@ void ui_create_menu_screen() {
         LV_SYMBOL_SETTINGS "\nBUTTONS",
         LV_SYMBOL_HOME "\nSETTINGS",
         LV_SYMBOL_EYE_OPEN "\nSTATUS",
-        LV_SYMBOL_PLAY "\nMELODY"   // v2.6 — piano roll editor
+        LV_SYMBOL_PLAY "\nMELODY",   // v2.6 — piano roll editor
+        LV_SYMBOL_SETTINGS "\nPIANO\nPARAMS"  // v2.7 — synth editor
     };
     const lv_color_t menu_colors[] = {
         RED808_ACCENT,   RED808_INFO,     RED808_SUCCESS,
         RED808_CYAN,     RED808_ACCENT2,  RED808_ERROR,
         lv_color_hex(0xFF8C00), RED808_TEXT_DIM,  // SETTINGS: naranja ámbar vistoso
-        lv_color_hex(0xFF1493)                    // MELODY: deep pink
+        lv_color_hex(0xFF1493),                   // MELODY: deep pink
+        lv_color_hex(0x00E5FF)                    // PIANO PARAMS: cyan brillante
     };
-    static const int menu_count = 9;   // botones activos (was 8)
-    static const int menu_total = 9;   // 1 placeholder removed
+    static const int menu_count = 10;  // botones activos
+    static const int menu_total = 10;
 
     // Placeholder labels (índice 9 reservado para futuro — actualmente 0 placeholders)
     static const char* placeholder_labels[] = {
@@ -4599,6 +4603,19 @@ static lv_obj_t* mel_cells[16][12]    = {{NULL}};
 static lv_obj_t* mel_octave_lbl       = NULL;
 static lv_obj_t* mel_status_lbl       = NULL;
 
+// v2.7 — preview / record / step indicator
+static lv_timer_t* s_mel_play_timer   = NULL;
+static int         s_mel_play_step    = 0;
+static bool        s_mel_recording    = false;
+static int         s_mel_rec_step     = 0;
+static int         s_mel_assign_pad   = 0;     // 0..15
+static lv_obj_t*   mel_play_btn       = NULL;
+static lv_obj_t*   mel_play_lbl       = NULL;
+static lv_obj_t*   mel_rec_btn        = NULL;
+static lv_obj_t*   mel_rec_lbl        = NULL;
+static lv_obj_t*   mel_assign_btn     = NULL;
+static lv_obj_t*   mel_assign_lbl     = NULL;
+
 static void mel_send_note_on(int row, int vel) {
     if (!udpConnected) return;
     int pc      = MEL_NOTE_PC[row];
@@ -4686,6 +4703,140 @@ static void mel_clear_cb(lv_event_t* e) {
     }
 }
 
+// v2.7 — visual highlight of the playhead column (border accent)
+static int s_mel_playhead_col = -1;
+static void mel_paint_playhead(int col) {
+    if (s_mel_playhead_col == col) return;
+    int prev = s_mel_playhead_col;
+    s_mel_playhead_col = col;
+    if (prev >= 0 && prev < 16) {
+        for (int r = 0; r < 12; r++) mel_redraw_cell(prev, r);
+    }
+    if (col >= 0 && col < 16) {
+        for (int r = 0; r < 12; r++) {
+            lv_obj_t* c = mel_cells[col][r];
+            if (!c) continue;
+            lv_obj_set_style_border_color(c, lv_color_hex(0xFFD93D), 0);
+            lv_obj_set_style_border_width(c, 2, 0);
+        }
+    }
+}
+
+static void mel_play_step_cb(lv_timer_t* t) {
+    (void)t;
+    int col = s_mel_play_step;
+    mel_paint_playhead(col);
+    if (col >= 0 && col < 16) {
+        for (int r = 0; r < 12; r++) {
+            if (s_mel_grid[col][r]) {
+                mel_send_note_on(r, 110);
+            }
+        }
+    }
+    s_mel_play_step = (s_mel_play_step + 1) % 16;
+}
+
+static void mel_play_stop(void) {
+    if (s_mel_play_timer) {
+        lv_timer_del(s_mel_play_timer);
+        s_mel_play_timer = NULL;
+    }
+    s_mel_play_step = 0;
+    if (s_mel_playhead_col >= 0) {
+        int prev = s_mel_playhead_col;
+        s_mel_playhead_col = -1;
+        for (int r = 0; r < 12; r++) mel_redraw_cell(prev, r);
+    }
+    if (mel_play_lbl) lv_label_set_text(mel_play_lbl, LV_SYMBOL_PLAY " PREVIEW");
+}
+
+static void mel_play_start(void) {
+    if (s_mel_play_timer) return;
+    s_mel_play_step = 0;
+    int bpm = currentBPM;
+    if (bpm < 40)  bpm = 40;
+    if (bpm > 240) bpm = 240;
+    uint32_t step_ms = (uint32_t)(60000U / (bpm * 4));   // 16th notes
+    if (step_ms < 30) step_ms = 30;
+    s_mel_play_timer = lv_timer_create(mel_play_step_cb, step_ms, NULL);
+    if (mel_play_lbl) lv_label_set_text(mel_play_lbl, LV_SYMBOL_STOP " STOP");
+}
+
+static void mel_play_cb(lv_event_t* e) {
+    (void)e;
+    if (s_mel_play_timer) mel_play_stop();
+    else                   mel_play_start();
+}
+
+static void mel_rec_set_visual(bool on) {
+    if (mel_rec_btn) {
+        lv_obj_set_style_border_color(mel_rec_btn,
+            on ? RED808_ERROR : RED808_BORDER, 0);
+        lv_obj_set_style_border_width(mel_rec_btn, on ? 3 : 2, 0);
+    }
+    if (mel_rec_lbl) {
+        lv_obj_set_style_text_color(mel_rec_lbl,
+            on ? RED808_ERROR : RED808_TEXT, 0);
+        lv_label_set_text(mel_rec_lbl, on ? "● REC" : "○ REC");
+    }
+}
+
+static void mel_rec_cb(lv_event_t* e) {
+    (void)e;
+    s_mel_recording = !s_mel_recording;
+    s_mel_rec_step  = 0;
+    mel_rec_set_visual(s_mel_recording);
+}
+
+// Public — invoked from main.cpp's UDP receiver when "melodyRecNote" arrives.
+// Maps MIDI note → grid row at the current octave, lights cell, advances step.
+bool melody_record_midi_note(uint8_t midi) {
+    if (!s_mel_recording) return false;
+    int rel = (int)midi - (s_mel_octave + 1) * 12;
+    // Snap into the active octave window if note is out of range.
+    while (rel < 0)   rel += 12;
+    while (rel >= 12) rel -= 12;
+    int pc  = rel % 12;
+    int row = -1;
+    for (int r = 0; r < 12; r++) {
+        if (MEL_NOTE_PC[r] == pc) { row = r; break; }
+    }
+    if (row < 0) return false;
+    int col = s_mel_rec_step;
+    if (col < 0 || col >= 16) col = 0;
+    s_mel_grid[col][row] = true;
+    mel_redraw_cell(col, row);
+    s_mel_rec_step = (col + 1) % 16;
+    return true;
+}
+
+static void mel_assign_cb(lv_event_t* e) {
+    (void)e;
+    if (!udpConnected) return;
+    JsonDocument doc(sramAllocatorPtr);
+    doc["cmd"]    = "melodyAssign";
+    doc["pad"]    = s_mel_assign_pad;
+    doc["engine"] = MEL_ENGINES[s_mel_engine_idx];
+    doc["octave"] = s_mel_octave;
+    JsonArray steps = doc["steps"].to<JsonArray>();
+    for (int c = 0; c < 16; c++) {
+        JsonArray col = steps.add<JsonArray>();
+        for (int r = 0; r < 12; r++) {
+            if (s_mel_grid[c][r]) {
+                int pc   = MEL_NOTE_PC[r];
+                int midi = (s_mel_octave + 1) * 12 + pc;
+                col.add(midi);
+            }
+        }
+    }
+    sendUDPCommand(doc);
+    // Cycle pad target 0..15 for UX feedback
+    s_mel_assign_pad = (s_mel_assign_pad + 1) % 16;
+    if (mel_assign_lbl) {
+        lv_label_set_text_fmt(mel_assign_lbl, "→ PAD %d", s_mel_assign_pad + 1);
+    }
+}
+
 void ui_create_melody_screen() {
     scr_melody = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_melody, RED808_BG, 0);
@@ -4754,6 +4905,23 @@ void ui_create_melody_screen() {
     lv_obj_set_style_text_color(mel_status_lbl, RED808_TEXT_DIM, 0);
     lv_obj_set_pos(mel_status_lbl, 340, row2_y + 10);
 
+    // v2.7 — PREVIEW / REC / ASSIGN action chips (right side of row2)
+    mel_play_btn = make_chip(440, row2_y, 130, 38, LV_SYMBOL_PLAY " PREVIEW",
+                              lv_color_hex(0x00E5FF), mel_play_cb, NULL);
+    mel_play_lbl = lv_obj_get_child(mel_play_btn, 0);
+
+    mel_rec_btn = make_chip(580, row2_y, 100, 38, "○ REC",
+                             RED808_TEXT, mel_rec_cb, NULL);
+    mel_rec_lbl = lv_obj_get_child(mel_rec_btn, 0);
+    mel_rec_set_visual(s_mel_recording);
+
+    mel_assign_btn = make_chip(690, row2_y, 140, 38, "→ PAD 1",
+                                lv_color_hex(0xFF1493), mel_assign_cb, NULL);
+    mel_assign_lbl = lv_obj_get_child(mel_assign_btn, 0);
+    if (mel_assign_lbl) {
+        lv_label_set_text_fmt(mel_assign_lbl, "→ PAD %d", s_mel_assign_pad + 1);
+    }
+
     // ---- Grid: 16 cols × 12 rows ----
     // Reserve label column on the left for piano-key labels (width 56)
     const int grid_top    = 108;
@@ -4814,5 +4982,375 @@ void ui_create_melody_screen() {
             lv_obj_add_event_cb(cell, mel_cell_cb, LV_EVENT_CLICKED, (void*)packed);
         }
     }
+}
+
+// =============================================================================
+// PIANO PARAMS SCREEN — synth engine parameter editor (303/WT/SH101/FM2)
+// v2.7 — mirrors the web synth-editor with engine tabs + presets + sliders.
+// =============================================================================
+#include "../../../shared/synth_params.h"
+
+#define PP_GRID_COLS_S3   5
+#define PP_GRID_ROWS_S3   4
+#define PP_MAX_PARAMS     20  // enough for SH101 (19)
+
+static int       s_pp_engine_idx = 0;        // index into SP_ENGINES (0..3)
+static int       s_pp_preset_idx[SP_ENGINE_COUNT] = { -1, -1, -1, -1 };
+static float     s_pp_values[SP_ENGINE_COUNT][PP_MAX_PARAMS] = {};
+static lv_obj_t* s_pp_engine_btns[SP_ENGINE_COUNT] = {};
+static lv_obj_t* s_pp_preset_btns[4] = {};
+static lv_obj_t* s_pp_param_panel    = NULL;
+static lv_obj_t* s_pp_sliders[PP_MAX_PARAMS] = {};
+static lv_obj_t* s_pp_val_lbls[PP_MAX_PARAMS] = {};
+static lv_obj_t* s_pp_name_lbls[PP_MAX_PARAMS] = {};
+static lv_obj_t* s_pp_title_lbl = NULL;
+
+// Map slider int (0..1000) <-> float (vmin..vmax)
+static inline int pp_f2i(float v, float vmin, float vmax) {
+    if (vmax <= vmin) return 0;
+    float t = (v - vmin) / (vmax - vmin);
+    if (t < 0) t = 0;  if (t > 1) t = 1;
+    return (int)(t * 1000.0f + 0.5f);
+}
+static inline float pp_i2f(int i, float vmin, float vmax) {
+    return vmin + (vmax - vmin) * (float)i / 1000.0f;
+}
+
+static void pp_send_param(uint8_t engine, uint8_t param_id, uint8_t instrument, float value) {
+    extern bool udpConnected;
+    if (!udpConnected) return;
+    JsonDocument doc(sramAllocatorPtr);
+    if (engine == SP_ENGINE_303) {
+        doc["cmd"]     = "synth303Param";
+        doc["paramId"] = param_id;
+        doc["value"]   = value;
+    } else {
+        doc["cmd"]        = "synthParam";
+        doc["engine"]     = engine;
+        doc["instrument"] = instrument;
+        doc["paramId"]    = param_id;
+        doc["value"]      = value;
+    }
+    sendUDPCommand(doc);
+}
+
+static void pp_send_preset_cmd(uint8_t engine, uint8_t preset_idx) {
+    extern bool udpConnected;
+    if (!udpConnected) return;
+    JsonDocument doc(sramAllocatorPtr);
+    doc["cmd"]    = "synthPreset";
+    doc["engine"] = engine;
+    doc["preset"] = preset_idx;
+    sendUDPCommand(doc);
+}
+
+static void pp_format_value(char* buf, size_t bufsz, const SynthParamDef* p, float v) {
+    if (p->step_int) {
+        snprintf(buf, bufsz, "%d%s%s", (int)(v + 0.5f), p->unit[0] ? " " : "", p->unit);
+    } else if (p->vmax >= 100.f) {
+        snprintf(buf, bufsz, "%.0f%s%s", v, p->unit[0] ? " " : "", p->unit);
+    } else if (p->vmax >= 10.f) {
+        snprintf(buf, bufsz, "%.2f%s%s", v, p->unit[0] ? " " : "", p->unit);
+    } else {
+        snprintf(buf, bufsz, "%.3f%s%s", v, p->unit[0] ? " " : "", p->unit);
+    }
+}
+
+static void pp_init_engine_defaults(int eng_idx) {
+    const SynthEngineDef* eng = &SP_ENGINES[eng_idx];
+    for (uint8_t i = 0; i < eng->param_count && i < PP_MAX_PARAMS; i++) {
+        s_pp_values[eng_idx][i] = eng->params[i].vdef;
+    }
+}
+
+static void pp_apply_preset_local(int eng_idx, int preset_idx) {
+    const SynthEngineDef* eng = &SP_ENGINES[eng_idx];
+    if (preset_idx < 0 || preset_idx >= eng->preset_count) return;
+    pp_init_engine_defaults(eng_idx);
+    const SynthPreset* pr = &eng->presets[preset_idx];
+    for (uint8_t pv = 0; pv < pr->count; pv++) {
+        for (uint8_t i = 0; i < eng->param_count; i++) {
+            if (eng->params[i].param_id == pr->values[pv].param_id) {
+                s_pp_values[eng_idx][i] = pr->values[pv].value;
+                break;
+            }
+        }
+    }
+}
+
+static void pp_slider_event_cb(lv_event_t* e) {
+    int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
+    if (slot < 0 || slot >= (int)eng->param_count) return;
+    const SynthParamDef* p = &eng->params[slot];
+    lv_obj_t* sl = lv_event_get_target(e);
+    int iv = lv_slider_get_value(sl);
+    float fv = pp_i2f(iv, p->vmin, p->vmax);
+    if (p->step_int) fv = (float)((int)(fv + 0.5f));
+    s_pp_values[s_pp_engine_idx][slot] = fv;
+    if (s_pp_val_lbls[slot]) {
+        char buf[24];
+        pp_format_value(buf, sizeof(buf), p, fv);
+        lv_label_set_text(s_pp_val_lbls[slot], buf);
+    }
+    pp_send_param(eng->engine, p->param_id, 0, fv);
+}
+
+// Rebuild grid of sliders for current engine (called on engine switch & init)
+static void pp_rebuild_param_grid() {
+    if (!s_pp_param_panel) return;
+    // wipe panel
+    lv_obj_clean(s_pp_param_panel);
+    for (int i = 0; i < PP_MAX_PARAMS; i++) {
+        s_pp_sliders[i] = NULL;
+        s_pp_val_lbls[i] = NULL;
+        s_pp_name_lbls[i] = NULL;
+    }
+    const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
+    int count = eng->param_count;
+    int panel_w, panel_h;
+    panel_w = lv_obj_get_width(s_pp_param_panel);
+    panel_h = lv_obj_get_height(s_pp_param_panel);
+    int cols = PP_GRID_COLS_S3;
+    int rows = (count + cols - 1) / cols;
+    if (rows < 1) rows = 1;
+    if (rows > PP_GRID_ROWS_S3) rows = PP_GRID_ROWS_S3;
+    int gap_x = 6, gap_y = 6;
+    int cell_w = (panel_w - (cols - 1) * gap_x - 8) / cols;
+    int cell_h = (panel_h - (rows - 1) * gap_y - 8) / rows;
+    if (cell_h < 70) cell_h = 70;
+
+    for (int i = 0; i < count && i < PP_MAX_PARAMS; i++) {
+        int col = i % cols;
+        int row = i / cols;
+        int x = 4 + col * (cell_w + gap_x);
+        int y = 4 + row * (cell_h + gap_y);
+        const SynthParamDef* p = &eng->params[i];
+
+        lv_obj_t* cell = lv_obj_create(s_pp_param_panel);
+        lv_obj_set_size(cell, cell_w, cell_h);
+        lv_obj_set_pos(cell, x, y);
+        lv_obj_set_style_radius(cell, 6, 0);
+        lv_obj_set_style_bg_color(cell, RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(cell, RED808_BORDER, 0);
+        lv_obj_set_style_border_width(cell, 1, 0);
+        lv_obj_set_style_pad_all(cell, 4, 0);
+        lv_obj_clear_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
+
+        // Name
+        lv_obj_t* nlbl = lv_label_create(cell);
+        lv_label_set_text(nlbl, p->name);
+        lv_obj_set_style_text_font(nlbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(nlbl, RED808_TEXT, 0);
+        lv_obj_align(nlbl, LV_ALIGN_TOP_LEFT, 2, 2);
+        s_pp_name_lbls[i] = nlbl;
+
+        // Value
+        lv_obj_t* vlbl = lv_label_create(cell);
+        lv_obj_set_style_text_font(vlbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(vlbl, lv_color_hex(0x00E5FF), 0);
+        char buf[24];
+        pp_format_value(buf, sizeof(buf), p, s_pp_values[s_pp_engine_idx][i]);
+        lv_label_set_text(vlbl, buf);
+        lv_obj_align(vlbl, LV_ALIGN_TOP_RIGHT, -2, 2);
+        s_pp_val_lbls[i] = vlbl;
+
+        // Slider
+        lv_obj_t* sl = lv_slider_create(cell);
+        lv_obj_set_size(sl, cell_w - 16, 20);
+        lv_obj_align(sl, LV_ALIGN_BOTTOM_MID, 0, -6);
+        lv_slider_set_range(sl, 0, 1000);
+        lv_slider_set_value(sl, pp_f2i(s_pp_values[s_pp_engine_idx][i], p->vmin, p->vmax), LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(sl, RED808_BG, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(sl, lv_color_hex(0x00E5FF), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(sl, lv_color_hex(0x00E5FF), LV_PART_KNOB);
+        lv_obj_add_event_cb(sl, pp_slider_event_cb, LV_EVENT_VALUE_CHANGED, (void*)(intptr_t)i);
+        s_pp_sliders[i] = sl;
+    }
+}
+
+static void pp_update_engine_chips() {
+    for (int i = 0; i < SP_ENGINE_COUNT; i++) {
+        if (!s_pp_engine_btns[i]) continue;
+        bool active = (i == s_pp_engine_idx);
+        lv_obj_set_style_bg_color(s_pp_engine_btns[i], active ? RED808_ACCENT : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(s_pp_engine_btns[i], active ? RED808_ACCENT : RED808_BORDER, 0);
+        lv_obj_t* lbl = lv_obj_get_child(s_pp_engine_btns[i], 0);
+        if (lbl) lv_obj_set_style_text_color(lbl, active ? RED808_BG : RED808_TEXT, 0);
+    }
+}
+
+static void pp_update_preset_chips() {
+    for (int i = 0; i < 4; i++) {
+        if (!s_pp_preset_btns[i]) continue;
+        bool active = (i == s_pp_preset_idx[s_pp_engine_idx]);
+        lv_obj_set_style_bg_color(s_pp_preset_btns[i], active ? lv_color_hex(0xFF1493) : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(s_pp_preset_btns[i],
+                                      active ? lv_color_hex(0xFF1493) : RED808_BORDER, 0);
+        lv_obj_t* lbl = lv_obj_get_child(s_pp_preset_btns[i], 0);
+        if (lbl) lv_obj_set_style_text_color(lbl, active ? RED808_BG : RED808_TEXT, 0);
+    }
+}
+
+static void pp_update_preset_chip_labels() {
+    const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
+    for (int i = 0; i < 4; i++) {
+        if (!s_pp_preset_btns[i]) continue;
+        lv_obj_t* lbl = lv_obj_get_child(s_pp_preset_btns[i], 0);
+        if (lbl) {
+            const char* nm = (i < eng->preset_count) ? eng->presets[i].name : "—";
+            lv_label_set_text(lbl, nm);
+        }
+    }
+}
+
+static void pp_engine_cb(lv_event_t* e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= SP_ENGINE_COUNT) return;
+    s_pp_engine_idx = idx;
+    if (s_pp_title_lbl) {
+        char tbuf[64];
+        snprintf(tbuf, sizeof(tbuf), "PIANO PARAMS · %s", SP_ENGINES[idx].long_name);
+        lv_label_set_text(s_pp_title_lbl, tbuf);
+    }
+    pp_update_engine_chips();
+    pp_update_preset_chip_labels();
+    pp_update_preset_chips();
+    pp_rebuild_param_grid();
+}
+
+static void pp_preset_cb(lv_event_t* e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
+    if (idx < 0 || idx >= eng->preset_count) return;
+    pp_apply_preset_local(s_pp_engine_idx, idx);
+    s_pp_preset_idx[s_pp_engine_idx] = idx;
+    pp_update_preset_chips();
+    pp_rebuild_param_grid();
+    pp_send_preset_cmd(eng->engine, (uint8_t)idx);
+}
+
+static void pp_init_cb(lv_event_t* e) {
+    (void)e;
+    pp_init_engine_defaults(s_pp_engine_idx);
+    s_pp_preset_idx[s_pp_engine_idx] = -1;
+    pp_update_preset_chips();
+    pp_rebuild_param_grid();
+    // Push all defaults to master
+    const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
+    for (uint8_t i = 0; i < eng->param_count; i++) {
+        pp_send_param(eng->engine, eng->params[i].param_id, 0, s_pp_values[s_pp_engine_idx][i]);
+    }
+}
+
+static void pp_back_cb(lv_event_t* e) {
+    (void)e;
+    nav_to(SCREEN_MENU, scr_menu);
+}
+
+void ui_create_piano_params_screen() {
+    // Initialize defaults
+    for (int e = 0; e < SP_ENGINE_COUNT; e++) {
+        pp_init_engine_defaults(e);
+    }
+
+    scr_piano_params = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr_piano_params, RED808_BG, 0);
+    lv_obj_clear_flag(scr_piano_params, LV_OBJ_FLAG_SCROLLABLE);
+    ui_create_header(scr_piano_params);
+
+    // Title
+    s_pp_title_lbl = lv_label_create(scr_piano_params);
+    char tbuf[64];
+    snprintf(tbuf, sizeof(tbuf), "PIANO PARAMS · %s", SP_ENGINES[s_pp_engine_idx].long_name);
+    lv_label_set_text(s_pp_title_lbl, tbuf);
+    lv_obj_set_style_text_font(s_pp_title_lbl, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_color(s_pp_title_lbl, lv_color_hex(0x00E5FF), 0);
+    lv_obj_set_pos(s_pp_title_lbl, 16, 8);
+
+    // BACK button
+    {
+        lv_obj_t* b = lv_btn_create(scr_piano_params);
+        lv_obj_set_size(b, 80, 36);
+        lv_obj_set_pos(b, UI_W - 96, 8);
+        lv_obj_set_style_radius(b, 6, 0);
+        lv_obj_set_style_bg_color(b, RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(b, RED808_ERROR, 0);
+        lv_obj_set_style_border_width(b, 2, 0);
+        lv_obj_t* l = lv_label_create(b);
+        lv_label_set_text(l, LV_SYMBOL_LEFT " BACK");
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(l, RED808_ERROR, 0);
+        lv_obj_center(l);
+        lv_obj_add_event_cb(b, pp_back_cb, LV_EVENT_CLICKED, NULL);
+    }
+
+    // Engine tabs (row 2)
+    const int tab_y = 50, tab_w = 100, tab_h = 38, tab_gap = 6;
+    int x_eng = 16;
+    for (int i = 0; i < SP_ENGINE_COUNT; i++) {
+        lv_obj_t* b = lv_btn_create(scr_piano_params);
+        lv_obj_set_size(b, tab_w, tab_h);
+        lv_obj_set_pos(b, x_eng, tab_y);
+        x_eng += tab_w + tab_gap;
+        lv_obj_set_style_radius(b, 8, 0);
+        lv_obj_set_style_border_width(b, 2, 0);
+        lv_obj_t* lbl = lv_label_create(b);
+        lv_label_set_text(lbl, SP_ENGINES[i].label);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+        lv_obj_center(lbl);
+        lv_obj_add_event_cb(b, pp_engine_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        s_pp_engine_btns[i] = b;
+    }
+
+    // Preset chips (right of engine tabs)
+    const int preset_w = 110;
+    int x_pre = x_eng + 24;
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t* b = lv_btn_create(scr_piano_params);
+        lv_obj_set_size(b, preset_w, tab_h);
+        lv_obj_set_pos(b, x_pre, tab_y);
+        x_pre += preset_w + tab_gap;
+        lv_obj_set_style_radius(b, 8, 0);
+        lv_obj_set_style_border_width(b, 2, 0);
+        lv_obj_t* lbl = lv_label_create(b);
+        lv_label_set_text(lbl, SP_ENGINES[s_pp_engine_idx].presets[i].name);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_center(lbl);
+        lv_obj_add_event_cb(b, pp_preset_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        s_pp_preset_btns[i] = b;
+    }
+
+    // INIT button (rightmost)
+    {
+        lv_obj_t* b = lv_btn_create(scr_piano_params);
+        lv_obj_set_size(b, 80, tab_h);
+        lv_obj_set_pos(b, UI_W - 96, tab_y);
+        lv_obj_set_style_radius(b, 8, 0);
+        lv_obj_set_style_bg_color(b, RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(b, RED808_INFO, 0);
+        lv_obj_set_style_border_width(b, 2, 0);
+        lv_obj_t* l = lv_label_create(b);
+        lv_label_set_text(l, "INIT");
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(l, RED808_INFO, 0);
+        lv_obj_center(l);
+        lv_obj_add_event_cb(b, pp_init_cb, LV_EVENT_CLICKED, NULL);
+    }
+
+    // Param grid panel
+    s_pp_param_panel = lv_obj_create(scr_piano_params);
+    lv_obj_set_size(s_pp_param_panel, UI_W - 24, UI_H - 100 - 90);  // leave header (~86) at bottom
+    lv_obj_set_pos(s_pp_param_panel, 12, 100);
+    lv_obj_set_style_radius(s_pp_param_panel, 8, 0);
+    lv_obj_set_style_bg_color(s_pp_param_panel, RED808_PANEL, 0);
+    lv_obj_set_style_border_color(s_pp_param_panel, RED808_BORDER, 0);
+    lv_obj_set_style_border_width(s_pp_param_panel, 1, 0);
+    lv_obj_set_style_pad_all(s_pp_param_panel, 0, 0);
+    lv_obj_clear_flag(s_pp_param_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    pp_update_engine_chips();
+    pp_update_preset_chips();
+    pp_rebuild_param_grid();
 }
 
