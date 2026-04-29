@@ -26,6 +26,7 @@ enum Screen {
     SCREEN_PERFORMANCE,
     SCREEN_SAMPLES,
     SCREEN_SEQ_CIRCLE,
+    SCREEN_MELODY,        // v2.6 — piano roll / score editor (live preview)
     SCREEN_COUNT          // keep last — used for array sizing
 };
 

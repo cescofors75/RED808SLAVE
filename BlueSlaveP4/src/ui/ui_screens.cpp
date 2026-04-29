@@ -116,6 +116,7 @@ lv_obj_t* scr_fx = NULL;
 lv_obj_t* scr_volumes = NULL;
 lv_obj_t* scr_sdcard = NULL;
 lv_obj_t* scr_performance = NULL;
+lv_obj_t* scr_piano = NULL;       /* v2.6 — PIANO live keyboard */
 
 // Header widgets
 static lv_obj_t* header_bar = NULL;
@@ -690,20 +691,17 @@ static void create_live_screen(void) {
                      "BPM", "120.0", RED808_ACCENT, &grid_bpm_lbl);
 
     // --- Row 1: Screen Navigation ---
-    static const char* nav_texts[] = {"STEPS", "FX", "MIXER"};
-    static const int nav_screens[] = {3, 8, 7};
-    lv_color_t nav_colors[] = {RED808_CYAN, RED808_INFO, RED808_SUCCESS};
-    for (int i = 0; i < 3; i++) {
+    // v2.6 — added PIANO as 4th nav (id=10). SYNC button removed: track-flash
+    // sync is enabled by default; toggle now only via theme/grid_sync_cb shortcut.
+    static const char* nav_texts[] = {"STEPS", "FX", "MIXER", "PIANO"};
+    static const int   nav_screens[] = {3, 8, 7, 10};
+    lv_color_t         nav_colors[] = {RED808_CYAN, RED808_INFO, RED808_SUCCESS, RED808_ACCENT};
+    for (int i = 0; i < 4; i++) {
         b = create_ctrl_btn(scr_live, COL_X(4 + i), ROW_Y(1), CW, CH,
                              nav_texts[i], nav_colors[i], &lv_font_montserrat_20);
         lv_obj_add_event_cb(b, grid_nav_cb, LV_EVENT_CLICKED, (void*)(intptr_t)nav_screens[i]);
     }
-    // SYNC button — replaces PERF, toggles pad LED sync with sequencer
-    grid_sync_btn = create_ctrl_btn(scr_live, COL_X(7), ROW_Y(1), CW, CH,
-                                     "SYNC\nOFF", RED808_SURFACE, &lv_font_montserrat_20);
-    lv_obj_set_style_bg_color(grid_sync_btn, RED808_SURFACE, 0);
-    lv_obj_set_style_border_color(grid_sync_btn, RED808_BORDER, 0);
-    lv_obj_add_event_cb(grid_sync_btn, grid_sync_cb, LV_EVENT_CLICKED, NULL);
+    grid_sync_btn = NULL;  // PIANO took its slot — track-sync still on by default
 
     // --- Row 2: System ---
     // [4,2] SD CARD
@@ -3104,6 +3102,275 @@ static void create_sdcard_screen(void) {
 }
 
 // =============================================================================
+// PIANO SCREEN — live keyboard (12 / 24 keys) → synth via UDP
+// Engines: 3=303, 4=WTosc, 5=SH101, 6=FM2Op
+// =============================================================================
+static int  s_piano_engine_idx = 0;          // index into PIANO_ENGINES
+static int  s_piano_octave     = 4;          // C4..C5
+static bool s_piano_two_oct    = false;      // false=12 keys, true=24 keys
+static int  s_piano_held_note  = -1;         // last note-on still ringing
+
+static const uint8_t PIANO_ENGINES[4]      = {3, 4, 5, 6};
+static const char*   PIANO_ENGINE_LABELS[4] = {"303", "WT", "SH101", "FM2"};
+
+static lv_obj_t* s_piano_engine_btns[4]   = {NULL, NULL, NULL, NULL};
+static lv_obj_t* s_piano_octave_lbl       = NULL;
+static lv_obj_t* s_piano_keys24_btn       = NULL;
+static lv_obj_t* s_piano_keys24_lbl       = NULL;
+static lv_obj_t* s_piano_status_lbl       = NULL;
+static lv_obj_t* s_piano_keys_container   = NULL;
+
+static inline bool piano_pc_is_black(uint8_t pc) {
+    return (pc == 1) || (pc == 3) || (pc == 6) || (pc == 8) || (pc == 10);
+}
+
+static const char* piano_note_name(uint8_t midi) {
+    static const char* NAMES[12] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+    static char buf[8];
+    int oct = (midi / 12) - 1;
+    snprintf(buf, sizeof(buf), "%s%d", NAMES[midi % 12], oct);
+    return buf;
+}
+
+static void piano_send_off(void) {
+    if (s_piano_held_note < 0) return;
+    if (ui_use_udp_transport()) {
+        udp_send_synth_note_off(PIANO_ENGINES[s_piano_engine_idx], 0);
+    }
+    s_piano_held_note = -1;
+    if (s_piano_status_lbl) lv_label_set_text(s_piano_status_lbl, "—");
+}
+
+static void piano_send_on(uint8_t midi_note) {
+    piano_send_off();
+    if (ui_use_udp_transport()) {
+        udp_send_synth_note_on_ex(PIANO_ENGINES[s_piano_engine_idx],
+                                   midi_note, 110, false, false);
+    }
+    s_piano_held_note = (int)midi_note;
+    if (s_piano_status_lbl) {
+        lv_label_set_text_fmt(s_piano_status_lbl, "%s · %s",
+                              PIANO_ENGINE_LABELS[s_piano_engine_idx],
+                              piano_note_name(midi_note));
+    }
+}
+
+static void piano_key_event_cb(lv_event_t* e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    uint8_t note = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    lv_obj_t* btn = (lv_obj_t*)lv_event_get_target(e);
+    bool is_black = piano_pc_is_black(note % 12);
+    if (code == LV_EVENT_PRESSED) {
+        piano_send_on(note);
+        lv_obj_set_style_bg_color(btn, RED808_ACCENT, 0);
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        piano_send_off();
+        lv_obj_set_style_bg_color(btn,
+            is_black ? lv_color_hex(0x101010) : lv_color_hex(0xF0F0E8), 0);
+    }
+}
+
+static void piano_engine_btn_cb(lv_event_t* e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= 4) return;
+    piano_send_off();
+    s_piano_engine_idx = idx;
+    for (int i = 0; i < 4; i++) {
+        if (!s_piano_engine_btns[i]) continue;
+        bool sel = (i == idx);
+        lv_obj_set_style_bg_color(s_piano_engine_btns[i],
+            sel ? RED808_ACCENT : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(s_piano_engine_btns[i],
+            sel ? RED808_ACCENT2 : RED808_BORDER, 0);
+    }
+}
+
+static void piano_rebuild_keys(void);
+
+static void piano_octave_btn_cb(lv_event_t* e) {
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    int next = s_piano_octave + delta;
+    if (next < 1) next = 1;
+    if (next > 7) next = 7;
+    if (next == s_piano_octave) return;
+    piano_send_off();
+    s_piano_octave = next;
+    if (s_piano_octave_lbl)
+        lv_label_set_text_fmt(s_piano_octave_lbl, "OCT %d", s_piano_octave);
+    piano_rebuild_keys();
+}
+
+static void piano_keys24_btn_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    piano_send_off();
+    s_piano_two_oct = !s_piano_two_oct;
+    if (s_piano_keys24_lbl)
+        lv_label_set_text(s_piano_keys24_lbl, s_piano_two_oct ? "24 K" : "12 K");
+    piano_rebuild_keys();
+}
+
+static lv_obj_t* piano_make_chip(lv_obj_t* parent, int x, int y, int w, int h,
+                                 const char* text) {
+    lv_obj_t* btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, w, h);
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_set_style_bg_color(btn, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, RED808_BORDER, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t* lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(lbl, RED808_TEXT, 0);
+    lv_obj_center(lbl);
+    return btn;
+}
+
+static void piano_rebuild_keys(void) {
+    if (!s_piano_keys_container) return;
+    lv_obj_clean(s_piano_keys_container);
+
+    int container_w = lv_obj_get_width(s_piano_keys_container);
+    int container_h = lv_obj_get_height(s_piano_keys_container);
+    int num_octaves = s_piano_two_oct ? 2 : 1;
+    int num_white   = num_octaves * 7;
+    if (num_white < 1) num_white = 1;
+    int white_w     = container_w / num_white;
+    int white_h     = container_h;
+    int black_w     = (white_w * 6) / 10;
+    int black_h     = (white_h * 6) / 10;
+
+    static const uint8_t WHITE_PCS[7]         = {0, 2, 4, 5, 7, 9, 11};
+    static const uint8_t BLACK_PCS[5]         = {1, 3, 6, 8, 10};
+    /* Black key sits between white index N and N+1 (within an octave) */
+    static const uint8_t BLACK_AFTER_WHITE[5] = {0, 1, 3, 4, 5};
+
+    int base_midi = (s_piano_octave + 1) * 12;   // C(s_piano_octave) MIDI
+
+    /* White keys */
+    for (int oct = 0; oct < num_octaves; oct++) {
+        for (int w = 0; w < 7; w++) {
+            int x = (oct * 7 + w) * white_w;
+            uint8_t midi = base_midi + oct * 12 + WHITE_PCS[w];
+            lv_obj_t* k = lv_btn_create(s_piano_keys_container);
+            lv_obj_set_pos(k, x, 0);
+            lv_obj_set_size(k, white_w - 2, white_h - 2);
+            lv_obj_set_style_radius(k, 6, 0);
+            lv_obj_set_style_bg_color(k, lv_color_hex(0xF0F0E8), 0);
+            lv_obj_set_style_bg_opa(k, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(k, 1, 0);
+            lv_obj_set_style_border_color(k, lv_color_hex(0x404040), 0);
+            lv_obj_set_style_shadow_width(k, 0, 0);
+            lv_obj_clear_flag(k, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_PRESSED, (void*)(uintptr_t)midi);
+            lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_RELEASED, (void*)(uintptr_t)midi);
+            lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_PRESS_LOST, (void*)(uintptr_t)midi);
+            if (w == 0) {
+                lv_obj_t* lbl = lv_label_create(k);
+                lv_label_set_text_fmt(lbl, "C%d", s_piano_octave + oct);
+                lv_obj_set_style_text_color(lbl, lv_color_hex(0x303030), 0);
+                lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+                lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -4);
+            }
+        }
+    }
+    /* Black keys (drawn last so they appear on top) */
+    for (int oct = 0; oct < num_octaves; oct++) {
+        for (int b = 0; b < 5; b++) {
+            int wpos = BLACK_AFTER_WHITE[b];
+            int x = (oct * 7 + wpos) * white_w + white_w - black_w / 2;
+            uint8_t midi = base_midi + oct * 12 + BLACK_PCS[b];
+            lv_obj_t* k = lv_btn_create(s_piano_keys_container);
+            lv_obj_set_pos(k, x, 0);
+            lv_obj_set_size(k, black_w, black_h);
+            lv_obj_set_style_radius(k, 4, 0);
+            lv_obj_set_style_bg_color(k, lv_color_hex(0x101010), 0);
+            lv_obj_set_style_bg_opa(k, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(k, 1, 0);
+            lv_obj_set_style_border_color(k, lv_color_hex(0x000000), 0);
+            lv_obj_set_style_shadow_width(k, 0, 0);
+            lv_obj_clear_flag(k, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_PRESSED, (void*)(uintptr_t)midi);
+            lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_RELEASED, (void*)(uintptr_t)midi);
+            lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_PRESS_LOST, (void*)(uintptr_t)midi);
+        }
+    }
+}
+
+static void create_piano_screen(void) {
+    int W = ui_layout_w();
+    int H = ui_layout_h();
+    scr_piano = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr_piano, RED808_BG, 0);
+    lv_obj_clear_flag(scr_piano, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Floating back button (top-left, lands back on LIVE) */
+    ui_create_header(scr_piano);
+
+    /* Title */
+    lv_obj_t* title = lv_label_create(scr_piano);
+    lv_label_set_text(title, "PIANO");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(title, RED808_TEXT, 0);
+    lv_obj_set_pos(title, 64, 12);
+
+    /* Engine selector buttons (top-right) */
+    int eng_w = 80, eng_h = 36, eng_gap = 6;
+    int eng_x_start = W - (eng_w + eng_gap) * 4 - 12;
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t* btn = piano_make_chip(scr_piano,
+            eng_x_start + i * (eng_w + eng_gap), 8,
+            eng_w, eng_h, PIANO_ENGINE_LABELS[i]);
+        if (i == s_piano_engine_idx) {
+            lv_obj_set_style_bg_color(btn, RED808_ACCENT, 0);
+            lv_obj_set_style_border_color(btn, RED808_ACCENT2, 0);
+        }
+        lv_obj_add_event_cb(btn, piano_engine_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        s_piano_engine_btns[i] = btn;
+    }
+
+    /* Controls row: octave -/+ + 12/24 toggle + status */
+    int row_y = 56;
+    lv_obj_t* oct_minus = piano_make_chip(scr_piano, 12, row_y, 70, 36, "-");
+    lv_obj_add_event_cb(oct_minus, piano_octave_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+    s_piano_octave_lbl = lv_label_create(scr_piano);
+    lv_label_set_text_fmt(s_piano_octave_lbl, "OCT %d", s_piano_octave);
+    lv_obj_set_style_text_font(s_piano_octave_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(s_piano_octave_lbl, RED808_TEXT, 0);
+    lv_obj_set_pos(s_piano_octave_lbl, 92, row_y + 8);
+    lv_obj_t* oct_plus = piano_make_chip(scr_piano, 168, row_y, 70, 36, "+");
+    lv_obj_add_event_cb(oct_plus, piano_octave_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)+1);
+
+    s_piano_keys24_btn = piano_make_chip(scr_piano, 248, row_y, 80, 36,
+                                          s_piano_two_oct ? "24 K" : "12 K");
+    s_piano_keys24_lbl = lv_obj_get_child(s_piano_keys24_btn, 0);
+    lv_obj_add_event_cb(s_piano_keys24_btn, piano_keys24_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    s_piano_status_lbl = lv_label_create(scr_piano);
+    lv_label_set_text(s_piano_status_lbl, "—");
+    lv_obj_set_style_text_font(s_piano_status_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(s_piano_status_lbl, RED808_ACCENT, 0);
+    lv_obj_set_pos(s_piano_status_lbl, 348, row_y + 8);
+
+    /* Keys area (full width below controls) */
+    int keys_y = 104;
+    int keys_h = H - keys_y - 8;
+    s_piano_keys_container = lv_obj_create(scr_piano);
+    lv_obj_set_pos(s_piano_keys_container, 0, keys_y);
+    lv_obj_set_size(s_piano_keys_container, W, keys_h);
+    lv_obj_set_style_bg_color(s_piano_keys_container, RED808_PANEL, 0);
+    lv_obj_set_style_bg_opa(s_piano_keys_container, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_piano_keys_container, 0, 0);
+    lv_obj_set_style_pad_all(s_piano_keys_container, 0, 0);
+    lv_obj_clear_flag(s_piano_keys_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    piano_rebuild_keys();
+}
+
+// =============================================================================
 // PERFORMANCE SCREEN (placeholder)
 // =============================================================================
 static void create_performance_screen(void) {
@@ -3121,6 +3388,7 @@ void ui_create_all_screens(void) {
     create_volumes_screen();
     create_sdcard_screen();
     create_performance_screen();
+    create_piano_screen();      /* v2.6 */
 
     // Start on boot screen
     lv_scr_load(scr_boot);
@@ -3209,19 +3477,27 @@ static void ui_reload_themed_screens(void) {
     create_volumes_screen();
     create_sdcard_screen();
     create_performance_screen();
+    /* v2.6 — also recreate piano on theme reload */
+    if (scr_piano) { lv_obj_del(scr_piano); scr_piano = NULL; }
+    s_piano_keys_container = NULL; s_piano_octave_lbl = NULL;
+    s_piano_keys24_btn = NULL; s_piano_keys24_lbl = NULL; s_piano_status_lbl = NULL;
+    for (int i = 0; i < 4; i++) s_piano_engine_btns[i] = NULL;
+    create_piano_screen();
 
     // Restore navigation (go to live if was on unknown screen)
     int nav_to = (saved_screen == 9) ? 9 : 2;  // stay in sdcard if we were there
     if (saved_screen == 3) nav_to = 3;
     if (saved_screen == 7) nav_to = 7;
     if (saved_screen == 8) nav_to = 8;
+    if (saved_screen == 10) nav_to = 10;   /* PIANO */
     ui_navigate_to(nav_to);
 }
 
 void ui_navigate_to(int screen_id) {
     lv_obj_t* targets[] = {
         scr_boot, NULL, scr_live, scr_sequencer, NULL,
-        NULL, NULL, scr_volumes, scr_fx, scr_sdcard, scr_performance
+        NULL, NULL, scr_volumes, scr_fx, scr_sdcard,
+        scr_piano   /* 10 = PIANO (replaces stubbed performance slot) */
     };
     int count = sizeof(targets) / sizeof(targets[0]);
     if (screen_id >= 0 && screen_id < count && targets[screen_id]) {

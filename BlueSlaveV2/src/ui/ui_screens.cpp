@@ -44,6 +44,7 @@ lv_obj_t* scr_performance = NULL;
 lv_obj_t* scr_samples = NULL;
 lv_obj_t* scr_boot = NULL;
 lv_obj_t* scr_seq_circle = NULL;
+lv_obj_t* scr_melody = NULL;        // v2.6 — piano roll / score editor
 
 // Header widgets (updated live)
 static constexpr uint8_t HEADER_SLOT_COUNT = SCREEN_COUNT;
@@ -777,6 +778,7 @@ static void menu_btn_cb(lv_event_t* e) {
         case 5: nav_to(SCREEN_PERFORMANCE, scr_performance); break;
         case 6: nav_to(SCREEN_SETTINGS, scr_settings); break;
         case 7: nav_to(SCREEN_DIAGNOSTICS, scr_diagnostics); break;
+        case 8: nav_to(SCREEN_MELODY, scr_melody); break;  // v2.6 — piano roll
     }
 }
 
@@ -795,19 +797,20 @@ void ui_create_menu_screen() {
         LV_SYMBOL_DRIVE "\nSD BROWSER",
         LV_SYMBOL_SETTINGS "\nBUTTONS",
         LV_SYMBOL_HOME "\nSETTINGS",
-        LV_SYMBOL_EYE_OPEN "\nSTATUS"
+        LV_SYMBOL_EYE_OPEN "\nSTATUS",
+        LV_SYMBOL_PLAY "\nMELODY"   // v2.6 — piano roll editor
     };
     const lv_color_t menu_colors[] = {
         RED808_ACCENT,   RED808_INFO,     RED808_SUCCESS,
         RED808_CYAN,     RED808_ACCENT2,  RED808_ERROR,
-        lv_color_hex(0xFF8C00), RED808_TEXT_DIM  // SETTINGS: naranja ámbar vistoso
+        lv_color_hex(0xFF8C00), RED808_TEXT_DIM,  // SETTINGS: naranja ámbar vistoso
+        lv_color_hex(0xFF1493)                    // MELODY: deep pink
     };
-    static const int menu_count = 8;   // botones activos
-    static const int menu_total = 10;  // incluye 2 placeholders
+    static const int menu_count = 9;   // botones activos (was 8)
+    static const int menu_total = 9;   // 1 placeholder removed
 
-    // Placeholder labels (índices 8 y 9)
+    // Placeholder labels (índice 9 reservado para futuro — actualmente 0 placeholders)
     static const char* placeholder_labels[] = {
-        LV_SYMBOL_BULLET " " LV_SYMBOL_BULLET " " LV_SYMBOL_BULLET "\nPRÓXIMAMENTE",
         LV_SYMBOL_BULLET " " LV_SYMBOL_BULLET " " LV_SYMBOL_BULLET "\nPRÓXIMAMENTE"
     };
 
@@ -4566,3 +4569,250 @@ void ui_update_seq_circle() {
 
     prev_step = active_step;
 }
+
+// ============================================================================
+// MELODY / PIANO ROLL SCREEN  (v2.6)
+// Live preview piano roll: 16 steps × 12 pitches (1 octave). Tap a cell to
+// toggle (visual) + preview note via UDP synthNoteOnEx to Master.
+// Engines: 3=303, 4=WT, 5=SH101, 6=FM2. Octave selector (1..7).
+// Note: this is preview-only — pattern persistence to master comes in phase A.
+// ============================================================================
+static const uint8_t MEL_ENGINES[4]      = {3, 4, 5, 6};
+static const char*   MEL_ENGINE_LABELS[4] = {"303", "WT", "SH101", "FM2"};
+
+// 12 pitch classes (top→bottom: B → C, semitone steps)
+// row 0 = highest note (B), row 11 = lowest (C)
+static const char* MEL_NOTE_NAMES[12] = {
+    "B", "A#", "A", "G#", "G", "F#", "F", "E", "D#", "D", "C#", "C"
+};
+static const int MEL_NOTE_PC[12] = { 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+static const bool MEL_NOTE_BLACK[12] = {
+    false, true,  false, true, false, true, false, false, true, false, true, false
+};
+
+static int s_mel_engine_idx = 0;
+static int s_mel_octave     = 4;
+static bool s_mel_grid[16][12] = {{false}};
+
+static lv_obj_t* mel_engine_btns[4]   = {NULL,NULL,NULL,NULL};
+static lv_obj_t* mel_cells[16][12]    = {{NULL}};
+static lv_obj_t* mel_octave_lbl       = NULL;
+static lv_obj_t* mel_status_lbl       = NULL;
+
+static void mel_send_note_on(int row, int vel) {
+    if (!udpConnected) return;
+    int pc      = MEL_NOTE_PC[row];
+    int midi    = (s_mel_octave + 1) * 12 + pc;
+    if (midi < 0)   midi = 0;
+    if (midi > 127) midi = 127;
+    JsonDocument doc(sramAllocatorPtr);
+    doc["cmd"]       = "synthNoteOnEx";
+    doc["engine"]    = MEL_ENGINES[s_mel_engine_idx];
+    doc["note"]      = midi;
+    doc["velocity"]  = vel;
+    doc["accent"]    = false;
+    doc["slide"]     = false;
+    sendUDPCommand(doc);
+}
+
+static void mel_redraw_cell(int col, int row) {
+    lv_obj_t* c = mel_cells[col][row];
+    if (!c) return;
+    bool active = s_mel_grid[col][row];
+    bool black  = MEL_NOTE_BLACK[row];
+    lv_color_t bg = active ? RED808_ACCENT
+                           : (black ? lv_color_hex(0x1A1A1A) : lv_color_hex(0x2A2A2A));
+    lv_obj_set_style_bg_color(c, bg, 0);
+    lv_obj_set_style_border_color(c, active ? RED808_ACCENT : RED808_BORDER, 0);
+    lv_obj_set_style_border_width(c, active ? 2 : 1, 0);
+}
+
+static void mel_cell_cb(lv_event_t* e) {
+    intptr_t packed = (intptr_t)lv_event_get_user_data(e);
+    int col = (int)(packed >> 8) & 0xFF;
+    int row = (int)(packed & 0xFF);
+    if (col < 0 || col >= 16 || row < 0 || row >= 12) return;
+    s_mel_grid[col][row] = !s_mel_grid[col][row];
+    mel_redraw_cell(col, row);
+    if (s_mel_grid[col][row]) {
+        mel_send_note_on(row, 110);  // preview when activating
+    }
+}
+
+// Side keyboard label tap → preview that pitch
+static void mel_keylabel_cb(lv_event_t* e) {
+    int row = (int)(intptr_t)lv_event_get_user_data(e);
+    mel_send_note_on(row, 100);
+}
+
+static void mel_engine_cb(lv_event_t* e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx > 3) return;
+    s_mel_engine_idx = idx;
+    for (int i = 0; i < 4; i++) {
+        if (!mel_engine_btns[i]) continue;
+        bool sel = (i == idx);
+        lv_obj_set_style_bg_color(mel_engine_btns[i], sel ? RED808_ACCENT : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(mel_engine_btns[i], sel ? RED808_ACCENT : RED808_BORDER, 0);
+        lv_obj_t* lbl = lv_obj_get_child(mel_engine_btns[i], 0);
+        if (lbl) lv_obj_set_style_text_color(lbl, sel ? RED808_BG : RED808_TEXT, 0);
+    }
+    if (mel_status_lbl) {
+        lv_label_set_text_fmt(mel_status_lbl, "ENG %s  OCT %d", MEL_ENGINE_LABELS[idx], s_mel_octave);
+    }
+}
+
+static void mel_octave_cb(lv_event_t* e) {
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    int n = s_mel_octave + delta;
+    if (n < 1) n = 1;
+    if (n > 7) n = 7;
+    if (n == s_mel_octave) return;
+    s_mel_octave = n;
+    if (mel_octave_lbl) lv_label_set_text_fmt(mel_octave_lbl, "OCT %d", s_mel_octave);
+    if (mel_status_lbl) lv_label_set_text_fmt(mel_status_lbl, "ENG %s  OCT %d",
+                                              MEL_ENGINE_LABELS[s_mel_engine_idx], s_mel_octave);
+}
+
+static void mel_clear_cb(lv_event_t* e) {
+    (void)e;
+    for (int c = 0; c < 16; c++) {
+        for (int r = 0; r < 12; r++) {
+            if (s_mel_grid[c][r]) {
+                s_mel_grid[c][r] = false;
+                mel_redraw_cell(c, r);
+            }
+        }
+    }
+}
+
+void ui_create_melody_screen() {
+    scr_melody = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr_melody, RED808_BG, 0);
+    lv_obj_clear_flag(scr_melody, LV_OBJ_FLAG_SCROLLABLE);
+    ui_create_header(scr_melody);
+
+    // ---- Title ----
+    lv_obj_t* title = lv_label_create(scr_melody);
+    lv_label_set_text(title, "MELODY  " LV_SYMBOL_AUDIO);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(title, RED808_ACCENT, 0);
+    lv_obj_set_pos(title, 16, 8);
+
+    // ---- Engine chips (top right) ----
+    const int eng_w = 84, eng_h = 40, eng_gap = 6;
+    int eng_x0 = UI_W - (eng_w + eng_gap) * 4 - 12;
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t* b = lv_btn_create(scr_melody);
+        lv_obj_set_size(b, eng_w, eng_h);
+        lv_obj_set_pos(b, eng_x0 + i * (eng_w + eng_gap), 8);
+        lv_obj_set_style_radius(b, 8, 0);
+        lv_obj_set_style_bg_color(b, (i == s_mel_engine_idx) ? RED808_ACCENT : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(b, (i == s_mel_engine_idx) ? RED808_ACCENT : RED808_BORDER, 0);
+        lv_obj_set_style_border_width(b, 2, 0);
+        lv_obj_t* lbl = lv_label_create(b);
+        lv_label_set_text(lbl, MEL_ENGINE_LABELS[i]);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(lbl, (i == s_mel_engine_idx) ? RED808_BG : RED808_TEXT, 0);
+        lv_obj_center(lbl);
+        lv_obj_add_event_cb(b, mel_engine_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        mel_engine_btns[i] = b;
+    }
+
+    // ---- Octave +/- and status (row 2) ----
+    const int row2_y = 56;
+    auto make_chip = [&](int x, int y, int w, int h, const char* text, lv_color_t col,
+                         lv_event_cb_t cb, void* ud) {
+        lv_obj_t* b = lv_btn_create(scr_melody);
+        lv_obj_set_size(b, w, h);
+        lv_obj_set_pos(b, x, y);
+        lv_obj_set_style_radius(b, 8, 0);
+        lv_obj_set_style_bg_color(b, RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(b, col, 0);
+        lv_obj_set_style_border_width(b, 2, 0);
+        lv_obj_t* l = lv_label_create(b);
+        lv_label_set_text(l, text);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(l, col, 0);
+        lv_obj_center(l);
+        if (cb) lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
+        return b;
+    };
+    make_chip(16, row2_y, 56, 38, "OCT-", RED808_INFO, mel_octave_cb, (void*)(intptr_t)-1);
+    mel_octave_lbl = lv_label_create(scr_melody);
+    lv_label_set_text_fmt(mel_octave_lbl, "OCT %d", s_mel_octave);
+    lv_obj_set_style_text_font(mel_octave_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(mel_octave_lbl, RED808_TEXT, 0);
+    lv_obj_set_pos(mel_octave_lbl, 80, row2_y + 8);
+    make_chip(160, row2_y, 56, 38, "OCT+", RED808_INFO, mel_octave_cb, (void*)(intptr_t)1);
+    make_chip(232, row2_y, 90, 38, "CLEAR", RED808_ERROR, mel_clear_cb, NULL);
+
+    mel_status_lbl = lv_label_create(scr_melody);
+    lv_label_set_text_fmt(mel_status_lbl, "ENG %s  OCT %d",
+                          MEL_ENGINE_LABELS[s_mel_engine_idx], s_mel_octave);
+    lv_obj_set_style_text_font(mel_status_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(mel_status_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(mel_status_lbl, 340, row2_y + 10);
+
+    // ---- Grid: 16 cols × 12 rows ----
+    // Reserve label column on the left for piano-key labels (width 56)
+    const int grid_top    = 108;
+    const int label_w     = 56;
+    const int grid_left   = 16 + label_w;
+    const int grid_right  = UI_W - 16;
+    const int grid_bottom = UI_H - 96;  // leave room for footer/header
+    const int grid_w      = grid_right - grid_left;
+    const int grid_h      = grid_bottom - grid_top;
+    const int cell_w      = grid_w / 16;
+    const int cell_h      = grid_h / 12;
+
+    // Background panel
+    lv_obj_t* panel = lv_obj_create(scr_melody);
+    lv_obj_set_size(panel, grid_right - 16 + 2, grid_h + 4);
+    lv_obj_set_pos(panel, 16 - 1, grid_top - 2);
+    lv_obj_set_style_bg_color(panel, RED808_PANEL, 0);
+    lv_obj_set_style_border_color(panel, RED808_BORDER, 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_radius(panel, 6, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+
+    // Pitch labels (left column) — clickable for preview
+    for (int r = 0; r < 12; r++) {
+        lv_obj_t* k = lv_btn_create(scr_melody);
+        lv_obj_set_size(k, label_w - 4, cell_h - 2);
+        lv_obj_set_pos(k, 18, grid_top + r * cell_h + 1);
+        bool black = MEL_NOTE_BLACK[r];
+        lv_obj_set_style_radius(k, 4, 0);
+        lv_obj_set_style_bg_color(k, black ? lv_color_hex(0x101010) : lv_color_hex(0xE8E8E8), 0);
+        lv_obj_set_style_border_color(k, RED808_BORDER, 0);
+        lv_obj_set_style_border_width(k, 1, 0);
+        lv_obj_t* l = lv_label_create(k);
+        lv_label_set_text(l, MEL_NOTE_NAMES[r]);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(l, black ? lv_color_hex(0xCCCCCC) : lv_color_hex(0x202020), 0);
+        lv_obj_center(l);
+        lv_obj_add_event_cb(k, mel_keylabel_cb, LV_EVENT_CLICKED, (void*)(intptr_t)r);
+    }
+
+    // Cells
+    for (int c = 0; c < 16; c++) {
+        for (int r = 0; r < 12; r++) {
+            lv_obj_t* cell = lv_btn_create(scr_melody);
+            lv_obj_set_size(cell, cell_w - 2, cell_h - 2);
+            lv_obj_set_pos(cell, grid_left + c * cell_w + 1, grid_top + r * cell_h + 1);
+            lv_obj_set_style_radius(cell, 3, 0);
+            // Highlight every 4th column (beat marker) with subtle accent border
+            bool beat = ((c % 4) == 0);
+            lv_obj_set_style_border_width(cell, 1, 0);
+            lv_obj_set_style_border_color(cell,
+                beat ? lv_color_hex(0x404040) : RED808_BORDER, 0);
+            lv_obj_set_style_pad_all(cell, 0, 0);
+            mel_cells[c][r] = cell;
+            mel_redraw_cell(c, r);
+            intptr_t packed = ((intptr_t)c << 8) | (intptr_t)r;
+            lv_obj_add_event_cb(cell, mel_cell_cb, LV_EVENT_CLICKED, (void*)packed);
+        }
+    }
+}
+

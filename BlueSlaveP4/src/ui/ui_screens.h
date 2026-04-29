@@ -13,6 +13,7 @@ extern lv_obj_t* scr_fx;
 extern lv_obj_t* scr_volumes;
 extern lv_obj_t* scr_sdcard;
 extern lv_obj_t* scr_performance;
+extern lv_obj_t* scr_piano;     // v2.6 — PIANO live keyboard
 
 // Create all screens (call once after LVGL init)
 void ui_create_all_screens(void);

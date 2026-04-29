@@ -1621,6 +1621,7 @@ void receiveUDPData() {
     }
     else if (strcmp(cmd, "pattern_sync") == 0) {
         int pat = doc["pattern"] | 0;
+        bool active = doc["active"] | false;  // v2.6: master flags the active pattern
         if (pat >= 0 && pat < Config::MAX_PATTERNS) {
             JsonArray data = doc["data"];
             if (data) {
@@ -1655,6 +1656,17 @@ void receiveUDPData() {
             }
             // Forward pattern data to P4
             uart_bridge_send_pattern_data(pat, patterns[pat].steps, Config::MAX_TRACKS);
+        }
+        /* v2.6 — If master flagged this as the active pattern (e.g. user
+         * changed pattern from web), follow it on the slave UI too. */
+        if (active && currentPattern != pat) {
+            currentPattern = pat;
+            currentStep = 0;
+            lastLocalStepMs = millis();
+            lastLocalStepUs = micros();
+            needsFullRedraw = true;
+            uart_bridge_send_pattern(pat);
+            RED808_LOG_PRINTF("[UDP] Master switched to pattern %d — following\n", pat + 1);
         }
     }
     else if (strcmp(cmd, "step_update") == 0 || strcmp(cmd, "step_sync") == 0) {
@@ -3163,6 +3175,7 @@ void setup() {
         ui_create_sdcard_screen();
         ui_create_performance_screen();
         ui_create_samples_screen();
+        ui_create_melody_screen();    // v2.6 — piano roll editor
 
         // Start on boot animation; boot_timer_cb() will navigate to SCREEN_MENU when complete
         currentScreen = SCREEN_BOOT;

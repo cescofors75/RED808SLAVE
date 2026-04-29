@@ -77,6 +77,25 @@ void udp_send_trigger(uint8_t pad, uint8_t velocity) {
     sendJson(buf);
 }
 
+void udp_send_synth_note_on_ex(uint8_t engine, uint8_t note, uint8_t velocity,
+                                bool accent, bool slide) {
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"synthNoteOnEx\",\"engine\":%u,\"note\":%u,\"velocity\":%u,"
+             "\"accent\":%s,\"slide\":%s}",
+             (unsigned)engine, (unsigned)note, (unsigned)velocity,
+             accent ? "true" : "false", slide ? "true" : "false");
+    sendJson(buf);
+}
+
+void udp_send_synth_note_off(uint8_t engine, uint8_t track) {
+    char buf[80];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"synthNoteOff\",\"engine\":%u,\"track\":%u}",
+             (unsigned)engine, (unsigned)track);
+    sendJson(buf);
+}
+
 void udp_send_start(void) { sendCmd("start"); }
 void udp_send_stop(void)  { sendCmd("stop"); }
 

@@ -19,6 +19,7 @@ extern lv_obj_t* scr_performance;
 extern lv_obj_t* scr_samples;
 extern lv_obj_t* scr_boot;
 extern lv_obj_t* scr_seq_circle;
+extern lv_obj_t* scr_melody;        // v2.6 — piano roll / score editor
 
 // Create screens
 void ui_create_menu_screen();
@@ -34,6 +35,7 @@ void ui_create_performance_screen();
 void ui_create_samples_screen();
 void ui_create_boot_screen();
 void ui_create_seq_circle_screen();
+void ui_create_melody_screen();      // v2.6 — piano roll editor
 
 // Update functions (called from timer)
 void ui_update_sequencer();
