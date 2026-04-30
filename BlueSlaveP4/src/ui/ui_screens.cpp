@@ -3113,6 +3113,11 @@ static int  s_piano_octave     = 4;          // C4..C5
 static bool s_piano_two_oct    = false;      // false=12 keys, true=24 keys
 static int  s_piano_held_note  = -1;         // last note-on still ringing
 static bool s_piano_rec_active = false;      // v2.7 — record to S3 melody screen
+// v2.8 — local mirror of recorded notes so P4 can ASSIGN to a pad without
+// round-tripping through S3. Same shape as S3: 16 steps × 12 pitch-classes.
+static bool s_piano_rec_grid[16][12] = {{false}};
+static int  s_piano_rec_step  = 0;
+static int  s_piano_assign_pad = 0;          // 0..15
 
 static const uint8_t PIANO_ENGINES[4]      = {3, 4, 5, 6};
 static const char*   PIANO_ENGINE_LABELS[4] = {"303", "WT", "SH101", "FM2"};
@@ -3125,6 +3130,7 @@ static lv_obj_t* s_piano_status_lbl       = NULL;
 static lv_obj_t* s_piano_keys_container   = NULL;
 static lv_obj_t* s_piano_rec_btn          = NULL;  // v2.7
 static lv_obj_t* s_piano_rec_lbl          = NULL;  // v2.7
+static lv_obj_t* s_piano_pad_lbl          = NULL;  // v2.8
 
 static inline bool piano_pc_is_black(uint8_t pc) {
     return (pc == 1) || (pc == 3) || (pc == 6) || (pc == 8) || (pc == 10);
@@ -3149,12 +3155,29 @@ static void piano_send_off(void) {
 
 static void piano_send_on(uint8_t midi_note) {
     piano_send_off();
+    Serial.printf("[P4 piano] note=%u rec=%d transport=%d\n", midi_note, (int)s_piano_rec_active, (int)ui_use_udp_transport());
     if (ui_use_udp_transport()) {
         udp_send_synth_note_on_ex(PIANO_ENGINES[s_piano_engine_idx],
                                    midi_note, 110, false, false);
         if (s_piano_rec_active) {
             // v2.7 — also notify master to forward to S3 melody screen
+            Serial.printf("[P4 piano] -> melodyRecNote eng=%u note=%u\n", PIANO_ENGINES[s_piano_engine_idx], midi_note);
             udp_send_melody_rec_note(PIANO_ENGINES[s_piano_engine_idx], midi_note);
+        }
+    }
+    if (s_piano_rec_active) {
+        // v2.8 — also store locally so ASSIGN can push the full sequence.
+        int pc = midi_note % 12;
+        int row = -1;
+        // S3 row mapping: row 0 = B (pc 11) … row 11 = C (pc 0)
+        for (int r = 0; r < 12; r++) {
+            if ((11 - r) == pc) { row = r; break; }
+        }
+        if (row >= 0) {
+            int col = s_piano_rec_step;
+            if (col < 0 || col >= 16) col = 0;
+            s_piano_rec_grid[col][row] = true;
+            s_piano_rec_step = (col + 1) % 16;
         }
     }
     s_piano_held_note = (int)midi_note;
@@ -3193,6 +3216,10 @@ static void piano_engine_btn_cb(lv_event_t* e) {
         lv_obj_set_style_border_color(s_piano_engine_btns[i],
             sel ? RED808_ACCENT2 : RED808_BORDER, 0);
     }
+    // v2.9 — broadcast engine selection through master
+    if (ui_use_udp_transport()) {
+        udp_send_melody_set_engine(PIANO_ENGINES[s_piano_engine_idx]);
+    }
 }
 
 static void piano_rebuild_keys(void);
@@ -3208,6 +3235,8 @@ static void piano_octave_btn_cb(lv_event_t* e) {
     if (s_piano_octave_lbl)
         lv_label_set_text_fmt(s_piano_octave_lbl, "OCT %d", s_piano_octave);
     piano_rebuild_keys();
+    // v2.9 — broadcast octave through master
+    if (ui_use_udp_transport()) udp_send_melody_set_octave((uint8_t)s_piano_octave);
 }
 
 static void piano_keys24_btn_cb(lv_event_t* e) {
@@ -3222,6 +3251,17 @@ static void piano_keys24_btn_cb(lv_event_t* e) {
 static void piano_rec_btn_cb(lv_event_t* e) {
     LV_UNUSED(e);
     s_piano_rec_active = !s_piano_rec_active;
+    if (s_piano_rec_active) {
+        // v2.8 — fresh take: clear local mirror and rewind step cursor
+        memset(s_piano_rec_grid, 0, sizeof(s_piano_rec_grid));
+        s_piano_rec_step = 0;
+    }
+    // v2.9 — tell master so all slaves mirror REC state and grid clear
+    if (ui_use_udp_transport()) {
+        udp_send_melody_rec_toggle(s_piano_rec_active,
+                                   PIANO_ENGINES[s_piano_engine_idx],
+                                   (uint8_t)s_piano_octave);
+    }
     if (s_piano_rec_btn) {
         lv_obj_set_style_border_color(s_piano_rec_btn,
             s_piano_rec_active ? lv_color_hex(0xFF3030) : RED808_BORDER, 0);
@@ -3231,6 +3271,30 @@ static void piano_rec_btn_cb(lv_event_t* e) {
         lv_obj_set_style_text_color(s_piano_rec_lbl,
             s_piano_rec_active ? lv_color_hex(0xFF3030) : RED808_TEXT, 0);
         lv_label_set_text(s_piano_rec_lbl, s_piano_rec_active ? "● REC" : "○ REC");
+    }
+}
+
+// v2.8 — pad +/- chips: cycle assign target across pads 1..16
+static void piano_pad_btn_cb(lv_event_t* e) {
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    s_piano_assign_pad = (s_piano_assign_pad + delta + 16) % 16;
+    if (s_piano_pad_lbl) {
+        lv_label_set_text_fmt(s_piano_pad_lbl, "PAD %d", s_piano_assign_pad + 1);
+    }
+    // v2.9 — broadcast pad selection through master
+    if (ui_use_udp_transport()) udp_send_melody_set_pad((uint8_t)s_piano_assign_pad);
+}
+
+// v2.8 — push the locally recorded grid to master as a melodyAssign packet
+static void piano_assign_btn_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    if (!ui_use_udp_transport()) return;
+    // v2.9 — master holds the grid now; just say which pad gets the binding
+    udp_send_melody_assign_pad((uint8_t)s_piano_assign_pad,
+                               PIANO_ENGINES[s_piano_engine_idx],
+                               (uint8_t)s_piano_octave);
+    if (s_piano_status_lbl) {
+        lv_label_set_text_fmt(s_piano_status_lbl, "→ PAD %d", s_piano_assign_pad + 1);
     }
 }
 
@@ -3403,8 +3467,29 @@ static void create_piano_screen(void) {
     lv_obj_set_style_text_color(s_piano_status_lbl, RED808_ACCENT, 0);
     lv_obj_set_pos(s_piano_status_lbl, 552, row_y + 8);
 
+    /* v2.8 — second control row: PAD-/+/ASSIGN for melody-to-pad bind */
+    int row_y2 = 98;
+    lv_obj_t* pad_minus = piano_make_chip(scr_piano, 12, row_y2, 70, 36, "PAD-");
+    lv_obj_set_style_border_color(pad_minus, lv_color_hex(0xFF1493), 0);
+    lv_obj_add_event_cb(pad_minus, piano_pad_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+    s_piano_pad_lbl = lv_label_create(scr_piano);
+    lv_label_set_text_fmt(s_piano_pad_lbl, "PAD %d", s_piano_assign_pad + 1);
+    lv_obj_set_style_text_font(s_piano_pad_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(s_piano_pad_lbl, lv_color_hex(0xFF1493), 0);
+    lv_obj_set_pos(s_piano_pad_lbl, 92, row_y2 + 8);
+    lv_obj_t* pad_plus = piano_make_chip(scr_piano, 168, row_y2, 70, 36, "PAD+");
+    lv_obj_set_style_border_color(pad_plus, lv_color_hex(0xFF1493), 0);
+    lv_obj_add_event_cb(pad_plus, piano_pad_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)+1);
+    {
+        lv_obj_t* assign = piano_make_chip(scr_piano, 250, row_y2, 140, 36, "→ ASSIGN");
+        lv_obj_set_style_border_color(assign, lv_color_hex(0xFF1493), 0);
+        lv_obj_t* l = lv_obj_get_child(assign, 0);
+        if (l) lv_obj_set_style_text_color(l, lv_color_hex(0xFF1493), 0);
+        lv_obj_add_event_cb(assign, piano_assign_btn_cb, LV_EVENT_CLICKED, NULL);
+    }
+
     /* Keys area (full width below controls) */
-    int keys_y = 104;
+    int keys_y = 144;
     int keys_h = H - keys_y - 8;
     s_piano_keys_container = lv_obj_create(scr_piano);
     lv_obj_set_pos(s_piano_keys_container, 0, keys_y);

@@ -127,6 +127,81 @@ void udp_send_melody_rec_note(uint8_t engine, uint8_t note) {
     sendJson(buf);
 }
 
+// v2.9 — Master now keeps melody state. Tell it REC is toggled and which
+// engine/octave we're using so it can mirror the change to all slaves.
+void udp_send_melody_rec_toggle(bool active, uint8_t engine, uint8_t octave) {
+    char buf[96];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"melodyRecToggle\",\"active\":%d,\"engine\":%u,\"octave\":%u}",
+             active ? 1 : 0, (unsigned)engine, (unsigned)octave);
+    sendJson(buf);
+}
+
+void udp_send_melody_set_pad(uint8_t pad) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"melodySetPad\",\"pad\":%u}", (unsigned)pad);
+    sendJson(buf);
+}
+
+void udp_send_melody_set_engine(uint8_t engine) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"melodySetEngine\",\"engine\":%u}", (unsigned)engine);
+    sendJson(buf);
+}
+
+void udp_send_melody_set_octave(uint8_t octave) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"melodySetOctave\",\"octave\":%u}", (unsigned)octave);
+    sendJson(buf);
+}
+
+void udp_send_melody_assign_pad(uint8_t pad, uint8_t engine, uint8_t octave) {
+    char buf[96];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"melodyAssign\",\"pad\":%u,\"engine\":%u,\"octave\":%u}",
+             (unsigned)pad, (unsigned)engine, (unsigned)octave);
+    sendJson(buf);
+}
+
+void udp_send_melody_assign(uint8_t pad, uint8_t engine, uint8_t octave,
+                            const bool grid[16][12]) {
+    // Mirror the JSON shape produced by S3's ui_screens.cpp mel_assign_cb:
+    //   {"cmd":"melodyAssign","pad":N,"engine":E,"octave":O,
+    //    "steps":[[midi,midi,...], ... 16 columns]}
+    char buf[768];
+    int n = snprintf(buf, sizeof(buf),
+                     "{\"cmd\":\"melodyAssign\",\"pad\":%u,\"engine\":%u,"
+                     "\"octave\":%u,\"steps\":[",
+                     (unsigned)pad, (unsigned)engine, (unsigned)octave);
+    if (n < 0 || n >= (int)sizeof(buf)) return;
+    // S3 mapping: row r -> pc = (11 - r), midi = (octave + 1) * 12 + pc
+    for (int c = 0; c < 16; c++) {
+        if (n >= (int)sizeof(buf) - 8) return;
+        if (c > 0) buf[n++] = ',';
+        buf[n++] = '[';
+        bool first = true;
+        for (int r = 0; r < 12; r++) {
+            if (!grid[c][r]) continue;
+            int pc = 11 - r;
+            int midi = ((int)octave + 1) * 12 + pc;
+            if (midi < 0) midi = 0;
+            if (midi > 127) midi = 127;
+            int w = snprintf(buf + n, sizeof(buf) - n,
+                             "%s%d", first ? "" : ",", midi);
+            if (w < 0 || w >= (int)(sizeof(buf) - n)) return;
+            n += w;
+            first = false;
+        }
+        if (n >= (int)sizeof(buf) - 4) return;
+        buf[n++] = ']';
+    }
+    if (n >= (int)sizeof(buf) - 3) return;
+    buf[n++] = ']';
+    buf[n++] = '}';
+    buf[n] = 0;
+    sendJson(buf);
+}
+
 void udp_send_start(void) { sendCmd("start"); }
 void udp_send_stop(void)  { sendCmd("stop"); }
 

@@ -60,5 +60,18 @@ void udp_send_synth_preset(uint8_t engine, uint8_t preset);
 // v2.7 — record-mode note for the S3 melody screen (master forwards to all slaves)
 void udp_send_melody_rec_note(uint8_t engine, uint8_t note);
 
+// v2.8 — assign a recorded 16×12 melody grid to a pad (master forwards)
+// pad: 0..15, engine: 3..6, octave: 1..7,
+// grid[col][row]: row 0 = B (highest), row 11 = C (lowest)
+void udp_send_melody_assign(uint8_t pad, uint8_t engine, uint8_t octave,
+                            const bool grid[16][12]);
+
+// v2.9 — master-authoritative melody state commands
+void udp_send_melody_rec_toggle(bool active, uint8_t engine, uint8_t octave);
+void udp_send_melody_set_pad(uint8_t pad);
+void udp_send_melody_set_engine(uint8_t engine);
+void udp_send_melody_set_octave(uint8_t octave);
+void udp_send_melody_assign_pad(uint8_t pad, uint8_t engine, uint8_t octave);
+
 // Request full sync from Master
 void udp_request_master_sync(void);

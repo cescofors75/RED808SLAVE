@@ -1520,7 +1520,7 @@ void receiveUDPData() {
     int packetSize = udp.parsePacket();
     if (packetSize == 0) return;
 
-    char buf[512];
+    char buf[1024];
     int len = udp.read(buf, sizeof(buf) - 1);
     if (len <= 0) return;
     buf[len] = '\0';
@@ -1728,11 +1728,31 @@ void receiveUDPData() {
         // v2.7 — incoming note from P4 piano (REC mode) → write into melody grid
         // Must hold LVGL lock: melody_record_midi_note touches LVGL objects.
         int note = doc["note"] | -1;
+        Serial.printf("[S3 rx melodyRecNote] note=%d\n", note);
         if (note >= 0 && note <= 127) {
-            if (lvgl_port_lock(50)) {
+            bool got = lvgl_port_lock(200);
+            Serial.printf("[S3 melodyRecNote] lock=%d\n", (int)got);
+            if (got) {
                 melody_record_midi_note((uint8_t)note);
                 lvgl_port_unlock();
             }
+        }
+    }
+    else if (strcmp(cmd, "melodyAssign") == 0) {
+        // v2.8 — remote ASSIGN from P4: rebuild S3 melody grid + pad selector.
+        Serial.println("[S3 rx melodyAssign]");
+        if (lvgl_port_lock(200)) {
+            melody_apply_assign_payload(doc.as<JsonVariantConst>());
+            lvgl_port_unlock();
+        }
+    }
+    else if (strcmp(cmd, "melody_sync") == 0) {
+        // v2.9 — master-authoritative melody state. Apply engine/octave/rec/
+        // step/pad/grid directly to the UI.
+        Serial.println("[S3 rx melody_sync]");
+        if (lvgl_port_lock(200)) {
+            melody_apply_sync_payload(doc.as<JsonVariantConst>());
+            lvgl_port_unlock();
         }
     }
     else if (strcmp(cmd, "volume_sync") == 0 ||
@@ -3375,6 +3395,18 @@ void loop() {
         lastUDPCheck = now;
         RED808_LOG_PRINTLN("[UDP] Master not responding, resending hello...");
         requestMasterSync(false);
+    }
+
+    // v2.8 — periodic UDP heartbeat so the master keeps S3 in its udpClients
+    // map even when no encoder/UI traffic flows. Without this, the master may
+    // drop S3 from its forward set after a master reboot, and forwarded
+    // packets like melodyRecNote/melodyAssign never reach S3.
+    {
+        static unsigned long lastUdpHello = 0;
+        if (wifiConnected && udpConnected && (now - lastUdpHello >= 4000)) {
+            lastUdpHello = now;
+            sendUDPCommand("{\"cmd\":\"ping\"}");
+        }
     }
 #endif
 

@@ -4817,6 +4817,123 @@ bool melody_record_midi_note(uint8_t midi) {
     return true;
 }
 
+// v2.8 — Public: rebuild the melody grid from a remote melodyAssign payload.
+// Payload mirrors mel_assign_cb's JSON: pad,engine,octave,steps[[...]×16].
+// Caller MUST hold the LVGL lock (we touch cells via mel_redraw_cell).
+void melody_apply_assign_payload(JsonVariantConst doc) {
+    int pad    = doc["pad"]    | -1;
+    int engine = doc["engine"] | -1;
+    int octave = doc["octave"] | -1;
+    JsonArrayConst steps = doc["steps"].as<JsonArrayConst>();
+    if (steps.isNull()) return;
+    if (octave >= 1 && octave <= 7) s_mel_octave = octave;
+    if (engine >= 3 && engine <= 6) {
+        for (int i = 0; i < 4; i++) {
+            if (MEL_ENGINES[i] == (uint8_t)engine) { s_mel_engine_idx = i; break; }
+        }
+    }
+    if (pad >= 0 && pad < 16) s_mel_assign_pad = pad;
+    // Wipe grid then repopulate from steps[col][note...]
+    memset(s_mel_grid, 0, sizeof(s_mel_grid));
+    int col = 0;
+    for (JsonVariantConst stepArr : steps) {
+        if (col >= 16) break;
+        if (stepArr.is<JsonArrayConst>()) {
+            for (JsonVariantConst v : stepArr.as<JsonArrayConst>()) {
+                int midi = v.as<int>();
+                if (midi < 0 || midi > 127) continue;
+                int rel = midi - (s_mel_octave + 1) * 12;
+                while (rel < 0)   rel += 12;
+                while (rel >= 12) rel -= 12;
+                int pc = rel % 12;
+                int row = -1;
+                for (int r = 0; r < 12; r++) {
+                    if (MEL_NOTE_PC[r] == pc) { row = r; break; }
+                }
+                if (row >= 0) s_mel_grid[col][row] = true;
+            }
+        }
+        col++;
+    }
+    // Refresh the visible grid + the pad/octave/engine UI labels.
+    for (int c = 0; c < 16; c++) {
+        for (int r = 0; r < 12; r++) mel_redraw_cell(c, r);
+    }
+    if (mel_octave_lbl) lv_label_set_text_fmt(mel_octave_lbl, "OCT %d", s_mel_octave);
+    if (mel_assign_lbl) lv_label_set_text_fmt(mel_assign_lbl, "→ PAD %d", s_mel_assign_pad + 1);
+    if (mel_status_lbl) {
+        lv_label_set_text_fmt(mel_status_lbl, "ENG %s  OCT %d  PAD %d",
+                              MEL_ENGINE_LABELS[s_mel_engine_idx],
+                              s_mel_octave, s_mel_assign_pad + 1);
+    }
+    for (int i = 0; i < 4; i++) {
+        if (!mel_engine_btns[i]) continue;
+        bool sel = (i == s_mel_engine_idx);
+        lv_obj_set_style_bg_color(mel_engine_btns[i],
+            sel ? RED808_ACCENT : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(mel_engine_btns[i],
+            sel ? RED808_ACCENT : RED808_BORDER, 0);
+    }
+}
+
+// v2.9 — Apply master-authoritative melody_sync packet. Master is the source
+// of truth: just mirror engine/octave/rec/step/pad and the 16×12 grid into
+// the local UI. Called under LVGL lock from receiveUDPData.
+void melody_apply_sync_payload(JsonVariantConst doc) {
+    int engine = doc["engine"] | -1;
+    int octave = doc["octave"] | -1;
+    int pad    = doc["pad"]    | -1;
+    int rec    = doc["rec"]    | -1;
+    JsonArrayConst grid = doc["grid"].as<JsonArrayConst>();
+    if (engine >= 3 && engine <= 6) {
+        for (int i = 0; i < 4; i++) {
+            if (MEL_ENGINES[i] == (uint8_t)engine) { s_mel_engine_idx = i; break; }
+        }
+    }
+    if (octave >= 0 && octave <= 9) s_mel_octave = octave;
+    if (pad >= 0 && pad < 16)       s_mel_assign_pad = pad;
+    if (rec == 0 || rec == 1) {
+        bool active = (rec == 1);
+        if (active != s_mel_recording) {
+            s_mel_recording = active;
+            mel_rec_set_visual(active);
+        }
+    }
+    if (!grid.isNull()) {
+        memset(s_mel_grid, 0, sizeof(s_mel_grid));
+        int c = 0;
+        for (JsonVariantConst colVar : grid) {
+            if (c >= 16) break;
+            if (colVar.is<JsonArrayConst>()) {
+                int r = 0;
+                for (JsonVariantConst v : colVar.as<JsonArrayConst>()) {
+                    if (r >= 12) break;
+                    s_mel_grid[c][r] = (v.as<int>() != 0);
+                    r++;
+                }
+            }
+            c++;
+        }
+        for (int cc = 0; cc < 16; cc++)
+            for (int rr = 0; rr < 12; rr++) mel_redraw_cell(cc, rr);
+    }
+    if (mel_octave_lbl) lv_label_set_text_fmt(mel_octave_lbl, "OCT %d", s_mel_octave);
+    if (mel_assign_lbl) lv_label_set_text_fmt(mel_assign_lbl, "→ PAD %d", s_mel_assign_pad + 1);
+    if (mel_status_lbl) {
+        lv_label_set_text_fmt(mel_status_lbl, "ENG %s  OCT %d  PAD %d",
+                              MEL_ENGINE_LABELS[s_mel_engine_idx],
+                              s_mel_octave, s_mel_assign_pad + 1);
+    }
+    for (int i = 0; i < 4; i++) {
+        if (!mel_engine_btns[i]) continue;
+        bool sel = (i == s_mel_engine_idx);
+        lv_obj_set_style_bg_color(mel_engine_btns[i],
+            sel ? RED808_ACCENT : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(mel_engine_btns[i],
+            sel ? RED808_ACCENT : RED808_BORDER, 0);
+    }
+}
+
 static void mel_assign_cb(lv_event_t* e) {
     (void)e;
     if (!udpConnected) return;

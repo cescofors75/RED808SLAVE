@@ -4,6 +4,7 @@
 #pragma once
 
 #include "lvgl.h"
+#include <ArduinoJson.h>
 
 // Screen objects
 extern lv_obj_t* scr_menu;
@@ -43,6 +44,15 @@ void ui_create_piano_params_screen(); // v2.7 — synth params editor
 // receiveUDPData when "melodyRecNote" arrives, or from local sources).
 // Returns true if recording is currently active (note was captured).
 bool melody_record_midi_note(uint8_t midi);
+
+// v2.8 — MELODY: replace the displayed grid from a remote melodyAssign packet
+// (origin: P4 piano "→ ASSIGN"). steps: 16 columns of MIDI note arrays.
+// engine 3..6, octave 1..7. The grid is rebuilt and the pad selector updated.
+void melody_apply_assign_payload(JsonVariantConst doc);
+
+// v2.9 — MELODY: apply master-authoritative melody_sync (engine/octave/rec/
+// step/pad/grid). Called from receiveUDPData when "melody_sync" arrives.
+void melody_apply_sync_payload(JsonVariantConst doc);
 
 // Update functions (called from timer)
 void ui_update_sequencer();
