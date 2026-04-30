@@ -1,0 +1,47 @@
+Processing esp32s3 (platform: https://github.com/pioarduino/platform-espressif32/releases/download/55.03.37/platform-espressif32.zip; board: waveshare_s3_lcd7; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/espressif32/waveshare_s3_lcd7.html
+PLATFORM: Espressif 32 (55.3.37) > Waveshare ESP32-S3-Touch-LCD-7B (N16R8, 16MB Flash, 8MB PSRAM)
+HARDWARE: ESP32S3 240MHz, 320KB RAM, 16MB Flash
+DEBUG: Current (esp-builtin) On-board (esp-builtin) External (cmsis-dap, esp-bridge, esp-prog, iot-bus-jtag, jlink, minimodule, olimex-arm-usb-ocd, olimex-arm-usb-ocd-h, olimex-arm-usb-tiny-h, olimex-jtag-tiny, tumpa)
+PACKAGES: 
+ - contrib-piohome @ 3.4.4 
+ - framework-arduinoespressif32 @ 3.3.7 
+ - framework-arduinoespressif32-libs @ 5.5.0+sha.87912cd291 
+ - tool-esp-rom-elfs @ 2024.10.11 
+ - tool-esptoolpy @ 5.1.2 
+ - toolchain-xtensa-esp-elf @ 14.2.0+20251107
+*** Applied include path shortening for 336 framework paths ***
+*** Path length reduced from 39876 to ~14097 characters ***
+*** Estimated savings: 25200 characters ***
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 47 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- lvgl @ 8.4.0
+|-- ArduinoJson @ 7.4.3
+|-- M5ROTATE8 @ 0.4.2
+|-- DFRobot_VisualRotaryEncoder @ 1.0.1
+|-- SD_MMC @ 3.3.7
+|-- WiFi @ 3.3.7
+|-- Wire @ 3.3.7
+|-- FS @ 3.3.7
+Building in release mode
+Compiling .pio\build\esp32s3\src\drivers\lvgl_port.cpp.o
+Compiling .pio\build\esp32s3\src\main.cpp.o
+Compiling .pio\build\esp32s3\src\uart_bridge.cpp.o
+Compiling .pio\build\esp32s3\src\ui\ui_screens.cpp.o
+BlueSlaveV2/src/ui/ui_screens.cpp: In function 'void melody_apply_basic_sync(uint8_t, uint8_t, uint8_t, uint8_t)':
+BlueSlaveV2/src/ui/ui_screens.cpp:4976:5: warning: 'template<unsigned int N> class ArduinoJson::V743PB22::StaticJsonDocument' is deprecated: use JsonDocument instead [-Wdeprecated-declarations]
+ 4976 |     StaticJsonDocument<64> doc;
+      |     ^~~~~~~~~~~~~~~~~~
+In file included from .pio/libdeps/esp32s3/ArduinoJson/src/ArduinoJson.hpp:65,
+                 from .pio/libdeps/esp32s3/ArduinoJson/src/ArduinoJson.h:9,
+                 from BlueSlaveV2/src/ui/ui_screens.h:7,
+                 from BlueSlaveV2/src/ui/ui_screens.cpp:5:
+.pio/libdeps/esp32s3/ArduinoJson/src/ArduinoJson/compatibility.hpp:63:58: note: declared here
+   63 | class ARDUINOJSON_DEPRECATED("use JsonDocument instead") StaticJsonDocument
+      |                                                          ^~~~~~~~~~~~~~~~~~
+Linking .pio\build\esp32s3\firmware.elf

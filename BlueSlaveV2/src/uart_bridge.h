@@ -68,3 +68,22 @@ void uart_bridge_send_pad_trigger(int pad, uint8_t velocity);
 // Only packs the first STEPS_PER_BANK (16) steps — P4 protocol is fixed at 16.
 void uart_bridge_send_pattern_data(int pattern, const bool steps[][64], int numTracks);
 void uart_bridge_send_pattern_push(int pattern, const bool steps[][64], int numTracks);
+
+// v2.9 — Melody sync over UART (S3→P4, P4 forwards UDP to master)
+void uart_bridge_send_melody_engine(uint8_t engine);  // engine code 3-6
+void uart_bridge_send_melody_octave(uint8_t octave);  // 1-7
+void uart_bridge_send_melody_rec(bool active);
+void uart_bridge_send_melody_clear(void);
+void uart_bridge_send_melody_pad(uint8_t pad);         // 0-15
+
+// v2.9 — Pending melody state received from P4 (forwarded from master's melody_sync)
+// Written by uart_bridge_receive (Core 0 UART ISR context); consumed by main loop
+// under LVGL lock.
+struct PendingMelodyFromP4 {
+    uint8_t engine = 3;
+    uint8_t octave = 4;
+    uint8_t rec    = 0;
+    uint8_t pad    = 0;
+    volatile bool pending = false;
+};
+extern PendingMelodyFromP4 g_pending_melody_from_p4;

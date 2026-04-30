@@ -5,6 +5,8 @@
 
 #include "udp_handler.h"
 #include "uart_handler.h"   // for P4State p4
+#include "ui/ui_screens.h"  // v2.9 — piano_apply_melody_sync
+#include "drivers/lvgl_port.h" // v2.9 — lvgl_port_lock/unlock
 #include "../include/config.h"
 #include <Arduino.h>
 #include <WiFi.h>
@@ -153,6 +155,10 @@ void udp_send_melody_set_octave(uint8_t octave) {
     char buf[64];
     snprintf(buf, sizeof(buf), "{\"cmd\":\"melodySetOctave\",\"octave\":%u}", (unsigned)octave);
     sendJson(buf);
+}
+
+void udp_send_melody_clear(void) {
+    sendJson("{\"cmd\":\"melodyClear\"}");
 }
 
 void udp_send_melody_assign_pad(uint8_t pad, uint8_t engine, uint8_t octave) {
@@ -687,6 +693,23 @@ static void processJson(const char* json, int len) {
             udp_send_get_pattern(idx);
         }
     }
+    // v2.9 — master-authoritative melody state: apply to P4 piano UI
+    else if (strcmp(cmd, "melody_sync") == 0) {
+        uint8_t eng = (uint8_t)(doc["engine"] | 3);
+        uint8_t oct = (uint8_t)(doc["octave"] | 4);
+        bool    rec = doc["rec"] | false;
+        uint8_t pad = (uint8_t)(doc["pad"]    | 0);
+        if (lvgl_port_lock(200)) {
+            piano_apply_melody_sync(eng, oct, rec, pad);
+            lvgl_port_unlock();
+        }
+        // v2.9 — forward melody state to S3 so its melody screen stays in sync.
+        // S3 has no WiFi; it receives these via UART and applies under LVGL lock.
+        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MELODY_ENGINE, eng);
+        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MELODY_OCTAVE, oct);
+        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MELODY_REC,    rec ? 1 : 0);
+        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MELODY_PAD,    pad);
+    }
 }
 
 // =============================================================================
@@ -811,6 +834,17 @@ void udp_handler_process(void) {
     if (udpStarted && !masterAlive) {
         if (now - lastSyncRequest > SYNC_REQUEST_MS) {
             udp_request_master_sync();
+        }
+    }
+
+    // --- Periodic heartbeat: keep P4 in master's udpClients while alive ---
+    // Without this, P4 is removed after UDP_CLIENT_TIMEOUT (30 s) of inactivity
+    // and stops receiving melody_sync broadcasts.
+    {
+        static unsigned long lastPingMs = 0;
+        if (udpStarted && masterAlive && (now - lastPingMs >= 5000)) {
+            lastPingMs = now;
+            sendCmd("ping");
         }
     }
 

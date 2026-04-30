@@ -40,6 +40,14 @@ static RxParser s_usb_rx = {{0}, 0};
 // ignored (set by uart_lock_tempo() after applying a MIDI-file tempo).
 static uint32_t s_tempo_lock_until_ms = 0;
 
+// v2.9 — Track S3's current melody engine/octave so TCMD_MELODY_REC can
+// forward the correct engine+octave to master in melodyRecToggle.
+static uint8_t s_s3_mel_engine = 3;
+static uint8_t s_s3_mel_octave = 4;
+
+// v2.9 — Pending melody state received from S3 (consumed by main loop under LVGL lock)
+PendingMelodyFromS3 g_pending_melody_from_s3 = {};
+
 // -----------------------------------------------------------------------------
 // Deferred pattern push to Master. The first push for an unknown slot sends a
 // full clear+active refresh; later pushes use a per-slot cache and only send
@@ -420,6 +428,34 @@ static void process_basic(const UartBasicPacket* pkt) {
             }
             else if (id == TCMD_SYNC_PADS) {
                 ui_live_set_sync_p4(val != 0);
+            }
+            // v2.9 — melody commands from S3: apply DIRECTLY to piano UI (like pad sync)
+            // Also forward to master via UDP so web/other UIs stay in sync.
+            else if (id == TCMD_MELODY_ENGINE) {
+                s_s3_mel_engine = val;
+                g_pending_melody_from_s3.engine = val;
+                g_pending_melody_from_s3.pending = true;
+                if (udp_wifi_connected()) udp_send_melody_set_engine(val);
+            }
+            else if (id == TCMD_MELODY_OCTAVE) {
+                s_s3_mel_octave = val;
+                g_pending_melody_from_s3.octave = val;
+                g_pending_melody_from_s3.pending = true;
+                if (udp_wifi_connected()) udp_send_melody_set_octave(val);
+            }
+            else if (id == TCMD_MELODY_REC) {
+                g_pending_melody_from_s3.rec = val;
+                g_pending_melody_from_s3.pending = true;
+                if (udp_wifi_connected())
+                    udp_send_melody_rec_toggle(val != 0, s_s3_mel_engine, s_s3_mel_octave);
+            }
+            else if (id == TCMD_MELODY_CLEAR) {
+                if (udp_wifi_connected()) udp_send_melody_clear();
+            }
+            else if (id == TCMD_MELODY_PAD) {
+                g_pending_melody_from_s3.pad = val;
+                g_pending_melody_from_s3.pending = true;
+                if (udp_wifi_connected()) udp_send_melody_set_pad(val);
             }
             break;
     }

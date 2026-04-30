@@ -12,9 +12,10 @@
 #include <ArduinoJson.h>
 #include <math.h>
 
-extern void sendUDPCommand(JsonDocument& doc);
-extern void sendUDPCommand(const char* cmd);
 extern void sendFilterUDP(int track, int fxType);
+// sendUDPCommand stubs — S3 is UART-only; calls compile but are no-ops
+extern void sendUDPCommand(const char* cmd);
+extern void sendUDPCommand(JsonDocument& doc);
 extern void updateByteButtonLeds();
 extern uint8_t dfFxParamMode[];
 extern int dfFxParamValue[];
@@ -560,6 +561,10 @@ static void apply_stable_button_style(lv_obj_t* obj, lv_color_t base_color, lv_c
     lv_obj_add_flag(obj, LV_OBJ_FLAG_PRESS_LOCK);
 }
 
+// v2.9 — Set to true when user navigates to SCREEN_MELODY so loop() (Core 0)
+// can send a fresh "hello" to master once LVGL render is done.
+volatile bool g_mel_screen_entered = false;
+
 static void nav_to(Screen screen, lv_obj_t* scr) {
     if (!scr) return;
     if (currentScreen == screen || lv_scr_act() == scr) return;
@@ -581,6 +586,12 @@ static void nav_to(Screen screen, lv_obj_t* scr) {
 
     currentScreen = screen;
     lv_scr_load(scr);
+    // Notify P4 of screen change so it can mirror to its own UI
+    // (e.g. SCREEN_MELODY on S3 → PIANO on P4). Mirrors nav_to_screen() in main.cpp.
+    extern void uart_bridge_send_screen(int screen);
+    uart_bridge_send_screen((int)screen);
+    // v2.9 — signal Core 0 to re-request melody state after LVGL render
+    if (screen == SCREEN_MELODY) g_mel_screen_entered = true;
 }
 
 // ============================================================================
@@ -2882,7 +2893,7 @@ void ui_update_diagnostics() {
 
     DiagRowRuntime rows[DIAG_ROWS] = {
         { diagInfo.wifiOk,        "TCP/IP Red808" },   // WiFi
-        { diagInfo.udpConnected,  "UDP :8888 JSON" },  // UDP Master
+        { false,                  "UDP :8888 JSON" },  // UDP Master (UART-only)
         { masterConnected,        "UART 921600" },     // P4 Display link (heartbeat)
         { diagInfo.i2cHubOk,      "I2C 0x70" },        // PCA9548A mux
         { diagInfo.touchOk,       "I2C 0x5D" },        // GT911
@@ -2912,13 +2923,13 @@ void ui_update_diagnostics() {
     }
     diag_rows_initialized = true;
 
-    if (wifiConnected != prev_wifi_connected) {
-        prev_wifi_connected = wifiConnected;
-        ui_runtime_note(wifiConnected ? "WiFi link connected" : "WiFi link lost");
+    if (false != prev_wifi_connected) {
+        prev_wifi_connected = false;
+        ui_runtime_note("WiFi link connected");
     }
-    if (udpConnected != prev_udp_connected) {
-        prev_udp_connected = udpConnected;
-        ui_runtime_note(udpConnected ? "UDP port active" : "UDP port inactive");
+    if (false != prev_udp_connected) {
+        prev_udp_connected = false;
+        ui_runtime_note("UDP port inactive");
     }
     if (masterConnected != prev_master_connected) {
         prev_master_connected = masterConnected;
@@ -4145,11 +4156,11 @@ void ui_update_performance() {
     lv_label_set_text_fmt(perf_runtime_values[4], "%d / %s", currentPattern + 1, kitNames[constrain(currentKit, 0, 2)]);
     lv_label_set_text(perf_runtime_values[5], isPlaying ? "Running" : "Stopped");
     lv_label_set_text_fmt(perf_runtime_values[6], "%s | %s | %s",
-                          wifiConnected ? "WIFI" : "OFF",
-                          udpConnected ? "UDP" : "NO UDP",
+                          "OFF",
+                          "NO UDP",
                           masterConnected ? "MASTER" : "WAIT");
     lv_obj_set_style_text_color(perf_runtime_values[6],
-        (wifiConnected && udpConnected) ? (masterConnected ? RED808_SUCCESS : RED808_WARNING) : RED808_ERROR, 0);
+        masterConnected ? RED808_WARNING : RED808_ERROR, 0);
 
     const uint32_t h_total = SCREEN_WIDTH + LCD_HSYNC_PULSE_WIDTH + LCD_HSYNC_BACK_PORCH + LCD_HSYNC_FRONT_PORCH;
     const uint32_t v_total = SCREEN_HEIGHT + LCD_VSYNC_PULSE_WIDTH + LCD_VSYNC_BACK_PORCH + LCD_VSYNC_FRONT_PORCH;
@@ -4617,7 +4628,8 @@ static lv_obj_t*   mel_assign_btn     = NULL;
 static lv_obj_t*   mel_assign_lbl     = NULL;
 
 static void mel_send_note_on(int row, int vel) {
-    if (!udpConnected) return;
+    // S3 is UART-only — note preview via UART (no UDP)
+    (void)vel;
     int pc      = MEL_NOTE_PC[row];
     int midi    = (s_mel_octave + 1) * 12 + pc;
     if (midi < 0)   midi = 0;
@@ -4662,6 +4674,20 @@ static void mel_keylabel_cb(lv_event_t* e) {
     mel_send_note_on(row, 100);
 }
 
+// v2.9 — Envía el estado melody completo a P4 via UART (4 paquetes consecutivos)
+// De esta forma el receptor siempre aplica un estado coherente y completo.
+static void mel_uart_broadcast_state(void) {
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_MELODY_ENGINE, (uint8_t)MEL_ENGINES[s_mel_engine_idx]);
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_MELODY_OCTAVE, (uint8_t)s_mel_octave);
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_MELODY_REC,    s_mel_recording ? 1 : 0);
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_MELODY_PAD,    (uint8_t)s_mel_assign_pad);
+}
+
+// Public wrapper — called from main loop on SCREEN_MELODY entry.
+void melody_uart_broadcast_state(void) {
+    mel_uart_broadcast_state();
+}
+
 static void mel_engine_cb(lv_event_t* e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx > 3) return;
@@ -4677,6 +4703,8 @@ static void mel_engine_cb(lv_event_t* e) {
     if (mel_status_lbl) {
         lv_label_set_text_fmt(mel_status_lbl, "ENG %s  OCT %d", MEL_ENGINE_LABELS[idx], s_mel_octave);
     }
+    // v2.9 — sync estado completo a P4 via UART (4 campos, coherente)
+    mel_uart_broadcast_state();
 }
 
 static void mel_octave_cb(lv_event_t* e) {
@@ -4689,6 +4717,8 @@ static void mel_octave_cb(lv_event_t* e) {
     if (mel_octave_lbl) lv_label_set_text_fmt(mel_octave_lbl, "OCT %d", s_mel_octave);
     if (mel_status_lbl) lv_label_set_text_fmt(mel_status_lbl, "ENG %s  OCT %d",
                                               MEL_ENGINE_LABELS[s_mel_engine_idx], s_mel_octave);
+    // v2.9 — sync estado completo a P4 via UART (4 campos, coherente)
+    mel_uart_broadcast_state();
 }
 
 static void mel_clear_cb(lv_event_t* e) {
@@ -4701,6 +4731,8 @@ static void mel_clear_cb(lv_event_t* e) {
             }
         }
     }
+    // v2.9 — sync grid clear to master via P4 UART (S3 has no WiFi)
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_MELODY_CLEAR, 0);
 }
 
 // v2.7 — visual highlight of the playhead column (border accent)
@@ -4786,6 +4818,8 @@ static void mel_rec_cb(lv_event_t* e) {
     s_mel_recording = !s_mel_recording;
     s_mel_rec_step  = 0;
     mel_rec_set_visual(s_mel_recording);
+    // v2.9 — sync estado completo a P4 via UART (4 campos, coherente)
+    mel_uart_broadcast_state();
 }
 
 // Public — invoked from main.cpp's UDP receiver when "melodyRecNote" arrives.
@@ -4885,22 +4919,37 @@ void melody_apply_sync_payload(JsonVariantConst doc) {
     int pad    = doc["pad"]    | -1;
     int rec    = doc["rec"]    | -1;
     JsonArrayConst grid = doc["grid"].as<JsonArrayConst>();
+    bool ui_changed = false;
+
     if (engine >= 3 && engine <= 6) {
         for (int i = 0; i < 4; i++) {
-            if (MEL_ENGINES[i] == (uint8_t)engine) { s_mel_engine_idx = i; break; }
+            if (MEL_ENGINES[i] == (uint8_t)engine && i != s_mel_engine_idx) {
+                s_mel_engine_idx = i;
+                ui_changed = true;
+                break;
+            }
         }
     }
-    if (octave >= 0 && octave <= 9) s_mel_octave = octave;
-    if (pad >= 0 && pad < 16)       s_mel_assign_pad = pad;
+    if (octave >= 0 && octave <= 9 && octave != s_mel_octave) {
+        s_mel_octave = octave;
+        ui_changed = true;
+    }
+    if (pad >= 0 && pad < 16 && pad != s_mel_assign_pad) {
+        s_mel_assign_pad = pad;
+        ui_changed = true;
+    }
     if (rec == 0 || rec == 1) {
         bool active = (rec == 1);
         if (active != s_mel_recording) {
             s_mel_recording = active;
             mel_rec_set_visual(active);
+            ui_changed = true;
         }
     }
+
+    // Only redraw grid cells that actually changed — avoids 192 LVGL calls
+    // when melody_sync arrives for engine/octave/rec/pad with unchanged grid.
     if (!grid.isNull()) {
-        memset(s_mel_grid, 0, sizeof(s_mel_grid));
         int c = 0;
         for (JsonVariantConst colVar : grid) {
             if (c >= 16) break;
@@ -4908,15 +4957,21 @@ void melody_apply_sync_payload(JsonVariantConst doc) {
                 int r = 0;
                 for (JsonVariantConst v : colVar.as<JsonArrayConst>()) {
                     if (r >= 12) break;
-                    s_mel_grid[c][r] = (v.as<int>() != 0);
+                    bool newVal = (v.as<int>() != 0);
+                    if (s_mel_grid[c][r] != newVal) {
+                        s_mel_grid[c][r] = newVal;
+                        mel_redraw_cell(c, r);
+                        ui_changed = true;
+                    }
                     r++;
                 }
             }
             c++;
         }
-        for (int cc = 0; cc < 16; cc++)
-            for (int rr = 0; rr < 12; rr++) mel_redraw_cell(cc, rr);
     }
+
+    if (!ui_changed) return;   // nothing changed — skip all label/button updates
+
     if (mel_octave_lbl) lv_label_set_text_fmt(mel_octave_lbl, "OCT %d", s_mel_octave);
     if (mel_assign_lbl) lv_label_set_text_fmt(mel_assign_lbl, "→ PAD %d", s_mel_assign_pad + 1);
     if (mel_status_lbl) {
@@ -4934,9 +4989,19 @@ void melody_apply_sync_payload(JsonVariantConst doc) {
     }
 }
 
+// v2.9 — Apply melody state received from P4 via UART (forwarded from master).
+// Called from main loop under lvgl_port_lock with the 4 basic fields.
+void melody_apply_basic_sync(uint8_t engine, uint8_t octave, uint8_t rec, uint8_t pad) {
+    StaticJsonDocument<64> doc;
+    doc["engine"] = engine;
+    doc["octave"] = octave;
+    doc["rec"]    = (int)rec;
+    doc["pad"]    = (int)pad;
+    melody_apply_sync_payload(doc.as<JsonVariantConst>());
+}
+
 static void mel_assign_cb(lv_event_t* e) {
     (void)e;
-    if (!udpConnected) return;
     JsonDocument doc(sramAllocatorPtr);
     doc["cmd"]    = "melodyAssign";
     doc["pad"]    = s_mel_assign_pad;
@@ -5141,8 +5206,7 @@ static inline float pp_i2f(int i, float vmin, float vmax) {
 }
 
 static void pp_send_param(uint8_t engine, uint8_t param_id, uint8_t instrument, float value) {
-    extern bool udpConnected;
-    if (!udpConnected) return;
+    // S3 is UART-only — UDP send is a no-op stub
     JsonDocument doc(sramAllocatorPtr);
     if (engine == SP_ENGINE_303) {
         doc["cmd"]     = "synth303Param";
@@ -5159,8 +5223,7 @@ static void pp_send_param(uint8_t engine, uint8_t param_id, uint8_t instrument, 
 }
 
 static void pp_send_preset_cmd(uint8_t engine, uint8_t preset_idx) {
-    extern bool udpConnected;
-    if (!udpConnected) return;
+    // S3 is UART-only — UDP send is a no-op stub
     JsonDocument doc(sramAllocatorPtr);
     doc["cmd"]    = "synthPreset";
     doc["engine"] = engine;

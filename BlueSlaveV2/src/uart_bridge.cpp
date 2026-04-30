@@ -5,6 +5,8 @@
 #include "uart_bridge.h"
 #include "../include/uart_protocol.h"
 #include "../include/config.h"
+#include "ui/ui_screens.h"
+#include "drivers/lvgl_port.h"
 #include <Arduino.h>
 #include <HardwareSerial.h>
 
@@ -88,9 +90,32 @@ int uart_bridge_receive(void) {
             UartBasicPacket* pkt = (UartBasicPacket*)buf;
             if (!uart_validate_packet(pkt)) { uart_stats.rx_checksum_errors++; continue; }
             uart_stats.rx_packets++;
+            {
+                extern bool masterConnected;
+                extern unsigned long lastMasterPacketMs;
+                masterConnected = true;
+                lastMasterPacketMs = millis();
+            }
             if (pkt->type == MSG_TOUCH_CMD) {
                 extern void handleP4TouchCommand(uint8_t cmdId, uint8_t value);
-                handleP4TouchCommand(pkt->id, pkt->value);
+                uint8_t cid = pkt->id;
+                uint8_t val = pkt->value;
+                // v2.9 — Melody state forwarded from master via P4 UART
+                if (cid == TCMD_MELODY_ENGINE || cid == TCMD_MELODY_OCTAVE ||
+                    cid == TCMD_MELODY_REC    || cid == TCMD_MELODY_PAD) {
+                    if (cid == TCMD_MELODY_ENGINE) g_pending_melody_from_p4.engine = val;
+                    if (cid == TCMD_MELODY_OCTAVE) g_pending_melody_from_p4.octave = val;
+                    if (cid == TCMD_MELODY_REC)    g_pending_melody_from_p4.rec    = val;
+                    if (cid == TCMD_MELODY_PAD)    g_pending_melody_from_p4.pad    = val;
+                    g_pending_melody_from_p4.pending = true;
+                } else if (cid == TCMD_MELODY_NOTE) {
+                    if (val <= 127 && lvgl_port_lock(20)) {
+                        melody_record_midi_note(val);
+                        lvgl_port_unlock();
+                    }
+                } else {
+                    handleP4TouchCommand(cid, val);
+                }
                 count++;
             } else if (pkt->type == MSG_SYSTEM && pkt->id == SYS_HEARTBEAT) {
                 // P4 heartbeat echo — mark link alive
@@ -297,4 +322,28 @@ void uart_bridge_send_pattern_push(int pattern, const bool steps[][64], int numT
         packed[t * 2 + 1] = bits & 0xFF;
     }
     uart_bridge_send_extended(MSG_PATTERN_PUSH, (uint8_t)pattern, packed, 32);
+}
+
+// =============================================================================
+// v2.9 — MELODY SYNC OVER UART (S3→P4 direction)
+// P4 relays these as UDP to master; master responds with melody_sync broadcast
+// which P4 forwards back via UART as TCMD_MELODY_* packets (P4→S3).
+// =============================================================================
+
+PendingMelodyFromP4 g_pending_melody_from_p4 = {};
+
+void uart_bridge_send_melody_engine(uint8_t engine) {
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_MELODY_ENGINE, engine);
+}
+void uart_bridge_send_melody_octave(uint8_t octave) {
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_MELODY_OCTAVE, octave);
+}
+void uart_bridge_send_melody_rec(bool active) {
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_MELODY_REC, active ? 1 : 0);
+}
+void uart_bridge_send_melody_clear(void) {
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_MELODY_CLEAR, 0);
+}
+void uart_bridge_send_melody_pad(uint8_t pad) {
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_MELODY_PAD, pad);
 }

@@ -58,6 +58,18 @@ extern UartStats uart_stats;
 // =============================================================================
 // P4 LOCAL STATE — updated by UART handler, read by UI
 // =============================================================================
+
+// v2.9 — Pending melody state received from S3 via UART.
+// Written by uart_handler_process(); consumed by main loop under lvgl_port_lock.
+// Direct S3→P4 sync (same model as pad sync — no master needed).
+struct PendingMelodyFromS3 {
+    uint8_t engine = 3;
+    uint8_t octave = 4;
+    uint8_t rec    = 0;
+    uint8_t pad    = 0;
+    volatile bool pending = false;
+};
+extern PendingMelodyFromS3 g_pending_melody_from_s3;
 struct P4State {
     // System
     int  bpm_int;           // 40-240

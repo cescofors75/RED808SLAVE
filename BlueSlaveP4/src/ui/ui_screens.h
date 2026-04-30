@@ -35,6 +35,10 @@ int ui_pad_from_xy(uint16_t x, uint16_t y);
 // Handles rising/falling edges, note-repeat scheduling and 16-levels routing.
 void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]);
 
+// v2.9 — Apply melody_sync payload from master to P4 piano UI.
+// Must be called from within lvgl_port_lock.
+void piano_apply_melody_sync(uint8_t engine, uint8_t octave, bool rec, uint8_t pad);
+
 // Navigate to a screen
 void ui_navigate_to(int screen_id);
 

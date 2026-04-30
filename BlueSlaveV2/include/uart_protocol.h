@@ -128,6 +128,13 @@
 #define TCMD_SWING_DOWN    0x0F  // P4→S3: decrease swing
 #define TCMD_DRIVE_UP      0x10  // P4→S3: increase master drive
 #define TCMD_DRIVE_DOWN    0x11  // P4→S3: decrease master drive
+// v2.9 — Melody sync over UART (bidirectional S3↔P4)
+#define TCMD_MELODY_ENGINE  0x12  // value = engine code (3-6)
+#define TCMD_MELODY_OCTAVE  0x13  // value = octave (1-7)
+#define TCMD_MELODY_REC     0x14  // value = 0=off, 1=on
+#define TCMD_MELODY_CLEAR   0x15  // value = 0 (grid clear, S3→P4 only)
+#define TCMD_MELODY_PAD     0x16  // value = pad index (0-15)
+#define TCMD_MELODY_NOTE    0x17  // value = MIDI note (0-127, P4→S3 rec)
 
 // =============================================================================
 // SD DATA sub-IDs (MSG_SD_DATA extended, Byte 2)
@@ -225,7 +232,7 @@ static inline bool uart_validate_packet(const UartBasicPacket* pkt) {
         case MSG_SCREEN:
             return pkt->id == SCR_NAVIGATE;
         case MSG_TOUCH_CMD:
-            return pkt->id <= TCMD_DRIVE_DOWN;
+            return pkt->id <= TCMD_MELODY_NOTE;
         case MSG_PATTERN_DATA:
         case MSG_SD_DATA:
             return false;                                // not a basic packet

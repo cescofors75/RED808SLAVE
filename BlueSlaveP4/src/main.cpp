@@ -94,6 +94,22 @@ void loop() {
     // Process UART packets from S3 (optional secondary)
     uart_handler_process();
 
+    // v2.9 — Apply melody state received from S3 DIRECTLY to piano UI (no master needed)
+    // Same direct sync model as pad sync (S3↔P4 UART only)
+    {
+        if (g_pending_melody_from_s3.pending) {
+            g_pending_melody_from_s3.pending = false;
+            if (lvgl_port_lock(200)) {
+                piano_apply_melody_sync(
+                    g_pending_melody_from_s3.engine,
+                    g_pending_melody_from_s3.octave,
+                    g_pending_melody_from_s3.rec != 0,
+                    g_pending_melody_from_s3.pad);
+                lvgl_port_unlock();
+            }
+        }
+    }
+
     // Drain deferred MIDI→Master UDP burst (staged by MSG_PATTERN_PUSH)
     uart_handler_tick_pending_push();
 

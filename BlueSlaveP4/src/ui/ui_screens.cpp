@@ -3166,6 +3166,7 @@ static void piano_send_on(uint8_t midi_note) {
         }
     }
     if (s_piano_rec_active) {
+        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MELODY_NOTE, midi_note);
         // v2.8 — also store locally so ASSIGN can push the full sequence.
         int pc = midi_note % 12;
         int row = -1;
@@ -3203,6 +3204,15 @@ static void piano_key_event_cb(lv_event_t* e) {
     }
 }
 
+// v2.9 — Envía el estado piano completo a S3 via UART (4 paquetes consecutivos).
+// Garantiza que el receptor aplique un estado coherente sin mezclar defaults.
+static void piano_uart_broadcast_state(void) {
+    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MELODY_ENGINE, PIANO_ENGINES[s_piano_engine_idx]);
+    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MELODY_OCTAVE, (uint8_t)s_piano_octave);
+    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MELODY_REC,    s_piano_rec_active ? 1 : 0);
+    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MELODY_PAD,    (uint8_t)s_piano_assign_pad);
+}
+
 static void piano_engine_btn_cb(lv_event_t* e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx >= 4) return;
@@ -3220,6 +3230,8 @@ static void piano_engine_btn_cb(lv_event_t* e) {
     if (ui_use_udp_transport()) {
         udp_send_melody_set_engine(PIANO_ENGINES[s_piano_engine_idx]);
     }
+    // v2.9 — sync directly to S3 melody screen via UART (4 campos completos)
+    piano_uart_broadcast_state();
 }
 
 static void piano_rebuild_keys(void);
@@ -3237,6 +3249,8 @@ static void piano_octave_btn_cb(lv_event_t* e) {
     piano_rebuild_keys();
     // v2.9 — broadcast octave through master
     if (ui_use_udp_transport()) udp_send_melody_set_octave((uint8_t)s_piano_octave);
+    // v2.9 — sync directly to S3 melody screen via UART (4 campos completos)
+    piano_uart_broadcast_state();
 }
 
 static void piano_keys24_btn_cb(lv_event_t* e) {
@@ -3262,6 +3276,8 @@ static void piano_rec_btn_cb(lv_event_t* e) {
                                    PIANO_ENGINES[s_piano_engine_idx],
                                    (uint8_t)s_piano_octave);
     }
+    // v2.9 — sync directly to S3 melody screen via UART (4 campos completos)
+    piano_uart_broadcast_state();
     if (s_piano_rec_btn) {
         lv_obj_set_style_border_color(s_piano_rec_btn,
             s_piano_rec_active ? lv_color_hex(0xFF3030) : RED808_BORDER, 0);
@@ -3283,6 +3299,8 @@ static void piano_pad_btn_cb(lv_event_t* e) {
     }
     // v2.9 — broadcast pad selection through master
     if (ui_use_udp_transport()) udp_send_melody_set_pad((uint8_t)s_piano_assign_pad);
+    // v2.9 — sync directly to S3 melody screen via UART (4 campos completos)
+    piano_uart_broadcast_state();
 }
 
 // v2.8 — push the locally recorded grid to master as a melodyAssign packet
@@ -3295,6 +3313,56 @@ static void piano_assign_btn_cb(lv_event_t* e) {
                                (uint8_t)s_piano_octave);
     if (s_piano_status_lbl) {
         lv_label_set_text_fmt(s_piano_status_lbl, "→ PAD %d", s_piano_assign_pad + 1);
+    }
+}
+
+// v2.9 — Apply melody_sync payload from master (engine/octave/rec/pad).
+// Must be called from within lvgl_port_lock.
+void piano_apply_melody_sync(uint8_t engine, uint8_t octave, bool rec, uint8_t pad) {
+    // Map engine value 3..6 → index 0..3
+    int new_idx = s_piano_engine_idx;
+    for (int i = 0; i < 4; i++) {
+        if (PIANO_ENGINES[i] == engine) { new_idx = i; break; }
+    }
+    bool octave_changed = ((int)octave != s_piano_octave && octave >= 1 && octave <= 7);
+    s_piano_engine_idx = new_idx;
+    if (octave_changed) s_piano_octave = (int)octave;
+    if (pad < 16) s_piano_assign_pad = (int)pad;
+    s_piano_rec_active = rec;
+
+    // Refresh engine button colors
+    for (int i = 0; i < 4; i++) {
+        if (!s_piano_engine_btns[i]) continue;
+        bool sel = (i == new_idx);
+        lv_obj_set_style_bg_color(s_piano_engine_btns[i],
+            sel ? RED808_ACCENT : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(s_piano_engine_btns[i],
+            sel ? RED808_ACCENT2 : RED808_BORDER, 0);
+    }
+    // Refresh octave label
+    if (s_piano_octave_lbl)
+        lv_label_set_text_fmt(s_piano_octave_lbl, "OCT %d", s_piano_octave);
+    // Rebuild key layout only when octave changes (expensive but necessary)
+    if (octave_changed) piano_rebuild_keys();
+    // Refresh REC button visual
+    if (s_piano_rec_btn) {
+        lv_obj_set_style_border_color(s_piano_rec_btn,
+            rec ? lv_color_hex(0xFF3030) : RED808_BORDER, 0);
+        lv_obj_set_style_border_width(s_piano_rec_btn, rec ? 3 : 1, 0);
+    }
+    if (s_piano_rec_lbl) {
+        lv_obj_set_style_text_color(s_piano_rec_lbl,
+            rec ? lv_color_hex(0xFF3030) : RED808_TEXT, 0);
+        lv_label_set_text(s_piano_rec_lbl, rec ? "● REC" : "○ REC");
+    }
+    // Refresh pad label
+    if (s_piano_pad_lbl)
+        lv_label_set_text_fmt(s_piano_pad_lbl, "PAD %d", s_piano_assign_pad + 1);
+    // Refresh status label
+    if (s_piano_status_lbl) {
+        lv_label_set_text_fmt(s_piano_status_lbl, "ENG %s  OCT %d  PAD %d",
+                              PIANO_ENGINE_LABELS[new_idx],
+                              s_piano_octave, s_piano_assign_pad + 1);
     }
 }
 

@@ -40,6 +40,10 @@ void ui_create_seq_circle_screen();
 void ui_create_melody_screen();      // v2.6 — piano roll editor
 void ui_create_piano_params_screen(); // v2.7 — synth params editor
 
+// v2.9 — Set by nav_to(SCREEN_MELODY) so loop() can request a fresh
+// melody_sync from master once the LVGL render is done.
+extern volatile bool g_mel_screen_entered;
+
 // v2.7 — MELODY: write a MIDI note into the active step (called from
 // receiveUDPData when "melodyRecNote" arrives, or from local sources).
 // Returns true if recording is currently active (note was captured).
@@ -53,6 +57,11 @@ void melody_apply_assign_payload(JsonVariantConst doc);
 // v2.9 — MELODY: apply master-authoritative melody_sync (engine/octave/rec/
 // step/pad/grid). Called from receiveUDPData when "melody_sync" arrives.
 void melody_apply_sync_payload(JsonVariantConst doc);
+void melody_apply_basic_sync(uint8_t engine, uint8_t octave, uint8_t rec, uint8_t pad);
+
+// v2.9 — Push current S3 melody state (engine/octave/rec/pad) to P4 over UART.
+// Used on screen entry so PIANO mirrors S3 immediately.
+void melody_uart_broadcast_state(void);
 
 // Update functions (called from timer)
 void ui_update_sequencer();

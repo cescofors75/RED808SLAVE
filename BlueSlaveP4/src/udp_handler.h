@@ -71,6 +71,7 @@ void udp_send_melody_rec_toggle(bool active, uint8_t engine, uint8_t octave);
 void udp_send_melody_set_pad(uint8_t pad);
 void udp_send_melody_set_engine(uint8_t engine);
 void udp_send_melody_set_octave(uint8_t octave);
+void udp_send_melody_clear(void);
 void udp_send_melody_assign_pad(uint8_t pad, uint8_t engine, uint8_t octave);
 
 // Request full sync from Master

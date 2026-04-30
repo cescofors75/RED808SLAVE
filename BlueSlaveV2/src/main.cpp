@@ -6,10 +6,6 @@
 
 #include <Arduino.h>
 #include "../include/config.h"
-#if S3_WIFI_ENABLED
-#include <WiFi.h>
-#include <WiFiUdp.h>
-#endif
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include <math.h>
@@ -117,16 +113,9 @@ int byteButtonHubChannel[BYTEBUTTON_COUNT] = {-1, -1};
 int dfRobotPotHubChannel = -1;
 bool hubDetected = false;
 
-// Connection
-#if S3_WIFI_ENABLED
-bool udpConnected = false;
-bool wifiConnected = false;
-bool wifiReconnecting = false;
-#else
-bool udpConnected = false;
-bool wifiConnected = false;
-#endif
+// Connection — S3 is UART-only slave; no WiFi/UDP
 bool masterConnected = false;
+unsigned long lastMasterPacketMs = 0;  // updated by uart_bridge on P4 heartbeat
 
 // Diagnostic
 DiagnosticInfo diagInfo = {};
@@ -153,9 +142,6 @@ const char* kitNames[] = {"808 CLASSIC", "808 BRIGHT", "808 DRY"};
 // HARDWARE INSTANCES
 // =============================================================================
 
-#if S3_WIFI_ENABLED
-WiFiUDP udp;
-#endif
 M5ROTATE8 m5encoders[M5_ENCODER_MODULES];
 bool m5encoderConnected[M5_ENCODER_MODULES] = {false, false};
 uint8_t m5FirmwareVersion[M5_ENCODER_MODULES] = {0, 0};  // stored at init for I2C health check
@@ -184,13 +170,7 @@ static unsigned long livePadReleaseMs[Config::MAX_SAMPLES] = {}; // when each pa
 
 // Timing
 unsigned long lastEncoderRead = 0;
-#if S3_WIFI_ENABLED
-unsigned long lastWiFiCheck = 0;
-unsigned long lastWiFiConnectedMs = 0;
-#endif
 unsigned long lastScreenUpdate = 0;
-unsigned long lastUDPCheck = 0;
-unsigned long lastMasterPacketMs = 0;
 unsigned long lastStepUpdateMs = 0;   // last UDP step_update/step_sync received
 unsigned long lastLocalStepMs  = 0;   // last local-clock step advance (independent of UDP)
 uint32_t lastLocalStepUs = 0;         // microsecond local clock anchor for decimal BPM precision
@@ -339,12 +319,6 @@ static uint32_t encoder_poll_interval_ms(Screen screen) {
 // =============================================================================
 
 void initState();
-#if S3_WIFI_ENABLED
-void setupWiFi();
-void checkWiFiReconnect();
-static void finalizeWiFiConnection();
-static void startWiFiReconnectAttempt();
-#endif
 static void requestMasterSync(bool requestState);
 void sendUDPCommand(const char* cmd);
 void sendUDPCommand(JsonDocument& doc);
@@ -352,9 +326,6 @@ static void applyUnifiedMasterVolume(int value, bool sendToMaster);
 static void set_master_drive_percent(int percent, bool sendToMaster);
 void nvs_mark_dirty();
 void applyBPMPrecise(float bpm, bool sendToMaster);
-#if S3_WIFI_ENABLED
-void receiveUDPData();
-#endif
 void requestPatternFromMaster();
 void sendPlayStateCommand(bool shouldPlay);
 void selectPatternOnMaster(int patternIndex);
@@ -687,18 +658,13 @@ static int master_drive_percent_from_amount(float amount) {
 }
 
 static void set_master_drive_percent(int percent, bool sendToMaster) {
+    (void)sendToMaster;
     fxDistortionPercent = constrain(percent, 0, 100);
     nvs_dirty = true;
 
     // Mirror drive through the POT protocol. Encoder lane 2 is Reverb on P4.
     uint8_t driveMidi = (uint8_t)constrain((int)lroundf((fxDistortionPercent / 100.0f) * 127.0f), 0, 127);
     uart_bridge_send_pot(POT_DRIVE, driveMidi);
-
-    if (!sendToMaster || !udpConnected) return;
-    JsonDocument doc(&sramAllocator);
-    doc["cmd"] = "setDistortion";
-    doc["value"] = master_drive_amount_from_percent(fxDistortionPercent);
-    sendUDPCommand(doc);
 }
 
 int get_sequencer_swing_percent() {
@@ -710,6 +676,7 @@ int get_master_drive_percent() {
 }
 
 void applyBPMPrecise(float bpm, bool sendToMaster) {
+    (void)sendToMaster;
     float clamped = constrain(bpm, (float)Config::MIN_BPM, (float)Config::MAX_BPM);
     currentBPMPrecise = clamped;
     currentBPM = (int)lroundf(clamped);
@@ -717,13 +684,6 @@ void applyBPMPrecise(float bpm, bool sendToMaster) {
 
     // Forward BPM to P4
     uart_bridge_send_bpm(clamped);
-
-    if (!sendToMaster || !udpConnected) return;
-
-    JsonDocument doc(&sramAllocator);
-    doc["cmd"] = "tempo";
-    doc["value"] = currentBPMPrecise;
-    sendUDPCommand(doc);
 }
 
 static void nvs_load_settings() {
@@ -816,6 +776,7 @@ void nvs_save_settings() {
 void nvs_mark_dirty() { nvs_dirty = true; }
 
 static void applyUnifiedMasterVolume(int value, bool sendToMaster) {
+    (void)sendToMaster;
     int v = constrain(value, 0, Config::MAX_VOLUME);
     masterVolume = v;
     sequencerVolume = v;
@@ -825,23 +786,6 @@ static void applyUnifiedMasterVolume(int value, bool sendToMaster) {
 
     // Forward volume to P4
     uart_bridge_send_volume(v, v, v);
-
-    if (!sendToMaster || !udpConnected) return;
-
-    JsonDocument doc(&sramAllocator);
-    doc["cmd"] = "setVolume";
-    doc["value"] = v;
-    sendUDPCommand(doc);
-
-    doc.clear();
-    doc["cmd"] = "setSequencerVolume";
-    doc["value"] = v;
-    sendUDPCommand(doc);
-
-    doc.clear();
-    doc["cmd"] = "setLiveVolume";
-    doc["value"] = v;
-    sendUDPCommand(doc);
 }
 
 // Call from loop() — debounced save every 5 seconds when dirty
@@ -853,41 +797,19 @@ static void nvs_periodic_save() {
 }
 
 static void requestTrackVolumesFromMaster() {
-    if (!udpConnected) return;
-
-    JsonDocument doc(&sramAllocator);
-    doc["cmd"] = "getTrackVolumes";
-    sendUDPCommand(doc);
+    // S3 is UART-only — no WiFi/UDP, nothing to request
 }
 
 static void requestMasterSync(bool requestState) {
-    if (!udpConnected) return;
-
-    JsonDocument doc(&sramAllocator);
-    doc["cmd"] = "hello";
-    doc["device"] = "SURFACE";
-    sendUDPCommand(doc);
-
-    if (requestState) {
-        requestPatternFromMaster();
-        requestTrackVolumesFromMaster();
-
-        // Reset all encoder FX to OFF on connection (clean slate)
-        { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusActive";  d["value"] = 0; sendUDPCommand(d); }
-        { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayActive";   d["value"] = 0; sendUDPCommand(d); }
-        { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbActive";  d["value"] = 0; sendUDPCommand(d); }
-        { JsonDocument d(&sramAllocator); d["cmd"] = "setFilter";        d["type"]  = 0;   sendUDPCommand(d); }
-        { JsonDocument d(&sramAllocator); d["cmd"] = "setDistortion";    d["value"] = 0.0f; sendUDPCommand(d); }
-        // Also reset via UART bridge (works when S3_WIFI_ENABLED=0)
-        for (int lane = 0; lane < 3; lane++) {
-            uart_bridge_send_encoder(lane, 0);
-            uart_bridge_send_encoder_mute(lane, false);
-        }
-        // Restore persisted soft drive after clean-reset handshake.
-        if (fxDistortionPercent > 0) {
-            set_master_drive_percent(fxDistortionPercent, true);
-        }
-        RED808_LOG_PRINTLN("[FX] All effects reset to OFF on connection");
+    (void)requestState;
+    // S3 is UART-only — no UDP master sync
+    // Reset UART bridge encoder/FX state
+    for (int lane = 0; lane < 3; lane++) {
+        uart_bridge_send_encoder(lane, 0);
+        uart_bridge_send_encoder_mute(lane, false);
+    }
+    if (fxDistortionPercent > 0) {
+        set_master_drive_percent(fxDistortionPercent, false);
     }
 }
 
@@ -1161,167 +1083,13 @@ void initState() {
     memset(byteButtonLedInitialized, 0, sizeof(byteButtonLedInitialized));
 }
 
-// =============================================================================
-// WiFi / UDP
-// =============================================================================
-
-#if S3_WIFI_ENABLED
-static void finalizeWiFiConnection() {
-    wifiConnected = true;
-    wifiReconnecting = false;
-    lastWiFiConnectedMs = millis();
-    lastWiFiCheck = lastWiFiConnectedMs;
-    lastUDPCheck = 0;  // force immediate hello on next loop tick
-    uart_bridge_send_wifi_state(true, masterConnected);
-
-    udp.stop();
-    udpConnected = udp.begin(WiFiConfig::UDP_PORT);
-
-    diagInfo.wifiOk = true;
-    diagInfo.udpConnected = udpConnected;
-}
-
-static void startWiFiReconnectAttempt() {
-    lastWiFiCheck = millis();
-    wifiReconnecting = true;
-
-    if (!WiFi.reconnect()) {
-        WiFi.begin(WiFiConfig::SSID, WiFiConfig::PASSWORD);
-    }
-}
-
-void setupWiFi() {
-    RED808_LOG_PRINTLN("[WiFi] Connecting...");
-    WiFi.disconnect(true);
-    delay(20);
-    WiFi.mode(WIFI_STA);
-    WiFi.persistent(false);
-    WiFi.setAutoReconnect(true);
-    WiFi.setSleep(false);
-    WiFi.begin(WiFiConfig::SSID, WiFiConfig::PASSWORD);
-
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && (millis() - start) < WiFiConfig::TIMEOUT_MS) {
-        delay(250);
-        RED808_LOG_PRINT(".");
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        finalizeWiFiConnection();
-        RED808_LOG_PRINTF("\n[WiFi] Connected! IP: %s  UDP: %s\n",
-                      WiFi.localIP().toString().c_str(),
-                      udpConnected ? "OK" : "FALLO");
-
-        if (udpConnected) {
-            requestMasterSync(true);
-        }
-    } else {
-        RED808_LOG_PRINTLN("\n[WiFi] Initial connect timeout - will retry in background");
-        wifiConnected = false;
-        wifiReconnecting = false;
-        udpConnected = false;
-        diagInfo.wifiOk = false;
-        diagInfo.udpConnected = false;
-    }
-    lastWiFiCheck = millis();
-}
-
-void checkWiFiReconnect() {
-    unsigned long now_wifi = millis();
-    wl_status_t wifiStatus = WiFi.status();
-
-    if (wifiStatus == WL_CONNECTED) {
-        lastWiFiConnectedMs = now_wifi;
-        if (!wifiConnected) {
-            finalizeWiFiConnection();
-            RED808_LOG_PRINTF("[WiFi] Reconectado! IP: %s  UDP: %s\n",
-                          WiFi.localIP().toString().c_str(),
-                          udpConnected ? "OK" : "FALLO");
-            if (udpConnected) {
-                requestMasterSync(true);
-            }
-        }
-        return;
-    }
-
-    if (wifiConnected && (now_wifi - lastWiFiConnectedMs) < WiFiConfig::DISCONNECT_GRACE_MS) {
-        return;
-    }
-
-    if (wifiConnected || udpConnected || masterConnected) {
-        wifiConnected = false;
-        masterConnected = false;
-        if (udpConnected) {
-            udp.stop();
-        }
-        udpConnected = false;
-        diagInfo.wifiOk = false;
-        diagInfo.udpConnected = false;
-        RED808_LOG_PRINTLN("[WiFi] Link lost, waiting for background reconnect");
-    }
-
-    if (wifiReconnecting && (now_wifi - lastWiFiCheck > WiFiConfig::RECONNECT_ATTEMPT_TIMEOUT_MS)) {
-        wifiReconnecting = false;
-    }
-
-    if (!wifiReconnecting && (now_wifi - lastWiFiCheck > WiFiConfig::RECONNECT_INTERVAL_MS)) {
-        startWiFiReconnectAttempt();
-    }
-}
-#endif // S3_WIFI_ENABLED
-
-void sendUDPCommand(const char* cmd) {
-#if S3_WIFI_ENABLED
-    if (!udpConnected) return;  // silent drop — no Serial in hot path
-    udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
-    udp.write((const uint8_t*)cmd, strlen(cmd));
-    udp.endPacket();
-#if RED808_ENABLE_DEBUG_LOG
-    if (cmd && (strstr(cmd, "Filter") || strstr(cmd, "Distortion") ||
-                strstr(cmd, "Delay") || strstr(cmd, "Reverb") ||
-                strstr(cmd, "Chorus") || strstr(cmd, "BitCrush") ||
-                strstr(cmd, "SampleRate"))) {
-        Serial.print("[FX-TX] "); Serial.println(cmd);
-    }
-#endif
-#endif
-}
-
-void sendUDPCommand(JsonDocument& doc) {
-#if S3_WIFI_ENABLED
-    if (!udpConnected) return;
-    static char buf[4096];
-    size_t len = serializeJson(doc, buf, sizeof(buf));
-    if (len > 0 && len < sizeof(buf)) {
-        udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
-        udp.write((const uint8_t*)buf, len);
-        udp.endPacket();
-#if RED808_ENABLE_DEBUG_LOG
-        const char* cmd = doc["cmd"] | (const char*)nullptr;
-        if (cmd && (strstr(cmd, "Filter") || strstr(cmd, "Distortion") ||
-                    strstr(cmd, "Delay") || strstr(cmd, "Reverb") ||
-                    strstr(cmd, "Chorus") || strstr(cmd, "BitCrush") ||
-                    strstr(cmd, "SampleRate"))) {
-            Serial.print("[FX-TX] "); Serial.write((const uint8_t*)buf, len); Serial.println();
-        }
-#endif
-    }
-#endif
-}
-
 void requestPatternFromMaster() {
-    JsonDocument doc(&sramAllocator);
-    doc["cmd"] = "get_pattern";
-    doc["pattern"] = currentPattern;
-    sendUDPCommand(doc);
+    // S3 is UART-only — no UDP
 }
 
 void sendPlayStateCommand(bool shouldPlay) {
     isPlaying = shouldPlay;
     uart_bridge_send_play_state(isPlaying);
-    JsonDocument doc(&sramAllocator);
-    doc["cmd"] = isPlaying ? "start" : "stop";
-    sendUDPCommand(doc);
 }
 
 static bool pattern_has_data(int patternIndex) {
@@ -1337,64 +1105,16 @@ void selectPatternOnMaster(int patternIndex) {
 
     bool localHasData = pattern_has_data(currentPattern);
 
-    // Forward pattern selection to P4. Only push the local grid when S3 really
-    // owns data for this slot; empty slots must not wipe a Master pattern.
+    // Forward pattern selection to P4.
     uart_bridge_send_pattern(currentPattern);
     if (localHasData) {
         uart_bridge_send_pattern_push(currentPattern, patterns[currentPattern].steps,
                                       Config::MAX_TRACKS);
     }
-
-    JsonDocument doc(&sramAllocator);
-    doc["cmd"] = "selectPattern";
-    doc["index"] = currentPattern;
-    sendUDPCommand(doc);
-
-    // Only ask Master for data when S3 has no local grid for this slot. In the
-    // normal USB path P4 owns UDP, so sendUDPCommand is a no-op when WiFi is off.
-    if (!localHasData) requestPatternFromMaster();
 }
 
-// Send full local pattern to master (select pattern, send active steps, restore)
-void sendFullPatternToMaster(int pat) {
-    if (pat < 0 || pat >= Config::MAX_PATTERNS || !udpConnected) return;
-
-    int savedPattern = currentPattern;
-
-    // Switch master to target pattern
-    {
-        JsonDocument doc(&sramAllocator);
-        doc["cmd"] = "selectPattern";
-        doc["index"] = pat;
-        sendUDPCommand(doc);
-    }
-    delay(30);
-
-    // Send each active step via setStep (same format the master expects)
-    int sent = 0;
-    for (int t = 0; t < Config::MAX_TRACKS; t++) {
-        for (int s = 0; s < Config::MAX_STEPS; s++) {
-            if (patterns[pat].steps[t][s]) {
-                char buf[80];
-                snprintf(buf, sizeof(buf),
-                    "{\"cmd\":\"setStep\",\"track\":%d,\"step\":%d,\"active\":true}", t, s);
-                sendUDPCommand(buf);
-                sent++;
-                if (sent % 8 == 0) delay(10);  // throttle every 8 packets
-            }
-        }
-    }
-
-    // Restore master to previous pattern if different
-    if (savedPattern != pat) {
-        delay(30);
-        JsonDocument doc(&sramAllocator);
-        doc["cmd"] = "selectPattern";
-        doc["index"] = savedPattern;
-        sendUDPCommand(doc);
-    }
-    RED808_LOG_PRINTF("[DEMO] Sent pattern %d to master (%d steps)\n", pat, sent);
-}
+// Send full local pattern to master — no-op: S3 is UART-only
+void sendFullPatternToMaster(int pat) { (void)pat; }
 
 // =============================================================================
 // MICROTIMING ENGINE — humanizes pad triggers with subtle timing offsets
@@ -1485,393 +1205,25 @@ void apply_mpc_preset(bool saveToNvs) {
 }
 
 void sendLivePadTrigger(int pad, int velocity) {
-    if (pad < 0 || pad >= Config::MAX_SAMPLES) return;
-#if S3_WIFI_ENABLED
-    if (!udpConnected) return;
-
-    // Humanize velocity with subtle random variation
-    int humanVel = microtiming_velocity(velocity);
-    int jitterMs = microtiming_jitter(4);  // ±4ms
-
-    // Pre-formatted UDP — NO ArduinoJson overhead (~10x faster)
-    char buf[80];
-    int len;
-    if (jitterMs != 0) {
-        len = snprintf(buf, sizeof(buf), "{\"cmd\":\"trigger\",\"pad\":%d,\"vel\":%d,\"mt\":%d}", pad, humanVel, jitterMs);
-    } else {
-        len = snprintf(buf, sizeof(buf), "{\"cmd\":\"trigger\",\"pad\":%d,\"vel\":%d}", pad, humanVel);
-    }
-    udp.beginPacket(WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
-    udp.write((const uint8_t*)buf, len);
-    udp.endPacket();
-#endif
+    (void)pad; (void)velocity;
+    // S3 is UART-only — pad triggers go via uart_bridge_send_pad_trigger in pad_trigger_task
 }
 
 // =============================================================================
-// UDP RECEIVE
+// UDP STUBS — S3 is UART-only; these are kept for link compatibility with
+// ui_screens.cpp externs but do nothing.
 // =============================================================================
 
-#if S3_WIFI_ENABLED
-void receiveUDPData() {
-    if (!udpConnected) return;
-
-    // Process only 1 UDP packet per call (called every 30ms).
-    // Minimises PSRAM bus contention between JSON parsing and LCD DMA.
-    int packetSize = udp.parsePacket();
-    if (packetSize == 0) return;
-
-    char buf[1024];
-    int len = udp.read(buf, sizeof(buf) - 1);
-    if (len <= 0) return;
-    buf[len] = '\0';
-    udpRxCount = udpRxCount + 1;
-
-    lastMasterPacketMs = millis();
-    if (!masterConnected) {
-        masterConnected = true;
-        uart_bridge_send_wifi_state(wifiConnected, true);
-    }
-    diagInfo.udpConnected = true;
-
-    // Parse JSON using internal SRAM only — no PSRAM access
-    JsonDocument doc(&sramAllocator);
-    DeserializationError err = deserializeJson(doc, buf);
-    if (err) {
-        udpJsonErrorCount = udpJsonErrorCount + 1;
-        return;
-    }
-
-    const char* cmd = doc["cmd"];
-    if (!cmd) return;
-
-    if (strcmp(cmd, "state_sync") == 0) {
-        int pat = doc["pattern"] | currentPattern;
-        if (pat >= 0 && pat < Config::MAX_PATTERNS) {
-            currentPattern = pat;
-            uart_bridge_send_pattern(currentPattern);
-        }
-
-        bool playing = doc["playing"] | isPlaying;
-        if (playing && !isPlaying) {
-            currentStep = 0;
-            lastLocalStepMs = millis();
-            lastLocalStepUs = micros();
-        }
-        isPlaying = playing;
-        uart_bridge_send_play_state(isPlaying);
-
-        float tempo = doc["tempo"] | currentBPM;
-        applyBPMPrecise(tempo, false);
-        applyUnifiedMasterVolume(doc["masterVolume"] | currentVolume, false);
-
-        JsonArray mute = doc["mute"];
-        if (mute) {
-            int track = 0;
-            for (JsonVariant value : mute) {
-                if (track >= Config::MAX_TRACKS) break;
-                trackMuted[track++] = value.as<bool>();
-            }
-        }
-
-        JsonArray solo = doc["solo"];
-        if (solo) {
-            int track = 0;
-            for (JsonVariant value : solo) {
-                if (track >= Config::MAX_TRACKS) break;
-                trackSolo[track++] = value.as<bool>();
-            }
-        }
-
-        JsonArray volumes = doc["trackVolumes"];
-        if (volumes) {
-            int track = 0;
-            for (JsonVariant value : volumes) {
-                if (track >= Config::MAX_TRACKS) break;
-                trackVolumes[track++] = constrain(value.as<int>(), 0, Config::MAX_VOLUME);
-            }
-        }
-
-        JsonObject fx = doc["fx"];
-        if (fx) {
-            fxFilterType = constrain(fx["filterType"] | fxFilterType, 0, 4);
-            fxFilterCutoffHz = constrain(fx["filterCutoff"] | fxFilterCutoffHz, 20, 20000);
-            float resonance = fx["filterResonance"].is<float>() ? fx["filterResonance"].as<float>() : ((float)fxFilterResonanceX10 / 10.0f);
-            fxFilterResonanceX10 = constrain((int)lroundf(resonance * 10.0f), 1, 100);
-            float distortion = fx["distortion"].is<float>() ? fx["distortion"].as<float>() : ((float)fxDistortionPercent / 100.0f);
-            fxDistortionPercent = master_drive_percent_from_amount(distortion);
-            fxBitCrushBits = constrain(fx["bitCrush"] | fxBitCrushBits, 1, 16);
-            fxSampleRateHz = constrain(fx["sampleRate"] | fxSampleRateHz, 1000, 48000);
-        }
-
-        const char* kit = doc["kit"] | "";
-        strncpy(masterKitName, kit, sizeof(masterKitName) - 1);
-        masterKitName[sizeof(masterKitName) - 1] = '\0';
-        memset(masterSampleLoaded, 0, sizeof(masterSampleLoaded));
-        JsonArray samples = doc["samples"];
-        if (samples) {
-            for (JsonObject sample : samples) {
-                int pad = sample["pad"] | -1;
-                if (pad < 0 || pad >= Config::MAX_SAMPLES) continue;
-                masterSampleLoaded[pad] = sample["loaded"] | false;
-                const char* name = sample["name"] | "";
-                strncpy(masterSampleName[pad], name, sizeof(masterSampleName[pad]) - 1);
-                masterSampleName[pad][sizeof(masterSampleName[pad]) - 1] = '\0';
-            }
-        }
-    }
-    else if (strcmp(cmd, "pattern_sync") == 0) {
-        int pat = doc["pattern"] | 0;
-        bool active = doc["active"] | false;  // v2.6: master flags the active pattern
-        if (pat >= 0 && pat < Config::MAX_PATTERNS) {
-            JsonArray data = doc["data"];
-            if (data) {
-                // Check if incoming data is all-empty
-                bool incomingEmpty = true;
-                for (JsonArray track : data) {
-                    for (JsonVariant step : track) {
-                        if (step.as<bool>()) { incomingEmpty = false; break; }
-                    }
-                    if (!incomingEmpty) break;
-                }
-                // Protect ALL patterns (not just demo): if master sends empty and
-                // we already have local data, keep local and skip the overwrite.
-                // This prevents master→slave sync floods from wiping user edits.
-                if (incomingEmpty) {
-                    if (pattern_has_data(pat)) {
-                        RED808_LOG_PRINTF("[UDP] Skipping empty pattern_sync for pattern %d\n", pat + 1);
-                        return;  // skip this packet, keep local pattern
-                    }
-                }
-                int t = 0;
-                for (JsonArray track : data) {
-                    if (t >= Config::MAX_TRACKS) break;
-                    int s = 0;
-                    for (JsonVariant step : track) {
-                        if (s >= Config::MAX_STEPS) break;
-                        patterns[pat].steps[t][s] = step.as<bool>();
-                        s++;
-                    }
-                    t++;
-                }
-            }
-            // Forward pattern data to P4
-            uart_bridge_send_pattern_data(pat, patterns[pat].steps, Config::MAX_TRACKS);
-        }
-        /* v2.6 — If master flagged this as the active pattern (e.g. user
-         * changed pattern from web), follow it on the slave UI too. */
-        if (active && currentPattern != pat) {
-            currentPattern = pat;
-            currentStep = 0;
-            lastLocalStepMs = millis();
-            lastLocalStepUs = micros();
-            needsFullRedraw = true;
-            uart_bridge_send_pattern(pat);
-            RED808_LOG_PRINTF("[UDP] Master switched to pattern %d — following\n", pat + 1);
-        }
-    }
-    else if (strcmp(cmd, "step_update") == 0 || strcmp(cmd, "step_sync") == 0) {
-        // Local clock drives currentStep for smooth visuals (no UDP jitter).
-        // But if the master's position drifts more than 1 step from local,
-        // snap the local clock to re-sync — prevents permanent visual offset.
-        lastStepUpdateMs = millis();
-        if (isPlaying) {
-            int masterStep = doc["step"] | -1;
-            int patLen = patterns[currentPattern].length;
-            if (masterStep >= 0 && masterStep < patLen) {
-                // Circular distance (handles wrap correctly)
-                int diff = masterStep - (int)currentStep;
-                if (diff < -(patLen / 2)) diff += patLen;
-                if (diff >  (patLen / 2)) diff -= patLen;
-                if (diff < 0) diff = -diff;
-                // Tight resync: snap on ANY mismatch (>=1 step). Master's UDP
-                // step_sync packets arrive at 1/4 beat rate (8 Hz @ 120 BPM),
-                // so bounded drift never exceeds one step duration. Previous
-                // threshold (>1) allowed up to ~125 ms audio/visual skew.
-                if (diff >= 1) {
-                    // Clocks have drifted — re-anchor to master position
-                    currentStep = masterStep;
-                    lastLocalStepUs = micros();
-                    lastLocalStepMs = millis();
-                }
-            }
-        }
-    }
-    else if (strcmp(cmd, "play_state") == 0) {
-        bool playing = doc["playing"] | false;
-        if (playing && !isPlaying) {
-            currentStep = 0;
-            lastLocalStepMs = millis();
-            lastLocalStepUs = micros();
-        }
-        isPlaying = playing;
-        uart_bridge_send_play_state(isPlaying);
-    }
-    else if (strcmp(cmd, "start") == 0) {
-        if (!isPlaying) {
-            currentStep = 0;
-            lastLocalStepMs = millis();
-            lastLocalStepUs = micros();
-        }
-        isPlaying = true;
-        uart_bridge_send_play_state(true);
-    }
-    else if (strcmp(cmd, "stop") == 0) {
-        isPlaying = false;
-        currentStep = 0;
-        uart_bridge_send_play_state(false);
-    }
-    else if (strcmp(cmd, "tempo_sync") == 0 || strcmp(cmd, "tempo") == 0) {
-        float bpm = doc["value"].is<float>() ? doc["value"].as<float>() : (float)(doc["value"] | Config::DEFAULT_BPM);
-        applyBPMPrecise(bpm, false);
-    }
-    else if (strcmp(cmd, "melodyRecNote") == 0) {
-        // v2.7 — incoming note from P4 piano (REC mode) → write into melody grid
-        // Must hold LVGL lock: melody_record_midi_note touches LVGL objects.
-        int note = doc["note"] | -1;
-        Serial.printf("[S3 rx melodyRecNote] note=%d\n", note);
-        if (note >= 0 && note <= 127) {
-            bool got = lvgl_port_lock(200);
-            Serial.printf("[S3 melodyRecNote] lock=%d\n", (int)got);
-            if (got) {
-                melody_record_midi_note((uint8_t)note);
-                lvgl_port_unlock();
-            }
-        }
-    }
-    else if (strcmp(cmd, "melodyAssign") == 0) {
-        // v2.8 — remote ASSIGN from P4: rebuild S3 melody grid + pad selector.
-        Serial.println("[S3 rx melodyAssign]");
-        if (lvgl_port_lock(200)) {
-            melody_apply_assign_payload(doc.as<JsonVariantConst>());
-            lvgl_port_unlock();
-        }
-    }
-    else if (strcmp(cmd, "melody_sync") == 0) {
-        // v2.9 — master-authoritative melody state. Apply engine/octave/rec/
-        // step/pad/grid directly to the UI.
-        Serial.println("[S3 rx melody_sync]");
-        if (lvgl_port_lock(200)) {
-            melody_apply_sync_payload(doc.as<JsonVariantConst>());
-            lvgl_port_unlock();
-        }
-    }
-    else if (strcmp(cmd, "volume_sync") == 0 ||
-             strcmp(cmd, "master_volume_sync") == 0 ||
-             strcmp(cmd, "volume_master_sync") == 0 ||
-             strcmp(cmd, "setVolume") == 0) {
-        applyUnifiedMasterVolume(doc["value"] | Config::DEFAULT_VOLUME, false);
-    }
-    else if (strcmp(cmd, "volume_seq_sync") == 0 || strcmp(cmd, "setSequencerVolume") == 0) {
-        applyUnifiedMasterVolume(doc["value"] | Config::DEFAULT_VOLUME, false);
-    }
-    else if (strcmp(cmd, "volume_live_sync") == 0 || strcmp(cmd, "setLiveVolume") == 0) {
-        applyUnifiedMasterVolume(doc["value"] | Config::DEFAULT_VOLUME, false);
-    }
-    else if (strcmp(cmd, "trackVolumes") == 0 ||
-             strcmp(cmd, "track_volumes") == 0 ||
-             strcmp(cmd, "track_volume_sync") == 0 ||
-             strcmp(cmd, "getTrackVolumes") == 0) {
-        JsonArray values = doc["values"].is<JsonArray>() ? doc["values"].as<JsonArray>() : JsonArray();
-        if (!values) values = doc["volumes"].as<JsonArray>();
-        if (!values) values = doc["data"].as<JsonArray>();
-
-        if (values) {
-            int index = 0;
-            for (JsonVariant value : values) {
-                if (index >= Config::MAX_TRACKS) break;
-                trackVolumes[index++] = constrain(value.as<int>(), 0, Config::MAX_VOLUME);
-            }
-        }
-    }
-    else if (strcmp(cmd, "trackVolume") == 0 || strcmp(cmd, "getTrackVolume") == 0) {
-        int track = doc["track"] | -1;
-        if (track >= 0 && track < Config::MAX_TRACKS) {
-            int value = doc["volume"] | (doc["value"] | trackVolumes[track]);
-            trackVolumes[track] = constrain(value, 0, Config::MAX_VOLUME);
-        }
-    }
-    else if (strcmp(cmd, "setFilter") == 0) {
-        fxFilterType = constrain(doc["type"] | fxFilterType, 0, 4);
-    }
-    else if (strcmp(cmd, "setFilterCutoff") == 0) {
-        fxFilterCutoffHz = constrain(doc["value"] | fxFilterCutoffHz, 20, 20000);
-    }
-    else if (strcmp(cmd, "setFilterResonance") == 0) {
-        float resonance = doc["value"].is<float>() ? doc["value"].as<float>() : ((float)(doc["value"] | fxFilterResonanceX10) / 10.0f);
-        fxFilterResonanceX10 = constrain((int)lroundf(resonance * 10.0f), 1, 100);
-    }
-    else if (strcmp(cmd, "setBitCrush") == 0) {
-        fxBitCrushBits = constrain(doc["value"] | fxBitCrushBits, 1, 16);
-    }
-    else if (strcmp(cmd, "setDistortion") == 0) {
-        float distortion = doc["value"].is<float>() ? doc["value"].as<float>() : ((float)(doc["value"] | fxDistortionPercent) / 100.0f);
-        fxDistortionPercent = master_drive_percent_from_amount(distortion);
-    }
-    else if (strcmp(cmd, "setSampleRate") == 0) {
-        fxSampleRateHz = constrain(doc["value"] | fxSampleRateHz, 1000, 48000);
-    }
-    else if (strcmp(cmd, "selectPattern") == 0 || strcmp(cmd, "pattern_select") == 0 ||
-             strcmp(cmd, "current_pattern") == 0) {
-        int pat = doc["index"] | (doc["pattern"] | -1);
-        if (pat >= 0 && pat < Config::MAX_PATTERNS) {
-            currentPattern = pat;
-            uart_bridge_send_pattern(currentPattern);
-            requestPatternFromMaster();
-        }
-    }
-    // end receiveUDPData
-}
-#endif // S3_WIFI_ENABLED
+void sendUDPCommand(const char* cmd) { (void)cmd; }
+void sendUDPCommand(JsonDocument& doc) { (void)doc; }
 
 // =============================================================================
 // FILTER UDP SEND
 // =============================================================================
 
 void sendFilterUDP(int track, int fxType) {
-    // Per-track FX not supported by master protocol — ignore.
-    if (track != -1) return;
-
-    TrackFilter& f = masterFilter;
-    float mix;
-    bool activating;
-
-    switch (fxType) {
-        case FILTER_CHORUS: {
-            mix = (float)f.chorusAmount / 127.0f;
-            activating = (f.chorusAmount > 0);
-            { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
-            if (activating) {
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusRate";   d["value"] = 0.6f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusDepth";  d["value"] = 0.5f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusStereo"; d["value"] = 1;    sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setChorusMix";    d["value"] = mix;  sendUDPCommand(d); }
-            }
-            break;
-        }
-        case FILTER_DELAY: {
-            mix = (float)f.delayAmount / 127.0f;   // reuse delayAmount for Delay
-            activating = (f.delayAmount > 0);
-            { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
-            if (activating) {
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayTime";    d["value"] = 300;   sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayFeedback";d["value"] = 0.45f; sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayMix";     d["value"] = mix;   sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setDelayStereo";  d["value"] = 1;     sendUDPCommand(d); }
-            }
-            break;
-        }
-        case FILTER_REVERB: {
-            mix = (float)f.compAmount / 127.0f;     // reuse compAmount for Reverb
-            activating = (f.compAmount > 0);
-            { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbActive"; d["value"] = activating ? 1 : 0; sendUDPCommand(d); }
-            if (activating) {
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbFeedback"; d["value"] = 0.7f;   sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbLpFreq";   d["value"] = 5000;   sendUDPCommand(d); }
-                { JsonDocument d(&sramAllocator); d["cmd"] = "setReverbMix";      d["value"] = mix;    sendUDPCommand(d); }
-            }
-            break;
-        }
-    }
+    (void)track; (void)fxType;
+    // S3 is UART-only — no UDP FX commands
 }
 
 // =============================================================================
@@ -2619,42 +1971,7 @@ void handleM5Encoders() {
         i2c_unlock();
     }
 
-    // Send all queued UDP messages as a batch OUTSIDE i2c lock
-    if (pendingCount > 0 && udpConnected) {
-        if (pendingCount == 1) {
-            // Single message — send directly (no array overhead)
-            JsonDocument doc(&sramAllocator);
-            if (pending[0].type == 0) {
-                doc["cmd"] = "setTrackVolume";
-                doc["track"] = pending[0].track;
-                doc["volume"] = pending[0].value;
-            } else {
-                doc["cmd"] = "mute";
-                doc["track"] = pending[0].track;
-                doc["value"] = (bool)pending[0].value;
-                RED808_LOG_PRINTF("[M5] Track %d %s\n", pending[0].track, pending[0].value ? "MUTED" : "UNMUTED");
-            }
-            sendUDPCommand(doc);
-        } else {
-            // Multiple messages — batch into JSON array, single UDP packet
-            JsonDocument doc(&sramAllocator);
-            JsonArray arr = doc.to<JsonArray>();
-            for (int i = 0; i < pendingCount; i++) {
-                JsonObject obj = arr.add<JsonObject>();
-                if (pending[i].type == 0) {
-                    obj["cmd"] = "setTrackVolume";
-                    obj["track"] = pending[i].track;
-                    obj["volume"] = pending[i].value;
-                } else {
-                    obj["cmd"] = "mute";
-                    obj["track"] = pending[i].track;
-                    obj["value"] = (bool)pending[i].value;
-                    RED808_LOG_PRINTF("[M5] Track %d %s\n", pending[i].track, pending[i].value ? "MUTED" : "UNMUTED");
-                }
-            }
-            sendUDPCommand(doc);
-        }
-    }
+    // UDP batch send removed — S3 is UART-only
 
     // Forward track changes to P4
     for (int i = 0; i < pendingCount; i++) {
@@ -3168,17 +2485,8 @@ void setup() {
     // 7. Scan I2C hub for M5 + DFRobot + ByteButton (before LVGL task starts - no I2C race)
     scanI2CHub();
 
-    // 8. WiFi + UDP — only when S3 connects to Master directly
-#if S3_WIFI_ENABLED
-    RED808_LOG_PRINTF("[HEAP] Before WiFi: %d bytes\n", ESP.getFreeHeap());
-    setupWiFi();
-    RED808_LOG_PRINTF("[HEAP] After WiFi: %d bytes\n", ESP.getFreeHeap());
-#else
+    // 8. WiFi DISABLED — S3 communicates via UART/USB-C only
     RED808_LOG_PRINTLN("[WiFi] DISABLED — S3 is UART-only slave to P4");
-    wifiConnected = false;
-    udpConnected = false;
-    masterConnected = false;
-#endif
 
     // 8b. UART bridge to ESP32-P4 Visual Beast
     uart_bridge_init();
@@ -3364,18 +2672,28 @@ void loop() {
 
     // === Pad triggers now handled by pad_trigger_task (prio 2) ===
 
-    // === NETWORK + STATUS ===
-#if S3_WIFI_ENABLED
-    if (masterConnected && (now - lastMasterPacketMs > 3000)) {
-        masterConnected = false;
-        uart_bridge_send_wifi_state(wifiConnected, false);
-    }
-
-    checkWiFiReconnect();
-#endif
-
     // === UART BRIDGE (P4 receive + heartbeat) ===
     uart_bridge_receive();
+    // v2.9 — apply melody state forwarded from master via P4 UART
+    {
+        extern PendingMelodyFromP4 g_pending_melody_from_p4;
+        if (g_pending_melody_from_p4.pending) {
+            g_pending_melody_from_p4.pending = false;
+            if (lvgl_port_lock(200)) {
+                melody_apply_basic_sync(
+                    g_pending_melody_from_p4.engine,
+                    g_pending_melody_from_p4.octave,
+                    g_pending_melody_from_p4.rec,
+                    g_pending_melody_from_p4.pad);
+                lvgl_port_unlock();
+            }
+        }
+    }
+    // On SCREEN_MELODY entry, push S3's current melody state to P4 so PIANO syncs.
+    if (g_mel_screen_entered) {
+        g_mel_screen_entered = false;
+        melody_uart_broadcast_state();
+    }
     {
         static unsigned long lastHB = 0;
         if (now - lastHB >= 500) {
@@ -3384,31 +2702,6 @@ void loop() {
         }
     }
 
-#if S3_WIFI_ENABLED
-    static unsigned long lastUDPReceiveMs = 0;
-    if (now - lastUDPReceiveMs >= WiFiConfig::UDP_RECEIVE_MS) {
-        lastUDPReceiveMs = now;
-        receiveUDPData();
-    }
-
-    if (wifiConnected && udpConnected && !masterConnected && (now - lastUDPCheck >= WiFiConfig::MASTER_HELLO_RETRY_MS)) {
-        lastUDPCheck = now;
-        RED808_LOG_PRINTLN("[UDP] Master not responding, resending hello...");
-        requestMasterSync(false);
-    }
-
-    // v2.8 — periodic UDP heartbeat so the master keeps S3 in its udpClients
-    // map even when no encoder/UI traffic flows. Without this, the master may
-    // drop S3 from its forward set after a master reboot, and forwarded
-    // packets like melodyRecNote/melodyAssign never reach S3.
-    {
-        static unsigned long lastUdpHello = 0;
-        if (wifiConnected && udpConnected && (now - lastUdpHello >= 4000)) {
-            lastUdpHello = now;
-            sendUDPCommand("{\"cmd\":\"ping\"}");
-        }
-    }
-#endif
 
     // Boot LED animation
     if (currentScreen == SCREEN_BOOT && !bootLedDone) {
@@ -3452,9 +2745,6 @@ void loop() {
                         !patterns[currentPattern].muted[t]) {
                         const int hitVel = sequencer_groove_velocity(t, safeStep, seqVel);
                         livePadFlashUntilMs[t] = now + LIVE_PAD_FLASH_MS;
-                        if (udpConnected) {
-                            sendLivePadTrigger(t, hitVel);
-                        }
                     }
                 }
             }

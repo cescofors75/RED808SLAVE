@@ -104,7 +104,6 @@ struct DrumKit {
 
 struct DiagnosticInfo {
     bool wifiOk;
-    bool udpConnected;
     bool touchOk;
     bool lcdOk;
     bool sdOk;
@@ -188,11 +187,6 @@ extern uint8_t byteButtonActionMap[];
 extern const char* const byteButtonActionNames[];
 
 // Connection
-extern bool udpConnected;
-extern bool wifiConnected;
-#if S3_WIFI_ENABLED
-extern bool wifiReconnecting;
-#endif
 extern bool masterConnected;
 
 // Diagnostic
@@ -204,9 +198,6 @@ extern volatile uint32_t uiSkippedCount;
 extern volatile uint32_t uiLastIntervalMs;
 extern volatile uint32_t udpRxCount;
 extern volatile uint32_t udpJsonErrorCount;
-#if S3_WIFI_ENABLED
-extern unsigned long lastWiFiConnectedMs;
-#endif
 extern unsigned long lastMasterPacketMs;
 extern unsigned long lastStepUpdateMs;
 extern unsigned long lastLocalStepMs;
