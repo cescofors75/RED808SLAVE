@@ -461,12 +461,12 @@ static void process_basic(const UartBasicPacket* pkt) {
             }
             else if (id == TCMD_MELODY_NOTE) {
                 if (val <= 127 && udp_wifi_connected()) {
-                    if (s_s3_preview_note_off_due_ms != 0) {
+                    if (s_s3_preview_note_off_due_ms != 0 && s_s3_preview_engine != s_s3_mel_engine) {
                         udp_send_synth_note_off(s_s3_preview_engine, 0);
                     }
                     udp_send_synth_note_on_ex(s_s3_mel_engine, val, 110, false, false);
                     s_s3_preview_engine = s_s3_mel_engine;
-                    s_s3_preview_note_off_due_ms = millis() + 140;
+                    s_s3_preview_note_off_due_ms = millis() + 220;
                 }
             }
             break;

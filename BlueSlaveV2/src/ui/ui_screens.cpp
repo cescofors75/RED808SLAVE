@@ -4667,6 +4667,13 @@ static void mel_set_preset_note(int col, int pc) {
     s_mel_grid[col][row] = true;
 }
 
+static void mel_set_preset_stack(int col, int pc0, int pc1 = -1, int pc2 = -1, int pc3 = -1) {
+    mel_set_preset_note(col, pc0);
+    if (pc1 >= 0) mel_set_preset_note(col, pc1);
+    if (pc2 >= 0) mel_set_preset_note(col, pc2);
+    if (pc3 >= 0) mel_set_preset_note(col, pc3);
+}
+
 static void mel_load_f_minor_preset(void) {
     for (int c = 0; c < 16; c++) {
         for (int r = 0; r < 12; r++) {
@@ -4674,19 +4681,22 @@ static void mel_load_f_minor_preset(void) {
         }
     }
 
-    const uint8_t melody[] = {
-        5, 7, 8, 0, 5,
-        5, 7, 8, 0, 5, 3,
-        8, 7, 3, 5
-    };
-    for (int i = 0; i < (int)sizeof(melody); i++) {
-        mel_set_preset_note(i, melody[i]);
-    }
-
-    mel_set_preset_note(0, 1);   // Db
-    mel_set_preset_note(5, 10);  // Bb
-    mel_set_preset_note(11, 5);  // F
-    mel_set_preset_note(15, 8);  // Ab
+    mel_set_preset_stack(0,  1, 5, 8, 0);   // Dbmaj7: Db F Ab C, melody F
+    mel_set_preset_stack(1,  7);            // G passing tone
+    mel_set_preset_stack(2,  8);            // Ab
+    mel_set_preset_stack(3,  0);            // C
+    mel_set_preset_stack(4,  5, 8, 0);      // Fm: F Ab C
+    mel_set_preset_stack(5, 10, 1, 5, 8);   // Bbm7: Bb Db F Ab, melody F
+    mel_set_preset_stack(6,  7);            // G passing tone
+    mel_set_preset_stack(7,  8);            // Ab
+    mel_set_preset_stack(8,  0);            // C
+    mel_set_preset_stack(9,  5, 8, 0);      // Fm: F Ab C
+    mel_set_preset_stack(10, 3, 7, 10);     // Eb color: Eb G Bb
+    mel_set_preset_stack(11, 5, 8, 0, 3);   // Fm7: F Ab C Eb, melody Ab
+    mel_set_preset_stack(12, 7);            // G
+    mel_set_preset_stack(13, 3);            // Eb
+    mel_set_preset_stack(14, 5, 8, 0);      // Fm resolve
+    mel_set_preset_stack(15, 8, 0, 3);      // Ab: Ab C Eb
 
     for (int c = 0; c < 16; c++) {
         for (int r = 0; r < 12; r++) mel_redraw_cell(c, r);
@@ -4694,7 +4704,7 @@ static void mel_load_f_minor_preset(void) {
     s_mel_octave = 4;
     if (mel_octave_lbl) lv_label_set_text_fmt(mel_octave_lbl, "OCT %d", s_mel_octave);
     if (mel_status_lbl) {
-        lv_label_set_text_fmt(mel_status_lbl, "PRESET Fm  ENG %s  OCT %d",
+        lv_label_set_text_fmt(mel_status_lbl, "PRESET Fm+  ENG %s  OCT %d",
                               MEL_ENGINE_LABELS[s_mel_engine_idx], s_mel_octave);
     }
     mel_uart_broadcast_state();
