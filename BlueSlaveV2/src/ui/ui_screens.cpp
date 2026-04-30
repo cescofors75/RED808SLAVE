@@ -26,6 +26,7 @@ extern void apply_mpc_preset(bool saveToNvs);
 
 // UART bridge relay (for when S3 WiFi is off — P4 forwards to Master)
 extern void uart_bridge_send(uint8_t type, uint8_t id, uint8_t value);
+extern void uart_bridge_send_extended(uint8_t type, uint8_t id, const uint8_t* data, uint16_t len);
 #include "../../include/uart_protocol.h"
 
 // Use SRAM allocator from main.cpp — avoids PSRAM bus contention with LCD DMA
@@ -4626,22 +4627,17 @@ static lv_obj_t*   mel_rec_btn        = NULL;
 static lv_obj_t*   mel_rec_lbl        = NULL;
 static lv_obj_t*   mel_assign_btn     = NULL;
 static lv_obj_t*   mel_assign_lbl     = NULL;
+static void mel_uart_broadcast_state(void);
 
 static void mel_send_note_on(int row, int vel) {
     // S3 is UART-only — note preview via UART (no UDP)
-    (void)vel;
     int pc      = MEL_NOTE_PC[row];
     int midi    = (s_mel_octave + 1) * 12 + pc;
     if (midi < 0)   midi = 0;
     if (midi > 127) midi = 127;
-    JsonDocument doc(sramAllocatorPtr);
-    doc["cmd"]       = "synthNoteOnEx";
-    doc["engine"]    = MEL_ENGINES[s_mel_engine_idx];
-    doc["note"]      = midi;
-    doc["velocity"]  = vel;
-    doc["accent"]    = false;
-    doc["slide"]     = false;
-    sendUDPCommand(doc);
+    mel_uart_broadcast_state();
+    (void)vel;
+    uart_bridge_send(MSG_TOUCH_CMD, TCMD_MELODY_NOTE, (uint8_t)midi);
 }
 
 static void mel_redraw_cell(int col, int row) {
@@ -4654,6 +4650,59 @@ static void mel_redraw_cell(int col, int row) {
     lv_obj_set_style_bg_color(c, bg, 0);
     lv_obj_set_style_border_color(c, active ? RED808_ACCENT : RED808_BORDER, 0);
     lv_obj_set_style_border_width(c, active ? 2 : 1, 0);
+}
+
+static int mel_row_from_pc(int pc) {
+    pc %= 12;
+    if (pc < 0) pc += 12;
+    for (int r = 0; r < 12; r++) {
+        if (MEL_NOTE_PC[r] == pc) return r;
+    }
+    return 11;
+}
+
+static void mel_set_preset_note(int col, int pc) {
+    if (col < 0 || col >= 16) return;
+    int row = mel_row_from_pc(pc);
+    s_mel_grid[col][row] = true;
+}
+
+static void mel_load_f_minor_preset(void) {
+    for (int c = 0; c < 16; c++) {
+        for (int r = 0; r < 12; r++) {
+            s_mel_grid[c][r] = false;
+        }
+    }
+
+    const uint8_t melody[] = {
+        5, 7, 8, 0, 5,
+        5, 7, 8, 0, 5, 3,
+        8, 7, 3, 5
+    };
+    for (int i = 0; i < (int)sizeof(melody); i++) {
+        mel_set_preset_note(i, melody[i]);
+    }
+
+    mel_set_preset_note(0, 1);   // Db
+    mel_set_preset_note(5, 10);  // Bb
+    mel_set_preset_note(11, 5);  // F
+    mel_set_preset_note(15, 8);  // Ab
+
+    for (int c = 0; c < 16; c++) {
+        for (int r = 0; r < 12; r++) mel_redraw_cell(c, r);
+    }
+    s_mel_octave = 4;
+    if (mel_octave_lbl) lv_label_set_text_fmt(mel_octave_lbl, "OCT %d", s_mel_octave);
+    if (mel_status_lbl) {
+        lv_label_set_text_fmt(mel_status_lbl, "PRESET Fm  ENG %s  OCT %d",
+                              MEL_ENGINE_LABELS[s_mel_engine_idx], s_mel_octave);
+    }
+    mel_uart_broadcast_state();
+}
+
+static void mel_preset_fm_cb(lv_event_t* e) {
+    (void)e;
+    mel_load_f_minor_preset();
 }
 
 static void mel_cell_cb(lv_event_t* e) {
@@ -5002,23 +5051,21 @@ void melody_apply_basic_sync(uint8_t engine, uint8_t octave, uint8_t rec, uint8_
 
 static void mel_assign_cb(lv_event_t* e) {
     (void)e;
-    JsonDocument doc(sramAllocatorPtr);
-    doc["cmd"]    = "melodyAssign";
-    doc["pad"]    = s_mel_assign_pad;
-    doc["engine"] = MEL_ENGINES[s_mel_engine_idx];
-    doc["octave"] = s_mel_octave;
-    JsonArray steps = doc["steps"].to<JsonArray>();
+    uint8_t payload[35] = {};
+    payload[0] = (uint8_t)constrain(s_mel_assign_pad, 0, 15);
+    payload[1] = (uint8_t)MEL_ENGINES[s_mel_engine_idx];
+    payload[2] = (uint8_t)constrain(s_mel_octave, 1, 7);
     for (int c = 0; c < 16; c++) {
-        JsonArray col = steps.add<JsonArray>();
+        uint16_t bits = 0;
         for (int r = 0; r < 12; r++) {
             if (s_mel_grid[c][r]) {
-                int pc   = MEL_NOTE_PC[r];
-                int midi = (s_mel_octave + 1) * 12 + pc;
-                col.add(midi);
+                bits |= (uint16_t)(1u << r);
             }
         }
+        payload[3 + c * 2] = (uint8_t)((bits >> 8) & 0xFF);
+        payload[4 + c * 2] = (uint8_t)(bits & 0xFF);
     }
-    sendUDPCommand(doc);
+    uart_bridge_send_extended(MSG_MELODY_DATA, MEL_DATA_ASSIGN, payload, sizeof(payload));
     // Cycle pad target 0..15 for UX feedback
     s_mel_assign_pad = (s_mel_assign_pad + 1) % 16;
     if (mel_assign_lbl) {
@@ -5092,28 +5139,32 @@ void ui_create_melody_screen() {
                           MEL_ENGINE_LABELS[s_mel_engine_idx], s_mel_octave);
     lv_obj_set_style_text_font(mel_status_lbl, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(mel_status_lbl, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(mel_status_lbl, 340, row2_y + 10);
+    lv_obj_set_style_text_font(mel_status_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(mel_status_lbl, 16, 38);
 
-    // v2.7 — PREVIEW / REC / ASSIGN action chips (right side of row2)
-    mel_play_btn = make_chip(440, row2_y, 130, 38, LV_SYMBOL_PLAY " PREVIEW",
+    // v2.7 — PREVIEW / REC / ASSIGN / PRESET action chips split in two rows
+    mel_play_btn = make_chip(340, row2_y, 120, 38, LV_SYMBOL_PLAY " PREVIEW",
                               lv_color_hex(0x00E5FF), mel_play_cb, NULL);
     mel_play_lbl = lv_obj_get_child(mel_play_btn, 0);
 
-    mel_rec_btn = make_chip(580, row2_y, 100, 38, "○ REC",
+    mel_rec_btn = make_chip(468, row2_y, 86, 38, "○ REC",
                              RED808_TEXT, mel_rec_cb, NULL);
     mel_rec_lbl = lv_obj_get_child(mel_rec_btn, 0);
     mel_rec_set_visual(s_mel_recording);
 
-    mel_assign_btn = make_chip(690, row2_y, 140, 38, "→ PAD 1",
+    const int row3_y = 100;
+    mel_assign_btn = make_chip(16, row3_y, 126, 36, "→ PAD 1",
                                 lv_color_hex(0xFF1493), mel_assign_cb, NULL);
     mel_assign_lbl = lv_obj_get_child(mel_assign_btn, 0);
     if (mel_assign_lbl) {
         lv_label_set_text_fmt(mel_assign_lbl, "→ PAD %d", s_mel_assign_pad + 1);
     }
 
+    make_chip(154, row3_y, 138, 36, "PRESET Fm", RED808_ACCENT, mel_preset_fm_cb, NULL);
+
     // ---- Grid: 16 cols × 12 rows ----
     // Reserve label column on the left for piano-key labels (width 56)
-    const int grid_top    = 108;
+    const int grid_top    = 148;
     const int label_w     = 56;
     const int grid_left   = 16 + label_w;
     const int grid_right  = UI_W - 16;

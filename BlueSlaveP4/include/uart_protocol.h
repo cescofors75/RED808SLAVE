@@ -37,6 +37,7 @@
 #define MSG_PATTERN_DATA 0x0A   // Extended: pattern step data (display only, master already has it)
 #define MSG_SD_DATA     0x0B    // S3→P4: SD card data (extended packets)
 #define MSG_PATTERN_PUSH 0x0C   // Extended: freshly-loaded pattern (MIDI) — P4 must push it to Master via UDP
+#define MSG_MELODY_DATA 0x0D    // Extended: melody grid assign data
 
 // =============================================================================
 // ENCODER IDs (MSG_ENCODER, Byte 2)
@@ -135,6 +136,11 @@
 #define TCMD_MELODY_CLEAR   0x15  // value = 0 (grid clear, S3→P4 only)
 #define TCMD_MELODY_PAD     0x16  // value = pad index (0-15)
 #define TCMD_MELODY_NOTE    0x17  // value = MIDI note (0-127, P4→S3 rec)
+
+// =============================================================================
+// MELODY DATA sub-IDs (MSG_MELODY_DATA extended, Byte 2)
+// =============================================================================
+#define MEL_DATA_ASSIGN     0x00  // payload: pad,engine,octave + 32-byte 16x12 grid bits
 
 // =============================================================================
 // SD DATA sub-IDs (MSG_SD_DATA extended, Byte 2)

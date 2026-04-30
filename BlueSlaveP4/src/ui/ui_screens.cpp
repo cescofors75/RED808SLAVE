@@ -3307,10 +3307,10 @@ static void piano_pad_btn_cb(lv_event_t* e) {
 static void piano_assign_btn_cb(lv_event_t* e) {
     LV_UNUSED(e);
     if (!ui_use_udp_transport()) return;
-    // v2.9 — master holds the grid now; just say which pad gets the binding
-    udp_send_melody_assign_pad((uint8_t)s_piano_assign_pad,
-                               PIANO_ENGINES[s_piano_engine_idx],
-                               (uint8_t)s_piano_octave);
+    udp_send_melody_assign((uint8_t)s_piano_assign_pad,
+                           PIANO_ENGINES[s_piano_engine_idx],
+                           (uint8_t)s_piano_octave,
+                           s_piano_rec_grid);
     if (s_piano_status_lbl) {
         lv_label_set_text_fmt(s_piano_status_lbl, "→ PAD %d", s_piano_assign_pad + 1);
     }

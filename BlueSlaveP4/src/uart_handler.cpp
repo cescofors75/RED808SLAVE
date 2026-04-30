@@ -44,6 +44,8 @@ static uint32_t s_tempo_lock_until_ms = 0;
 // forward the correct engine+octave to master in melodyRecToggle.
 static uint8_t s_s3_mel_engine = 3;
 static uint8_t s_s3_mel_octave = 4;
+static uint8_t s_s3_preview_engine = 3;
+static uint32_t s_s3_preview_note_off_due_ms = 0;
 
 // v2.9 — Pending melody state received from S3 (consumed by main loop under LVGL lock)
 PendingMelodyFromS3 g_pending_melody_from_s3 = {};
@@ -457,6 +459,16 @@ static void process_basic(const UartBasicPacket* pkt) {
                 g_pending_melody_from_s3.pending = true;
                 if (udp_wifi_connected()) udp_send_melody_set_pad(val);
             }
+            else if (id == TCMD_MELODY_NOTE) {
+                if (val <= 127 && udp_wifi_connected()) {
+                    if (s_s3_preview_note_off_due_ms != 0) {
+                        udp_send_synth_note_off(s_s3_preview_engine, 0);
+                    }
+                    udp_send_synth_note_on_ex(s_s3_mel_engine, val, 110, false, false);
+                    s_s3_preview_engine = s_s3_mel_engine;
+                    s_s3_preview_note_off_due_ms = millis() + 140;
+                }
+            }
             break;
     }
 }
@@ -514,6 +526,23 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
         //    a few packets per main-loop tick by uart_handler_tick_pending_push()
         //    so LVGL / touch / pad queue never stall.
         stage_pattern_push((uint8_t)slot, p4.steps);
+    }
+    else if (type == MSG_MELODY_DATA && id == MEL_DATA_ASSIGN && len == 35) {
+        uint8_t pad = payload[0];
+        uint8_t engine = payload[1];
+        uint8_t octave = payload[2];
+        if (pad >= 16 || engine < 3 || engine > 6 || octave < 1 || octave > 7) return;
+
+        bool grid[16][12] = {{false}};
+        for (int c = 0; c < 16; c++) {
+            uint16_t bits = ((uint16_t)payload[3 + c * 2] << 8) | payload[4 + c * 2];
+            for (int r = 0; r < 12; r++) {
+                grid[c][r] = ((bits >> r) & 1u) != 0;
+            }
+        }
+        if (udp_wifi_connected()) {
+            udp_send_melody_assign(pad, engine, octave, grid);
+        }
     }
     else if (type == MSG_SD_DATA) {
         switch (id) {
@@ -724,6 +753,11 @@ void uart_stage_pattern_push_from_steps(uint8_t slot, const bool steps[16][16]) 
 // Drain a few UDP packets per main-loop tick so MIDI loads don't stall the UI.
 // Safe no-op when idle. Called from main loop().
 void uart_handler_tick_pending_push(void) {
+    if (s_s3_preview_note_off_due_ms != 0 && (int32_t)(millis() - s_s3_preview_note_off_due_ms) >= 0) {
+        if (udp_wifi_connected()) udp_send_synth_note_off(s_s3_preview_engine, 0);
+        s_s3_preview_note_off_due_ms = 0;
+    }
+
     if (s_push.phase == PP_IDLE) return;
     if (!udp_wifi_connected()) {
         s_push.phase = PP_IDLE;
