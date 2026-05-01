@@ -2,6 +2,14 @@
 
 Este es el contrato unico vigente entre BlueSlaveP4, BlueSlaveV2 y RedMaster ESP32-S3. Daisy Seed no participa en este contrato JSON: Daisy recibe comandos binarios por SPI real desde RedMaster.
 
+## Diagnostico Daisy
+
+`CMD_DIAG_PERF_STRESS` (`0xE5`) controla el modo de stress en Daisy: payload `0` lo apaga, `1` lo enciende y `2` reinicia metricas CPU/SPI/peak. `CMD_GET_STATUS` mantiene compatibles sus primeros 54 bytes y agrega CPU promedio/pico, modo stress, clipping master y drops SPI.
+
+## Comandos Daisy Deprecados
+
+`CMD_PAD_SCRATCH` (`0x78`) y `CMD_PAD_TURNTABLISM` (`0x79`) estan deprecados. RedMaster ESP32-S3 ya no los expone; Daisy los conserva como no-op de protocolo para que clientes antiguos no rompan el flujo SPI.
+
 ## Topologia
 
 | Enlace | Transporte | Propietario | Formato |
