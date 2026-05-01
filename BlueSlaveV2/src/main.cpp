@@ -68,6 +68,7 @@ volatile int  pendingThemeIdx  = -1;   // Set by encoder_task, consumed by updat
 // Sequencer
 Pattern patterns[Config::MAX_PATTERNS];
 int currentPattern = 0;
+uint32_t patternUiRevision = 1;
 int currentStep = 0;
 int selectedTrack = 0;
 bool isPlaying = false;
@@ -575,6 +576,7 @@ void handleP4PatternData(int pat, const bool steps[16][16]) {
             patterns[pat].steps[t][s] = (s < 16) ? steps[t][s] : false;
     }
     patterns[pat].length = Config::STEPS_PER_BANK;  // P4 always sends 16 steps
+    patternUiRevision++;
     // Update current pattern number
     if (currentPattern != pat) {
         currentPattern = pat;
@@ -618,6 +620,7 @@ void handleMidiPatternLoaded(int slot, const bool steps[16][64], const char* nam
     // Select this pattern locally
     currentPattern = slot;
     needsFullRedraw = true;
+    patternUiRevision++;
 
     // --- Hand over to P4 ----------------------------------------------------
     // Design: the P4 is the sole owner of the Master UDP channel for
@@ -1102,6 +1105,8 @@ static bool pattern_has_data(int patternIndex) {
 
 void selectPatternOnMaster(int patternIndex) {
     currentPattern = constrain(patternIndex, 0, Config::MAX_PATTERNS - 1);
+    needsFullRedraw = true;
+    patternUiRevision++;
 
     bool localHasData = pattern_has_data(currentPattern);
 

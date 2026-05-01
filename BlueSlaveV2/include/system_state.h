@@ -132,6 +132,7 @@ extern bool needsFullRedraw;
 // Sequencer
 extern Pattern patterns[];
 extern int currentPattern;
+extern uint32_t patternUiRevision;
 extern int currentStep;
 extern int selectedTrack;
 extern bool isPlaying;

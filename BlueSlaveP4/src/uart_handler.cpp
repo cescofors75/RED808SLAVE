@@ -97,6 +97,17 @@ static void remember_master_pattern(uint8_t slot, const bool steps[16][16]) {
     s_master_step_cache_valid[slot] = true;
 }
 
+bool uart_restore_cached_pattern(uint8_t slot) {
+    if (slot > 15 || !s_master_step_cache_valid[slot]) return false;
+    p4.current_pattern = slot;
+    for (int t = 0; t < 16; t++) {
+        for (int s = 0; s < 16; s++) {
+            p4.steps[t][s] = s_master_step_cache[slot][t][s];
+        }
+    }
+    return true;
+}
+
 // =============================================================================
 // INIT
 // =============================================================================
@@ -146,6 +157,8 @@ void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value) {
 // SEND PATTERN DATA TO S3 (extended packet)
 // =============================================================================
 void uart_send_pattern_to_s3(int pattern, const bool steps[16][16]) {
+    remember_master_pattern((uint8_t)constrain(pattern, 0, 15), steps);
+
     // Pack 16 tracks × 16 steps into 32 bytes (2 bytes/track, big-endian, bit per step)
     uint8_t packed[32];
     for (int t = 0; t < 16; t++) {
@@ -287,6 +300,9 @@ static void process_basic(const UartBasicPacket* pkt) {
                     break;
                 case SYS_PATTERN:
                     p4.current_pattern = val;
+                    if (uart_restore_cached_pattern(val)) {
+                        uart_send_pattern_to_s3(val, p4.steps);
+                    }
                     // Relay pattern selection to Master
                     if (udp_wifi_connected()) udp_send_select_pattern(val);
                     break;

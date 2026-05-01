@@ -42,6 +42,7 @@ void uart_send_sd_load_midi(uint8_t slot);
 
 // Send full pattern step data to S3 as MSG_PATTERN_DATA extended packet
 void uart_send_pattern_to_s3(int pattern, const bool steps[16][16]);
+bool uart_restore_cached_pattern(uint8_t slot);
 
 // Check if S3 is alive (heartbeat received recently)
 bool uart_s3_alive(void);

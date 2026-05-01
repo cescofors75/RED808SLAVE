@@ -1324,6 +1324,7 @@ static void seq_step_cb(lv_event_t* e) {
     if (abs_s >= Config::MAX_STEPS) return;
     selectedTrack = track;
     patterns[currentPattern].steps[track][abs_s] = !patterns[currentPattern].steps[track][abs_s];
+    patternUiRevision++;
     bool active = patterns[currentPattern].steps[track][abs_s];
     lv_obj_set_style_bg_color(lv_event_get_target(e),
         active ? inst_colors[track] : RED808_SURFACE, 0);
@@ -2031,6 +2032,7 @@ void ui_update_sequencer() {
     static int prev_bpm10 = -1;
     static int prev_swing = -1;
     static int prev_drive = -1;
+    static uint32_t prev_pattern_revision = 0;
     static uint8_t prev_grid_state[Config::MAX_TRACKS][Config::STEPS_PER_BANK];
     static int prev_track_volumes[Config::MAX_TRACKS] = {};
 
@@ -2049,9 +2051,23 @@ void ui_update_sequencer() {
         prev_column = -2;
     }
 
-    // Auto-follow step bank: when currentStep crosses a bank boundary, switch bank
+    int total_banks = (patterns[currentPattern].length + Config::STEPS_PER_BANK - 1) / Config::STEPS_PER_BANK;
+    if (total_banks < 1) total_banks = 1;
+
+    if (currentPattern != prev_pattern || patternUiRevision != prev_pattern_revision) {
+        prev_pattern = currentPattern;
+        prev_pattern_revision = patternUiRevision;
+        if (seq_step_bank >= total_banks) seq_step_bank = total_banks - 1;
+        seq_apply_step_bank(true);
+        memset(prev_grid_state, 0xFF, sizeof(prev_grid_state));
+        prev_column = -2;
+        prev_step = -1;
+    }
+
+    // Auto-follow step bank: when currentStep crosses a valid bank boundary, switch bank
     {
         int cur_bank = currentStep / Config::STEPS_PER_BANK;
+        if (cur_bank >= total_banks) cur_bank = total_banks - 1;
         if (cur_bank != seq_step_bank) {
             seq_step_bank = cur_bank;
             seq_apply_step_bank();
@@ -2075,8 +2091,7 @@ void ui_update_sequencer() {
         }
     }
 
-    if (seq_info_pattern && currentPattern != prev_pattern) {
-        prev_pattern = currentPattern;
+    if (seq_info_pattern) {
         lv_label_set_text_fmt(seq_info_pattern, "PATTERN %02d  %s", currentPattern + 1, patterns[currentPattern].name.c_str());
     }
     if (seq_info_track && selectedTrack != prev_selected_track) {
@@ -3245,15 +3260,17 @@ void ui_create_patterns_screen() {
 void ui_update_patterns() {
     static int prevPattern = -1;
     static int prevPage = -1;
+    static uint32_t prevRevision = 0;
 
     int desiredPage = currentPattern / VISIBLE_PATTERNS;
     if (desiredPage != pattern_page) {
         pattern_page = desiredPage;
     }
 
-    if (currentPattern != prevPattern || pattern_page != prevPage) {
+    if (currentPattern != prevPattern || pattern_page != prevPage || patternUiRevision != prevRevision) {
         prevPattern = currentPattern;
         prevPage = pattern_page;
+        prevRevision = patternUiRevision;
         pattern_apply_page();
     } else if (pattern_summary_label) {
         lv_label_set_text_fmt(pattern_summary_label, "CURRENT %02d  %s", currentPattern + 1, patterns[currentPattern].name.c_str());
@@ -5088,8 +5105,8 @@ static void mel_assign_cb(lv_event_t* e) {
 void ui_create_melody_screen() {
     scr_melody = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_melody, RED808_BG, 0);
+    lv_obj_set_style_bg_opa(scr_melody, LV_OPA_COVER, 0);
     lv_obj_clear_flag(scr_melody, LV_OBJ_FLAG_SCROLLABLE);
-    ui_create_header(scr_melody);
 
     // ---- Title ----
     lv_obj_t* title = lv_label_create(scr_melody);
@@ -5098,13 +5115,14 @@ void ui_create_melody_screen() {
     lv_obj_set_style_text_color(title, RED808_ACCENT, 0);
     lv_obj_set_pos(title, 16, 8);
 
-    // ---- Engine chips (top right) ----
-    const int eng_w = 84, eng_h = 40, eng_gap = 6;
-    int eng_x0 = UI_W - (eng_w + eng_gap) * 4 - 12;
+    // ---- Engine chips (dedicated row, portrait-safe) ----
+    const int eng_w = 136, eng_h = 38, eng_gap = 6;
+    const int eng_y = 46;
+    int eng_x0 = 16;
     for (int i = 0; i < 4; i++) {
         lv_obj_t* b = lv_btn_create(scr_melody);
         lv_obj_set_size(b, eng_w, eng_h);
-        lv_obj_set_pos(b, eng_x0 + i * (eng_w + eng_gap), 8);
+        lv_obj_set_pos(b, eng_x0 + i * (eng_w + eng_gap), eng_y);
         lv_obj_set_style_radius(b, 8, 0);
         lv_obj_set_style_bg_color(b, (i == s_mel_engine_idx) ? RED808_ACCENT : RED808_SURFACE, 0);
         lv_obj_set_style_border_color(b, (i == s_mel_engine_idx) ? RED808_ACCENT : RED808_BORDER, 0);
@@ -5118,8 +5136,8 @@ void ui_create_melody_screen() {
         mel_engine_btns[i] = b;
     }
 
-    // ---- Octave +/- and status (row 2) ----
-    const int row2_y = 56;
+    // ---- Octave / transport / edit controls (extra header rows) ----
+    const int row2_y = 92;
     auto make_chip = [&](int x, int y, int w, int h, const char* text, lv_color_t col,
                          lv_event_cb_t cb, void* ud) {
         lv_obj_t* b = lv_btn_create(scr_melody);
@@ -5144,7 +5162,7 @@ void ui_create_melody_screen() {
     lv_obj_set_style_text_color(mel_octave_lbl, RED808_TEXT, 0);
     lv_obj_set_pos(mel_octave_lbl, 80, row2_y + 8);
     make_chip(160, row2_y, 56, 38, "OCT+", RED808_INFO, mel_octave_cb, (void*)(intptr_t)1);
-    make_chip(232, row2_y, 90, 38, "CLEAR", RED808_ERROR, mel_clear_cb, NULL);
+    make_chip(232, row2_y, 110, 38, "CLEAR", RED808_ERROR, mel_clear_cb, NULL);
 
     mel_status_lbl = lv_label_create(scr_melody);
     lv_label_set_text_fmt(mel_status_lbl, "ENG %s  OCT %d",
@@ -5155,32 +5173,32 @@ void ui_create_melody_screen() {
     lv_obj_set_pos(mel_status_lbl, 16, 38);
 
     // v2.7 — PREVIEW / REC / ASSIGN / PRESET action chips split in two rows
-    mel_play_btn = make_chip(340, row2_y, 120, 38, LV_SYMBOL_PLAY " PREVIEW",
+    mel_play_btn = make_chip(354, row2_y, 128, 38, LV_SYMBOL_PLAY " PREVIEW",
                               lv_color_hex(0x00E5FF), mel_play_cb, NULL);
     mel_play_lbl = lv_obj_get_child(mel_play_btn, 0);
 
-    mel_rec_btn = make_chip(468, row2_y, 86, 38, "○ REC",
+    mel_rec_btn = make_chip(494, row2_y, 90, 38, "○ REC",
                              RED808_TEXT, mel_rec_cb, NULL);
     mel_rec_lbl = lv_obj_get_child(mel_rec_btn, 0);
     mel_rec_set_visual(s_mel_recording);
 
-    const int row3_y = 100;
-    mel_assign_btn = make_chip(16, row3_y, 126, 36, "→ PAD 1",
+    const int row3_y = 138;
+    mel_assign_btn = make_chip(16, row3_y, 150, 36, "→ PAD 1",
                                 lv_color_hex(0xFF1493), mel_assign_cb, NULL);
     mel_assign_lbl = lv_obj_get_child(mel_assign_btn, 0);
     if (mel_assign_lbl) {
         lv_label_set_text_fmt(mel_assign_lbl, "→ PAD %d", s_mel_assign_pad + 1);
     }
 
-    make_chip(154, row3_y, 138, 36, "PRESET Fm", RED808_ACCENT, mel_preset_fm_cb, NULL);
+    make_chip(178, row3_y, 150, 36, "PRESET Fm", RED808_ACCENT, mel_preset_fm_cb, NULL);
 
     // ---- Grid: 16 cols × 12 rows ----
     // Reserve label column on the left for piano-key labels (width 56)
-    const int grid_top    = 148;
+    const int grid_top    = 188;
     const int label_w     = 56;
     const int grid_left   = 16 + label_w;
     const int grid_right  = UI_W - 16;
-    const int grid_bottom = UI_H - 96;  // leave room for footer/header
+    const int grid_bottom = UI_H - 104;  // leave room for footer/status bar touch area
     const int grid_w      = grid_right - grid_left;
     const int grid_h      = grid_bottom - grid_top;
     const int cell_w      = grid_w / 16;
@@ -5234,6 +5252,8 @@ void ui_create_melody_screen() {
             lv_obj_add_event_cb(cell, mel_cell_cb, LV_EVENT_CLICKED, (void*)packed);
         }
     }
+
+    ui_create_header(scr_melody);
 }
 
 // =============================================================================
