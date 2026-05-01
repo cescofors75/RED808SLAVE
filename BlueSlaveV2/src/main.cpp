@@ -291,6 +291,8 @@ static uint32_t ui_refresh_interval_ms(Screen screen, bool playing_now) {
             return 80;
         case SCREEN_PATTERNS:
             return 150;
+        case SCREEN_PIANO:
+            return 16;
         case SCREEN_DIAGNOSTICS:
         case SCREEN_PERFORMANCE:
             return 300;    // near-static text
@@ -988,6 +990,7 @@ static bool navigateToScreen(Screen screen) {
         case SCREEN_PERFORMANCE: target = scr_performance; break;
         case SCREEN_SAMPLES:     target = scr_samples; break;
         case SCREEN_SEQ_CIRCLE:  target = scr_seq_circle; break;
+        case SCREEN_PIANO:       target = scr_piano; break;
         default: break;
     }
 
@@ -2521,6 +2524,7 @@ void setup() {
         ui_create_samples_screen();
         ui_create_melody_screen();    // v2.6 — piano roll editor
         ui_create_piano_params_screen();  // v2.7 — synth params editor
+        ui_create_piano_screen();     // v2.10 — live vertical piano keyboard
 
         // Start on boot animation; boot_timer_cb() will navigate to SCREEN_MENU when complete
         currentScreen = SCREEN_BOOT;

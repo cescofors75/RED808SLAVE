@@ -22,6 +22,7 @@ extern lv_obj_t* scr_boot;
 extern lv_obj_t* scr_seq_circle;
 extern lv_obj_t* scr_melody;        // v2.6 — piano roll / score editor
 extern lv_obj_t* scr_piano_params;  // v2.7 — synth engine parameter editor
+extern lv_obj_t* scr_piano;         // v2.10 — live vertical piano keyboard
 
 // Create screens
 void ui_create_menu_screen();
@@ -39,6 +40,7 @@ void ui_create_boot_screen();
 void ui_create_seq_circle_screen();
 void ui_create_melody_screen();      // v2.6 — piano roll editor
 void ui_create_piano_params_screen(); // v2.7 — synth params editor
+void ui_create_piano_screen();       // v2.10 — live vertical piano keyboard
 
 // v2.9 — Set by nav_to(SCREEN_MELODY) so loop() can request a fresh
 // melody_sync from master once the LVGL render is done.
@@ -78,6 +80,7 @@ void ui_live_set_sync(bool on);
 void ui_volumes_retheme();
 void ui_melody_retheme();
 void ui_piano_params_retheme();
+void ui_piano_retheme();
 void ui_update_sdcard();
 
 // SD card helpers (used by main.cpp for P4 remote browse)

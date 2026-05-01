@@ -28,6 +28,7 @@ enum Screen {
     SCREEN_SEQ_CIRCLE,
     SCREEN_MELODY,        // v2.6 — piano roll / score editor (live preview)
     SCREEN_PIANO_PARAMS,  // v2.7 — synth engine parameter editor (303/WT/SH101/FM2)
+    SCREEN_PIANO,         // v2.10 — live vertical piano keyboard
     SCREEN_COUNT          // keep last — used for array sizing
 };
 

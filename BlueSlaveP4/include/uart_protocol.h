@@ -138,6 +138,8 @@
 #define TCMD_MELODY_CLEAR   0x15  // value = 0 (grid clear, S3→P4 only)
 #define TCMD_MELODY_PAD     0x16  // value = pad index (0-15)
 #define TCMD_MELODY_NOTE    0x17  // value = MIDI note (0-127, P4→S3 rec)
+#define TCMD_MELODY_NOTE_OFF 0x18 // value = MIDI note (0-127, live piano release)
+#define TCMD_PIANO_NOTE_ON  0x19  // value = MIDI note (0-127, live piano press)
 
 // =============================================================================
 // MELODY DATA sub-IDs (MSG_MELODY_DATA extended, Byte 2)

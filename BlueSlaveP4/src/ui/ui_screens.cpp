@@ -4096,6 +4096,11 @@ int ui_pad_from_xy(uint16_t x, uint16_t y) {
     return row * 4 + col;
 }
 
+static inline uint8_t ui_live_pad_velocity(void) {
+    int volume = constrain(p4.live_volume, 0, Config::MAX_VOLUME);
+    return (uint8_t)map(volume, 0, Config::MAX_VOLUME, 32, 127);
+}
+
 // =============================================================================
 // PAD FRAME UPDATE — called from GT911 touch_task (Core 0, 200Hz)
 // Rising edge → enqueue event (with 16 Levels remapping if active) and arm
@@ -4103,6 +4108,8 @@ int ui_pad_from_xy(uint16_t x, uint16_t y) {
 // schedule using the current tempo & subdivision.
 // =============================================================================
 void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
+    (void)velocity;
+
     if (!g_live_screen_active.load(std::memory_order_acquire)) {
         // Clear state so we don't fire phantom repeats when leaving LIVE
         for (int p = 0; p < 16; p++) {
@@ -4121,7 +4128,7 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
 
         if (is_held && !was_held) {
             // ── Rising edge: real finger-down ──
-            uint8_t vel = velocity[p] ? velocity[p] : 100;
+            uint8_t vel = ui_live_pad_velocity();
             s_pad_held_velocity[p] = vel;
 
             uint8_t send_pad = p;
