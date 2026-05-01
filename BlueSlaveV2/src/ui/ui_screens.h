@@ -76,6 +76,8 @@ void ui_update_live_pads();
 void ui_live_pads_invalidate();
 void ui_live_set_sync(bool on);
 void ui_volumes_retheme();
+void ui_melody_retheme();
+void ui_piano_params_retheme();
 void ui_update_sdcard();
 
 // SD card helpers (used by main.cpp for P4 remote browse)

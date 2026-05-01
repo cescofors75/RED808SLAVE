@@ -327,9 +327,12 @@ void ui_theme_apply(VisualTheme theme) {
     extern lv_obj_t* scr_patterns;
     extern lv_obj_t* scr_sdcard;
     extern lv_obj_t* scr_performance;
+    extern lv_obj_t* scr_melody;
+    extern lv_obj_t* scr_piano_params;
     lv_obj_t* screens[] = {scr_menu, scr_live, scr_sequencer, scr_volumes,
                            scr_settings, scr_diagnostics, scr_patterns,
-                           scr_sdcard, scr_performance};
+                           scr_sdcard, scr_performance, scr_melody,
+                           scr_piano_params};
     for (auto scr : screens) {
         if (!scr) continue;
         lv_obj_set_style_bg_color(scr, lv_color_hex(cur.bg), 0);
@@ -344,6 +347,11 @@ void ui_theme_apply(VisualTheme theme) {
     // Force volume faders to pick up new track colors
     extern void ui_volumes_retheme();
     ui_volumes_retheme();
+
+    extern void ui_melody_retheme();
+    extern void ui_piano_params_retheme();
+    ui_melody_retheme();
+    ui_piano_params_retheme();
 
     // Invalidate ByteButton LED cache
     extern uint32_t byteButtonLedCache[][BYTEBUTTON_BUTTONS + 1];
