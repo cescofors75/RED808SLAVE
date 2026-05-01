@@ -19,6 +19,7 @@
 // malformed/oversized frames early. Must accommodate:
 //   - MSG_PATTERN_DATA: 16 tracks * 64 steps = 1024 bits = 128 bytes (current = 32B for 16 steps)
 //   - MSG_SD_DATA entries: index(1) + type(1) + name(32) ~= 34B
+//   - MSG_SYNTH_DATA: synth param/preset relay payloads <= 7B
 // 128 leaves comfortable headroom; do NOT exceed UART_RX_BUF / 2.
 #define UART_EXT_MAX_PAYLOAD 128
 
@@ -38,6 +39,7 @@
 #define MSG_SD_DATA     0x0B    // S3→P4: SD card data (extended packets)
 #define MSG_PATTERN_PUSH 0x0C   // Extended: freshly-loaded pattern (MIDI) — P4 must push it to Master via UDP
 #define MSG_MELODY_DATA 0x0D    // Extended: melody grid assign data
+#define MSG_SYNTH_DATA  0x0E    // Extended: synth params/presets (S3→P4→Master UDP)
 
 // =============================================================================
 // ENCODER IDs (MSG_ENCODER, Byte 2)
@@ -143,6 +145,12 @@
 #define MEL_DATA_ASSIGN     0x00  // payload: pad,engine,octave + 32-byte 16x12 grid bits
 
 // =============================================================================
+// SYNTH DATA sub-IDs (MSG_SYNTH_DATA extended, Byte 2)
+// =============================================================================
+#define SYNTH_DATA_PARAM    0x00  // payload: engine,instrument,paramId,float32 value
+#define SYNTH_DATA_PRESET   0x01  // payload: engine,preset
+
+// =============================================================================
 // SD DATA sub-IDs (MSG_SD_DATA extended, Byte 2)
 // =============================================================================
 #define SD_RESP_STATUS     0x00 // payload: [mounted(1)]
@@ -241,6 +249,7 @@ static inline bool uart_validate_packet(const UartBasicPacket* pkt) {
             return pkt->id <= TCMD_MELODY_NOTE;
         case MSG_PATTERN_DATA:
         case MSG_SD_DATA:
+        case MSG_SYNTH_DATA:
             return false;                                // not a basic packet
         default:
             return false;                                // unknown type

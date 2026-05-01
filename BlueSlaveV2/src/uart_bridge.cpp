@@ -347,3 +347,17 @@ void uart_bridge_send_melody_clear(void) {
 void uart_bridge_send_melody_pad(uint8_t pad) {
     uart_bridge_send(MSG_TOUCH_CMD, TCMD_MELODY_PAD, pad);
 }
+
+void uart_bridge_send_synth_param(uint8_t engine, uint8_t instrument, uint8_t paramId, float value) {
+    uint8_t payload[7];
+    payload[0] = engine;
+    payload[1] = instrument;
+    payload[2] = paramId;
+    memcpy(&payload[3], &value, sizeof(value));
+    uart_bridge_send_extended(MSG_SYNTH_DATA, SYNTH_DATA_PARAM, payload, sizeof(payload));
+}
+
+void uart_bridge_send_synth_preset(uint8_t engine, uint8_t preset) {
+    uint8_t payload[2] = { engine, preset };
+    uart_bridge_send_extended(MSG_SYNTH_DATA, SYNTH_DATA_PRESET, payload, sizeof(payload));
+}

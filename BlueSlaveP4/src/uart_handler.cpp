@@ -544,6 +544,25 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
             udp_send_melody_assign(pad, engine, octave, grid);
         }
     }
+    else if (type == MSG_SYNTH_DATA) {
+        if (id == SYNTH_DATA_PARAM && len == 7) {
+            uint8_t engine = payload[0];
+            uint8_t instrument = payload[1];
+            uint8_t paramId = payload[2];
+            float value = 0.0f;
+            memcpy(&value, &payload[3], sizeof(value));
+            if (engine >= 3 && engine <= 6 && udp_wifi_connected()) {
+                udp_send_synth_param(engine, instrument, paramId, value);
+            }
+        }
+        else if (id == SYNTH_DATA_PRESET && len == 2) {
+            uint8_t engine = payload[0];
+            uint8_t preset = payload[1];
+            if (engine >= 3 && engine <= 6 && preset < 4 && udp_wifi_connected()) {
+                udp_send_synth_preset(engine, preset);
+            }
+        }
+    }
     else if (type == MSG_SD_DATA) {
         switch (id) {
             case SD_RESP_STATUS:

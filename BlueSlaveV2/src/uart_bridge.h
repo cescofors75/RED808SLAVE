@@ -76,6 +76,10 @@ void uart_bridge_send_melody_rec(bool active);
 void uart_bridge_send_melody_clear(void);
 void uart_bridge_send_melody_pad(uint8_t pad);         // 0-15
 
+// v2.10 — Piano/synth params over UART (S3→P4, P4 forwards UDP to master)
+void uart_bridge_send_synth_param(uint8_t engine, uint8_t instrument, uint8_t paramId, float value);
+void uart_bridge_send_synth_preset(uint8_t engine, uint8_t preset);
+
 // v2.9 — Pending melody state received from P4 (forwarded from master's melody_sync)
 // Written by uart_bridge_receive (Core 0 UART ISR context); consumed by main loop
 // under LVGL lock.

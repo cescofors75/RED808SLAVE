@@ -27,6 +27,8 @@ extern void apply_mpc_preset(bool saveToNvs);
 // UART bridge relay (for when S3 WiFi is off — P4 forwards to Master)
 extern void uart_bridge_send(uint8_t type, uint8_t id, uint8_t value);
 extern void uart_bridge_send_extended(uint8_t type, uint8_t id, const uint8_t* data, uint16_t len);
+extern void uart_bridge_send_synth_param(uint8_t engine, uint8_t instrument, uint8_t paramId, float value);
+extern void uart_bridge_send_synth_preset(uint8_t engine, uint8_t preset);
 #include "../../include/uart_protocol.h"
 
 // Use SRAM allocator from main.cpp — avoids PSRAM bus contention with LCD DMA
@@ -5051,7 +5053,7 @@ void melody_apply_sync_payload(JsonVariantConst doc) {
 // v2.9 — Apply melody state received from P4 via UART (forwarded from master).
 // Called from main loop under lvgl_port_lock with the 4 basic fields.
 void melody_apply_basic_sync(uint8_t engine, uint8_t octave, uint8_t rec, uint8_t pad) {
-    StaticJsonDocument<64> doc;
+    JsonDocument doc(sramAllocatorPtr);
     doc["engine"] = engine;
     doc["octave"] = octave;
     doc["rec"]    = (int)rec;
@@ -5267,29 +5269,11 @@ static inline float pp_i2f(int i, float vmin, float vmax) {
 }
 
 static void pp_send_param(uint8_t engine, uint8_t param_id, uint8_t instrument, float value) {
-    // S3 is UART-only — UDP send is a no-op stub
-    JsonDocument doc(sramAllocatorPtr);
-    if (engine == SP_ENGINE_303) {
-        doc["cmd"]     = "synth303Param";
-        doc["paramId"] = param_id;
-        doc["value"]   = value;
-    } else {
-        doc["cmd"]        = "synthParam";
-        doc["engine"]     = engine;
-        doc["instrument"] = instrument;
-        doc["paramId"]    = param_id;
-        doc["value"]      = value;
-    }
-    sendUDPCommand(doc);
+    uart_bridge_send_synth_param(engine, instrument, param_id, value);
 }
 
 static void pp_send_preset_cmd(uint8_t engine, uint8_t preset_idx) {
-    // S3 is UART-only — UDP send is a no-op stub
-    JsonDocument doc(sramAllocatorPtr);
-    doc["cmd"]    = "synthPreset";
-    doc["engine"] = engine;
-    doc["preset"] = preset_idx;
-    sendUDPCommand(doc);
+    uart_bridge_send_synth_preset(engine, preset_idx);
 }
 
 static void pp_format_value(char* buf, size_t bufsz, const SynthParamDef* p, float v) {
