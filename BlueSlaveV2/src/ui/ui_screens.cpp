@@ -215,12 +215,12 @@ static void live_update_view_controls() {
     }
 
     if (live_view_prev_btn) {
-        lv_obj_add_flag(live_view_prev_btn, live_pad_block_count() <= 1 ? LV_OBJ_FLAG_HIDDEN : 0);
-        if (live_pad_block_count() > 1) lv_obj_clear_flag(live_view_prev_btn, LV_OBJ_FLAG_HIDDEN);
+        if (live_pad_block_count() <= 1) lv_obj_add_flag(live_view_prev_btn, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_clear_flag(live_view_prev_btn, LV_OBJ_FLAG_HIDDEN);
     }
     if (live_view_next_btn) {
-        lv_obj_add_flag(live_view_next_btn, live_pad_block_count() <= 1 ? LV_OBJ_FLAG_HIDDEN : 0);
-        if (live_pad_block_count() > 1) lv_obj_clear_flag(live_view_next_btn, LV_OBJ_FLAG_HIDDEN);
+        if (live_pad_block_count() <= 1) lv_obj_add_flag(live_view_next_btn, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_clear_flag(live_view_next_btn, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -544,13 +544,13 @@ static void apply_stable_button_style(lv_obj_t* obj, lv_color_t base_color, lv_c
 
     // Cover ALL possible states so the LVGL default theme never shows through.
     static const lv_state_t states[] = {
-        0,
+        LV_STATE_DEFAULT,
         LV_STATE_PRESSED,
         LV_STATE_FOCUSED,
         LV_STATE_FOCUS_KEY,
         LV_STATE_CHECKED,
-        LV_STATE_PRESSED | LV_STATE_FOCUSED,
-        LV_STATE_PRESSED | LV_STATE_CHECKED,
+        (lv_state_t)(LV_STATE_PRESSED | LV_STATE_FOCUSED),
+        (lv_state_t)(LV_STATE_PRESSED | LV_STATE_CHECKED),
     };
     for (auto st : states) {
         lv_obj_set_style_bg_color(obj, base_color, st);
@@ -889,17 +889,32 @@ void ui_create_menu_screen() {
         } else {
             // P4-style: dark surface + neon colored border + outer glow outline
             apply_stable_button_style(btn, RED808_SURFACE, menu_colors[i]);
+            lv_obj_set_style_bg_grad_color(btn, lv_color_mix(menu_colors[i], RED808_BG, 205), 0);
+            lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_VER, 0);
+            lv_obj_set_style_border_width(btn, 2, 0);
             lv_obj_set_style_outline_width(btn, 3, 0);
             lv_obj_set_style_outline_color(btn, menu_colors[i], 0);
             lv_obj_set_style_outline_opa(btn, LV_OPA_50, 0);
             lv_obj_set_style_outline_pad(btn, 2, 0);
+            lv_obj_set_style_shadow_width(btn, 16, 0);
+            lv_obj_set_style_shadow_color(btn, menu_colors[i], 0);
+            lv_obj_set_style_shadow_opa(btn, (lv_opa_t)105, 0);
+            lv_obj_t* stripe = lv_obj_create(btn);
+            lv_obj_set_size(stripe, btn_w - 26, 5);
+            lv_obj_align(stripe, LV_ALIGN_TOP_MID, 0, 10);
+            lv_obj_set_style_radius(stripe, 3, 0);
+            lv_obj_set_style_bg_color(stripe, menu_colors[i], 0);
+            lv_obj_set_style_bg_opa(stripe, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(stripe, 0, 0);
+            lv_obj_clear_flag(stripe, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_clear_flag(stripe, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_add_event_cb(btn, menu_btn_cb, LV_EVENT_PRESSED, (void*)(intptr_t)i);
             lv_obj_t* lbl = lv_label_create(btn);
             lv_label_set_text(lbl, menu_names[i]);
-            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_20, 0);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_22, 0);
             lv_obj_set_style_text_color(lbl, menu_colors[i], 0);
             lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_center(lbl);
+            lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 8);
         }
     }
 }
@@ -1121,7 +1136,8 @@ void ui_create_live_screen() {
         lv_obj_t* pad = lv_obj_create(scr_live);
         lv_obj_set_size(pad, default_pad_w, h);
         lv_obj_set_pos(pad, x, y);
-        lv_obj_clear_flag(pad, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(pad, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(pad, LV_OBJ_FLAG_CLICKABLE);
 
         // Neon ring style — identical look to P4 pads
         lv_obj_set_style_bg_color(pad, lv_color_black(), 0);
@@ -1333,7 +1349,7 @@ static void seq_step_cb(lv_event_t* e) {
     patterns[currentPattern].steps[track][abs_s] = !patterns[currentPattern].steps[track][abs_s];
     patternUiRevision++;
     bool active = patterns[currentPattern].steps[track][abs_s];
-    lv_obj_set_style_bg_color(lv_event_get_target(e),
+    lv_obj_set_style_bg_color((lv_obj_t*)lv_event_get_target(e),
         active ? inst_colors[track] : RED808_SURFACE, 0);
     // Send step update to master
     char buf[80];
@@ -1603,7 +1619,8 @@ void ui_create_sequencer_screen() {
         lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(chip, 0, 0);
         lv_obj_set_style_radius(chip, 6, 0);
-        lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(chip, LV_OBJ_FLAG_CLICKABLE);
 
         seq_step_labels[s] = lv_label_create(chip);
         lv_label_set_text_fmt(seq_step_labels[s], "%02d", s + 1);
@@ -1743,7 +1760,8 @@ void ui_create_sequencer_screen() {
         lv_obj_set_style_bg_opa(seq_playhead_line, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(seq_playhead_line, 1, 0);
         lv_obj_set_style_border_width(seq_playhead_line, 0, 0);
-        lv_obj_clear_flag(seq_playhead_line, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(seq_playhead_line, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(seq_playhead_line, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_flag(seq_playhead_line, LV_OBJ_FLAG_IGNORE_LAYOUT);
         lv_obj_add_flag(seq_playhead_line, LV_OBJ_FLAG_FLOATING);
         lv_obj_move_foreground(seq_playhead_line);
@@ -1790,7 +1808,8 @@ void ui_create_sequencer_screen() {
         lv_obj_set_style_border_width(led, 0, 0);
         lv_obj_set_style_shadow_width(led, 0, 0);
         lv_obj_add_flag(led, LV_OBJ_FLAG_IGNORE_LAYOUT);
-        lv_obj_clear_flag(led, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(led, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(led, LV_OBJ_FLAG_SCROLLABLE);
         seq_step_leds[s] = led;
     }
 
@@ -2209,7 +2228,7 @@ void ui_update_sequencer() {
 // ============================================================================
 static void vol_slider_cb(lv_event_t* e) {
     int track = (int)(intptr_t)lv_event_get_user_data(e);
-    lv_obj_t* slider = lv_event_get_target(e);
+    lv_obj_t* slider = (lv_obj_t*)lv_event_get_target(e);
     int newVol = lv_slider_get_value(slider);
     if (newVol == trackVolumes[track]) return;
     trackVolumes[track] = newVol;
@@ -3415,7 +3434,7 @@ static void sd_free_file_userdata() {
     for (uint32_t i = 0; i < cnt; i++) {
         lv_obj_t* child = lv_obj_get_child(sd_file_list, i);
         void* ud = lv_obj_get_user_data(child);
-        if (ud) { lv_mem_free(ud); lv_obj_set_user_data(child, NULL); }
+        if (ud) { lv_free(ud); lv_obj_set_user_data(child, NULL); }
     }
 }
 
@@ -3503,7 +3522,7 @@ static void sd_refresh_filelist() {
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
 
         // Store entry name in user data (heap allocated, freed on lv_obj_clean)
-        char* name_copy = (char*)lv_mem_alloc(strlen(name) + 2);
+        char* name_copy = (char*)lv_malloc(strlen(name) + 2);
         if (name_copy) {
             size_t nlen3 = strlen(name);
             bool ud_is_mid = !is_dir && nlen3 > 4 && strcasecmp(name + nlen3 - 4, ".mid") == 0;
@@ -3936,7 +3955,12 @@ void ui_create_sdcard_screen() {
     lv_obj_set_width(sd_midi_status_lbl, SD_RIGHT_W - 24);
     lv_label_set_long_mode(sd_midi_status_lbl, LV_LABEL_LONG_WRAP);
 
-    // Mount SD card now (non-blocking approach — just try once)
+    // Do not mount SD during boot UI creation. SD_MMC can block or abort on
+    // some card states; mount lazily when the SD screen is actually active.
+    sd_refresh_filelist();
+}
+
+void ui_update_sdcard() {
     if (!sd_init_attempted) {
         sd_init_attempted = true;
         sd_mounted = sd_try_mount();
@@ -3945,15 +3969,8 @@ void ui_create_sdcard_screen() {
             lv_obj_set_style_text_color(sd_status_lbl,
                 sd_mounted ? RED808_SUCCESS : RED808_WARNING, 0);
         }
+        sd_refresh_filelist();
     }
-
-    // Populate file list
-    sd_refresh_filelist();
-}
-
-void ui_update_sdcard() {
-    // Nothing to animate; all interaction is event-driven
-    (void)0;
 }
 
 // ============================================================================
@@ -4276,7 +4293,8 @@ void ui_create_boot_screen() {
     lv_obj_set_style_bg_color(top_line, lv_color_hex(0x0066AA), 0);
     lv_obj_set_style_bg_opa(top_line, LV_OPA_60, 0);
     lv_obj_set_style_border_width(top_line, 0, 0);
-    lv_obj_clear_flag(top_line, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(top_line, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(top_line, LV_OBJ_FLAG_CLICKABLE);
 
     // ── Brand name (large, centered) ──
     lv_obj_t* brand = lv_label_create(scr_boot);
@@ -4301,7 +4319,8 @@ void ui_create_boot_screen() {
     lv_obj_set_style_bg_color(sep, lv_color_hex(0x222233), 0);
     lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(sep, 0, 0);
-    lv_obj_clear_flag(sep, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(sep, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(sep, LV_OBJ_FLAG_CLICKABLE);
 
     // ── POST lines (compact, left-aligned block) ──
     for (int i = 0; i < kBootLineCount; i++) {
@@ -4354,7 +4373,8 @@ void ui_create_boot_screen() {
     lv_obj_set_style_bg_color(bot_line, lv_color_hex(0x0066AA), 0);
     lv_obj_set_style_bg_opa(bot_line, LV_OPA_40, 0);
     lv_obj_set_style_border_width(bot_line, 0, 0);
-    lv_obj_clear_flag(bot_line, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(bot_line, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(bot_line, LV_OBJ_FLAG_CLICKABLE);
 
     // ── Developer branding (bottom-center): name only ──
     extern const lv_img_dsc_t img_dev_name;
@@ -4407,7 +4427,8 @@ void ui_create_seq_circle_screen() {
     lv_obj_set_style_border_width(ring, 1, 0);
     lv_obj_set_style_border_color(ring, lv_color_hex(0x222222), 0);
     lv_obj_set_style_border_opa(ring, LV_OPA_COVER, 0);
-    lv_obj_clear_flag(ring, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(ring, LV_OBJ_FLAG_CLICKABLE);
 
     // Inner ring
     lv_obj_t* inner_ring = lv_obj_create(scr_seq_circle);
@@ -4419,7 +4440,8 @@ void ui_create_seq_circle_screen() {
     lv_obj_set_style_bg_opa(inner_ring, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(inner_ring, 1, 0);
     lv_obj_set_style_border_color(inner_ring, lv_color_hex(0x181818), 0);
-    lv_obj_clear_flag(inner_ring, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(inner_ring, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(inner_ring, LV_OBJ_FLAG_CLICKABLE);
 
     // Center track info labels
     lbl_circ_info = lv_label_create(scr_seq_circle);
@@ -4479,8 +4501,10 @@ void ui_create_seq_circle_screen() {
     lv_obj_set_style_shadow_width(circ_playhead, 18, 0);
     lv_obj_set_style_shadow_color(circ_playhead, RED808_WARNING, 0);
     lv_obj_set_style_shadow_opa(circ_playhead, LV_OPA_80, 0);
-    lv_obj_add_flag(circ_playhead, LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(circ_playhead, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(circ_playhead, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_add_flag(circ_playhead, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(circ_playhead, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(circ_playhead, LV_OBJ_FLAG_SCROLLABLE);
     // Place at top of ring initially
     lv_obj_set_pos(circ_playhead,
         circ_step_cx[0] - CIRC_HEAD_SIZE / 2,
@@ -5681,6 +5705,16 @@ static lv_obj_t* s_pp_val_lbls[PP_MAX_PARAMS] = {};
 static lv_obj_t* s_pp_name_lbls[PP_MAX_PARAMS] = {};
 static lv_obj_t* s_pp_title_lbl = NULL;
 
+static lv_color_t pp_engine_color(int idx) {
+    switch (idx) {
+        case 0: return lv_color_hex(0xF0B429);
+        case 1: return lv_color_hex(0x00E5FF);
+        case 2: return lv_color_hex(0x8B5CF6);
+        case 3: return lv_color_hex(0xFF4FA3);
+        default: return RED808_ACCENT;
+    }
+}
+
 // Map slider int (0..1000) <-> float (vmin..vmax)
 static inline int pp_f2i(float v, float vmin, float vmax) {
     if (vmax <= vmin) return 0;
@@ -5739,7 +5773,7 @@ static void pp_slider_event_cb(lv_event_t* e) {
     const SynthEngineDef* eng = &SP_ENGINES[s_pp_engine_idx];
     if (slot < 0 || slot >= (int)eng->param_count) return;
     const SynthParamDef* p = &eng->params[slot];
-    lv_obj_t* sl = lv_event_get_target(e);
+    lv_obj_t* sl = (lv_obj_t*)lv_event_get_target(e);
     int iv = lv_slider_get_value(sl);
     float fv = pp_i2f(iv, p->vmin, p->vmax);
     if (p->step_int) fv = (float)((int)(fv + 0.5f));
@@ -5760,7 +5794,7 @@ static lv_obj_t* s_pp_cell_bars[PP_MAX_PARAMS] = {};
 
 static inline lv_color_t pp_value_color(float t) {
     if (t < 0) t = 0; if (t > 1) t = 1;
-    return lv_color_mix(RED808_ACCENT, RED808_SURFACE, (lv_opa_t)(80 + t * 175));
+    return lv_color_mix(pp_engine_color(s_pp_engine_idx), RED808_SURFACE, (lv_opa_t)(70 + t * 165));
 }
 
 static void pp_cell_redraw_value(int slot) {
@@ -5780,13 +5814,13 @@ static void pp_cell_redraw_value(int slot) {
         int w = (int)(full_w * t + 0.5f);
         if (w < 4) w = 4;
         lv_obj_set_width(s_pp_cell_bars[slot], w);
-        lv_obj_set_style_bg_color(s_pp_cell_bars[slot], lv_color_mix(RED808_ACCENT2, RED808_CYAN, (lv_opa_t)(80 + t * 175)), 0);
+        lv_obj_set_style_bg_color(s_pp_cell_bars[slot], lv_color_mix(pp_engine_color(s_pp_engine_idx), RED808_CYAN, (lv_opa_t)(80 + t * 175)), 0);
     }
     if (s_pp_sliders[slot]) {
         // Whole-cell background follows the value (the user-visible feedback).
         lv_color_t bg = pp_value_color(t);
         lv_obj_set_style_bg_color(s_pp_sliders[slot], bg, 0);
-        lv_obj_set_style_border_color(s_pp_sliders[slot], lv_color_mix(RED808_ACCENT2, RED808_CYAN, (lv_opa_t)(80 + t * 175)), 0);
+        lv_obj_set_style_border_color(s_pp_sliders[slot], lv_color_mix(pp_engine_color(s_pp_engine_idx), RED808_CYAN, (lv_opa_t)(80 + t * 175)), 0);
     }
 }
 
@@ -5856,6 +5890,7 @@ static void pp_rebuild_param_grid() {
     int cell_w = (panel_w - 2 * pad - (cols - 1) * gap) / cols;
     int cell_h = (panel_h - 2 * pad - (rows - 1) * gap) / rows;
     if (cell_h < 80) cell_h = 80;
+    lv_color_t engine_accent = pp_engine_color(s_pp_engine_idx);
 
     for (int i = 0; i < count && i < PP_MAX_PARAMS; i++) {
         int col = i % cols;
@@ -5868,14 +5903,28 @@ static void pp_rebuild_param_grid() {
         lv_obj_t* cell = lv_btn_create(s_pp_param_panel);
         lv_obj_set_size(cell, cell_w, cell_h);
         lv_obj_set_pos(cell, x, y);
-        lv_obj_set_style_radius(cell, 10, 0);
-        lv_obj_set_style_bg_color(cell, RED808_SURFACE, 0);
+        lv_obj_set_style_radius(cell, 8, 0);
+        lv_obj_set_style_bg_color(cell, lv_color_mix(engine_accent, RED808_SURFACE, 230), 0);
+        lv_obj_set_style_bg_grad_color(cell, lv_color_mix(engine_accent, RED808_BG, 215), 0);
+        lv_obj_set_style_bg_grad_dir(cell, LV_GRAD_DIR_VER, 0);
         lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(cell, RED808_BORDER, 0);
+        lv_obj_set_style_border_color(cell, engine_accent, 0);
         lv_obj_set_style_border_width(cell, 2, 0);
-        lv_obj_set_style_shadow_width(cell, 0, 0);
+        lv_obj_set_style_shadow_width(cell, 12, 0);
+        lv_obj_set_style_shadow_color(cell, engine_accent, 0);
+        lv_obj_set_style_shadow_opa(cell, (lv_opa_t)70, 0);
         lv_obj_set_style_pad_all(cell, 0, 0);
         lv_obj_clear_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t* top_line = lv_obj_create(cell);
+        lv_obj_set_size(top_line, cell_w - 18, 4);
+        lv_obj_align(top_line, LV_ALIGN_TOP_MID, 0, 7);
+        lv_obj_set_style_radius(top_line, 2, 0);
+        lv_obj_set_style_bg_color(top_line, engine_accent, 0);
+        lv_obj_set_style_bg_opa(top_line, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(top_line, 0, 0);
+        lv_obj_clear_flag(top_line, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(top_line, LV_OBJ_FLAG_CLICKABLE);
 
         // Bottom horizontal fill bar — visualizes the current value.
         int bar_full_w = cell_w - 14;
@@ -5889,7 +5938,8 @@ static void pp_rebuild_param_grid() {
         lv_obj_set_style_border_width(bar, 0, 0);
         lv_obj_set_style_shadow_width(bar, 0, 0);
         lv_obj_set_style_pad_all(bar, 0, 0);
-        lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_user_data(bar, (void*)(intptr_t)bar_full_w);
         s_pp_cell_bars[i] = bar;
 
@@ -5898,14 +5948,16 @@ static void pp_rebuild_param_grid() {
         lv_label_set_text(nlbl, p->name);
         lv_obj_set_style_text_font(nlbl, &lv_font_montserrat_18, 0);
         lv_obj_set_style_text_color(nlbl, RED808_TEXT, 0);
-        lv_obj_align(nlbl, LV_ALIGN_TOP_LEFT, 10, 8);
+        lv_label_set_long_mode(nlbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(nlbl, cell_w - 70);
+        lv_obj_align(nlbl, LV_ALIGN_TOP_LEFT, 10, 18);
         s_pp_name_lbls[i] = nlbl;
 
         // Value (centered, big yellow)
         lv_obj_t* vlbl = lv_label_create(cell);
         lv_obj_set_style_text_font(vlbl, &lv_font_montserrat_24, 0);
-        lv_obj_set_style_text_color(vlbl, lv_color_hex(0xFFE066), 0);
-        lv_obj_align(vlbl, LV_ALIGN_CENTER, 0, 2);
+        lv_obj_set_style_text_color(vlbl, lv_color_mix(engine_accent, lv_color_hex(0xFFFFFF), 90), 0);
+        lv_obj_align(vlbl, LV_ALIGN_CENTER, 0, 4);
         s_pp_val_lbls[i] = vlbl;
 
         // RST badge — small button at top-right of cell. Catches its own
@@ -5916,7 +5968,7 @@ static void pp_rebuild_param_grid() {
         lv_obj_align(rst, LV_ALIGN_TOP_RIGHT, -6, 6);
         lv_obj_set_style_radius(rst, 6, 0);
         lv_obj_set_style_bg_color(rst, lv_color_hex(0x222B40), 0);
-        lv_obj_set_style_border_color(rst, RED808_TEXT_DIM, 0);
+        lv_obj_set_style_border_color(rst, engine_accent, 0);
         lv_obj_set_style_border_width(rst, 1, 0);
         lv_obj_set_style_shadow_width(rst, 0, 0);
         lv_obj_t* rl = lv_label_create(rst);
@@ -5940,10 +5992,14 @@ static void pp_update_engine_chips() {
     for (int i = 0; i < SP_ENGINE_COUNT; i++) {
         if (!s_pp_engine_btns[i]) continue;
         bool active = (i == s_pp_engine_idx);
-        lv_obj_set_style_bg_color(s_pp_engine_btns[i], active ? RED808_ACCENT : RED808_SURFACE, 0);
-        lv_obj_set_style_border_color(s_pp_engine_btns[i], active ? RED808_ACCENT : RED808_BORDER, 0);
+        lv_color_t color = pp_engine_color(i);
+        lv_obj_set_style_bg_color(s_pp_engine_btns[i], active ? color : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(s_pp_engine_btns[i], color, 0);
+        lv_obj_set_style_shadow_width(s_pp_engine_btns[i], active ? 12 : 0, 0);
+        lv_obj_set_style_shadow_color(s_pp_engine_btns[i], color, 0);
+        lv_obj_set_style_shadow_opa(s_pp_engine_btns[i], (lv_opa_t)95, 0);
         lv_obj_t* lbl = lv_obj_get_child(s_pp_engine_btns[i], 0);
-        if (lbl) lv_obj_set_style_text_color(lbl, active ? RED808_BG : RED808_TEXT, 0);
+        if (lbl) lv_obj_set_style_text_color(lbl, active ? RED808_BG : color, 0);
     }
 }
 
@@ -5951,9 +6007,10 @@ static void pp_update_preset_chips() {
     for (int i = 0; i < 4; i++) {
         if (!s_pp_preset_btns[i]) continue;
         bool active = (i == s_pp_preset_idx[s_pp_engine_idx]);
-        lv_obj_set_style_bg_color(s_pp_preset_btns[i], active ? RED808_ACCENT2 : RED808_SURFACE, 0);
+        lv_color_t color = pp_engine_color(s_pp_engine_idx);
+        lv_obj_set_style_bg_color(s_pp_preset_btns[i], active ? color : RED808_SURFACE, 0);
         lv_obj_set_style_border_color(s_pp_preset_btns[i],
-                          active ? RED808_ACCENT2 : RED808_BORDER, 0);
+                  active ? color : RED808_BORDER, 0);
         lv_obj_t* lbl = lv_obj_get_child(s_pp_preset_btns[i], 0);
         if (lbl) lv_obj_set_style_text_color(lbl, active ? RED808_BG : RED808_TEXT, 0);
     }
@@ -5977,8 +6034,9 @@ static void pp_engine_cb(lv_event_t* e) {
     s_pp_engine_idx = idx;
     if (s_pp_title_lbl) {
         char tbuf[64];
-        snprintf(tbuf, sizeof(tbuf), "PIANO PARAMS · %s", SP_ENGINES[idx].long_name);
+        snprintf(tbuf, sizeof(tbuf), "SYNTH LAB · %s", SP_ENGINES[idx].long_name);
         lv_label_set_text(s_pp_title_lbl, tbuf);
+        lv_obj_set_style_text_color(s_pp_title_lbl, pp_engine_color(idx), 0);
     }
     pp_update_engine_chips();
     pp_update_preset_chip_labels();
@@ -6029,10 +6087,10 @@ void ui_create_piano_params_screen() {
     // Title
     s_pp_title_lbl = lv_label_create(scr_piano_params);
     char tbuf[64];
-    snprintf(tbuf, sizeof(tbuf), "PIANO PARAMS · %s", SP_ENGINES[s_pp_engine_idx].long_name);
+    snprintf(tbuf, sizeof(tbuf), "SYNTH LAB · %s", SP_ENGINES[s_pp_engine_idx].long_name);
     lv_label_set_text(s_pp_title_lbl, tbuf);
-    lv_obj_set_style_text_font(s_pp_title_lbl, &lv_font_montserrat_22, 0);
-    lv_obj_set_style_text_color(s_pp_title_lbl, RED808_ACCENT, 0);
+    lv_obj_set_style_text_font(s_pp_title_lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_pp_title_lbl, pp_engine_color(s_pp_engine_idx), 0);
     lv_obj_set_pos(s_pp_title_lbl, 16, 8);
 
     // Engine tabs: four large portrait-safe targets.

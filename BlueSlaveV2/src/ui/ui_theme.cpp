@@ -164,7 +164,7 @@ void theme_encoder_color(int track, uint8_t out_rgb[3]) {
 
 // Compare two lv_color_t values (RGB565) — avoids 32-bit roundtrip precision loss
 static inline bool color_eq(lv_color_t a, lv_color_t b) {
-    return a.full == b.full;
+    return lv_color_eq(a, b);
 }
 
 // Recursively restyle all children with current theme colors
@@ -186,37 +186,39 @@ static void restyle_recursive(lv_obj_t* obj,
     // Must cover ALL states set by apply_stable_button_style so no stale
     // colours survive a theme switch.
     static const lv_state_t bg_states[] = {
-        0, LV_STATE_PRESSED, LV_STATE_FOCUSED, LV_STATE_FOCUS_KEY,
+        LV_STATE_DEFAULT, LV_STATE_PRESSED, LV_STATE_FOCUSED, LV_STATE_FOCUS_KEY,
         LV_STATE_CHECKED, (lv_state_t)(LV_STATE_PRESSED | LV_STATE_FOCUSED),
         (lv_state_t)(LV_STATE_PRESSED | LV_STATE_CHECKED)
     };
     for (int si = 0; si < 7; si++) {
         lv_state_t st = bg_states[si];
-        lv_color_t bg = lv_obj_get_style_bg_color(obj, st);
+        lv_style_selector_t sel = (lv_style_selector_t)(LV_PART_MAIN | st);
+        lv_color_t bg = lv_obj_get_style_bg_color(obj, LV_PART_MAIN);
         bool matched = false;
         for (int i = 0; i < 13 && !matched; i++) {
-            if (color_eq(bg, p_ui[i])) { lv_obj_set_style_bg_color(obj, c_ui[i], st); matched = true; }
+            if (color_eq(bg, p_ui[i])) { lv_obj_set_style_bg_color(obj, c_ui[i], sel); matched = true; }
         }
         for (int i = 0; i < 16 && !matched; i++) {
-            if (color_eq(bg, p_track[i])) { lv_obj_set_style_bg_color(obj, c_track[i], st); matched = true; }
+            if (color_eq(bg, p_track[i])) { lv_obj_set_style_bg_color(obj, c_track[i], sel); matched = true; }
         }
     }
 
     // Check border color — same states
     for (int si = 0; si < 7; si++) {
         lv_state_t st = bg_states[si];
-        lv_color_t bd = lv_obj_get_style_border_color(obj, st);
+        lv_style_selector_t sel = (lv_style_selector_t)(LV_PART_MAIN | st);
+        lv_color_t bd = lv_obj_get_style_border_color(obj, LV_PART_MAIN);
         bool matched = false;
         for (int i = 0; i < 13 && !matched; i++) {
-            if (color_eq(bd, p_ui[i])) { lv_obj_set_style_border_color(obj, c_ui[i], st); matched = true; }
+            if (color_eq(bd, p_ui[i])) { lv_obj_set_style_border_color(obj, c_ui[i], sel); matched = true; }
         }
         for (int i = 0; i < 16 && !matched; i++) {
-            if (color_eq(bd, p_track[i])) { lv_obj_set_style_border_color(obj, c_track[i], st); matched = true; }
+            if (color_eq(bd, p_track[i])) { lv_obj_set_style_border_color(obj, c_track[i], sel); matched = true; }
         }
     }
 
     // Check text color
-    lv_color_t tx = lv_obj_get_style_text_color(obj, 0);
+    lv_color_t tx = lv_obj_get_style_text_color(obj, LV_PART_MAIN);
     {
         bool matched = false;
         for (int i = 0; i < 13 && !matched; i++) {
