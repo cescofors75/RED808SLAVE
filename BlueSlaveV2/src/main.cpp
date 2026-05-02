@@ -975,6 +975,11 @@ static void initByteButtonLeds(int moduleIdx) {
 static bool navigateToScreen(Screen screen) {
     if (currentScreen == screen) return true;
 
+    if (!lvgl_port_lock(200)) return false;
+    bool ready = ui_ensure_screen_created(screen);
+    lvgl_port_unlock();
+    if (!ready) return false;
+
     lv_obj_t* target = NULL;
     switch (screen) {
         case SCREEN_BOOT:        target = scr_boot; break;
@@ -988,8 +993,10 @@ static bool navigateToScreen(Screen screen) {
         case SCREEN_PATTERNS:    target = scr_patterns; break;
         case SCREEN_SDCARD:    target = scr_sdcard; break;
         case SCREEN_PERFORMANCE: target = scr_performance; break;
-        case SCREEN_SAMPLES:     target = scr_samples; break;
+        case SCREEN_SAMPLES:     target = scr_menu; break;
         case SCREEN_SEQ_CIRCLE:  target = scr_seq_circle; break;
+        case SCREEN_MELODY:      target = scr_melody; break;
+        case SCREEN_PIANO_PARAMS:target = scr_piano_params; break;
         case SCREEN_PIANO:       target = scr_piano; break;
         default: break;
     }
@@ -2420,7 +2427,7 @@ void updateUI() {
 void setup() {
     Serial.begin(115200);
     // Wait up to 500ms for USB CDC, skip wait if no monitor connected
-    { unsigned long _t = millis(); while (!Serial && (millis()-_t) < 500) delay(10); }
+    { unsigned long _t = millis(); while (!Serial && (millis()-_t) < 50) delay(5); }
     delay(5);
     RED808_LOG_PRINTLN("\n====================================");
     RED808_LOG_PRINTLN("  Blue808Slave V6");
@@ -2499,32 +2506,16 @@ void setup() {
     // 8b. UART bridge to ESP32-P4 Visual Beast
     uart_bridge_init();
 
-    // 9. Now start LVGL task (safe - I2C scanning is done)
-    lvgl_port_task_start();
-    RED808_LOG_PRINTLN("[LVGL] Task started");
-
-    // 10. Create all UI screens (must be inside LVGL lock)
+    // 9. Create initial UI screens (must be inside LVGL lock)
     //    Widgets now allocate from PSRAM via lv_conf.h, keeping internal heap free
-    RED808_LOG_PRINTLN("[UI] Creating screens...");
+    RED808_LOG_PRINTLN("[UI] Creating initial screens...");
     if (lvgl_port_lock(1000)) {
         ui_theme_init();
 
         ui_create_boot_screen();      // boot animation — shown first; auto-navigates to menu
-        ui_create_seq_circle_screen();
         ui_create_menu_screen();
         ui_create_live_screen();
         ui_create_sequencer_screen();
-        ui_create_volumes_screen();
-        // ui_create_filters_screen(); // FX screen removed
-        ui_create_settings_screen();
-        ui_create_diagnostics_screen();
-        ui_create_patterns_screen();
-        ui_create_sdcard_screen();
-        ui_create_performance_screen();
-        ui_create_samples_screen();
-        ui_create_melody_screen();    // v2.6 — piano roll editor
-        ui_create_piano_params_screen();  // v2.7 — synth params editor
-        ui_create_piano_screen();     // v2.10 — live vertical piano keyboard
 
         // Start on boot animation; boot_timer_cb() will navigate to SCREEN_MENU when complete
         currentScreen = SCREEN_BOOT;
@@ -2535,8 +2526,12 @@ void setup() {
         lv_timer_handler();  // two passes: layout + flush
 
         lvgl_port_unlock();
-        RED808_LOG_PRINTLN("[UI] All screens created");
+        RED808_LOG_PRINTLN("[UI] Initial screens created; secondary screens lazy-load on first use");
     }
+
+    // 10. Start LVGL task after initial screen creation to avoid setup-time mutex contention.
+    lvgl_port_task_start();
+    RED808_LOG_PRINTLN("[LVGL] Task started");
 
     // Backlight ON only after boot screen is rendered — eliminates PSRAM garbage flicker
     io_ext_backlight_on();
@@ -2576,7 +2571,7 @@ static void touch_task(void* arg) {
         // internally (returns immediately when !bufferReady).
         // INT pin polling was unreliable (pulse mode, missed >99% of events).
         gt911_poll();
-        vTaskDelay(pdMS_TO_TICKS(1));  // ~1kHz poll, GT911 updates at ~100Hz
+        vTaskDelay(pdMS_TO_TICKS(5));  // 200Hz poll; GT911 itself updates around 100Hz
     }
 }
 
@@ -2636,7 +2631,7 @@ static void pad_trigger_task(void* arg) {
             livePadsVisualDirty.store(true, std::memory_order_release);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1));  // ~1kHz — matches GT911 500Hz update rate
+        vTaskDelay(pdMS_TO_TICKS(2));  // 500Hz edge processing without burning a full core
     }
 }
 

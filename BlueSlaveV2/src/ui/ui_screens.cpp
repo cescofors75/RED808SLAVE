@@ -575,7 +575,58 @@ static void apply_stable_button_style(lv_obj_t* obj, lv_color_t base_color, lv_c
 // can send a fresh "hello" to master once LVGL render is done.
 volatile bool g_mel_screen_entered = false;
 
+static lv_obj_t* screen_obj(Screen screen) {
+    switch (screen) {
+        case SCREEN_BOOT:        return scr_boot;
+        case SCREEN_MENU:        return scr_menu;
+        case SCREEN_LIVE:        return scr_live;
+        case SCREEN_SEQUENCER:   return scr_sequencer;
+        case SCREEN_VOLUMES:     return scr_volumes;
+        case SCREEN_FILTERS:     return scr_menu;       // FX screen removed
+        case SCREEN_SETTINGS:    return scr_settings;
+        case SCREEN_DIAGNOSTICS: return scr_diagnostics;
+        case SCREEN_PATTERNS:    return scr_patterns;
+        case SCREEN_SDCARD:      return scr_sdcard;
+        case SCREEN_PERFORMANCE: return scr_performance;
+        case SCREEN_SAMPLES:     return scr_menu;       // Samples screen removed
+        case SCREEN_SEQ_CIRCLE:  return scr_seq_circle;
+        case SCREEN_MELODY:      return scr_melody;
+        case SCREEN_PIANO_PARAMS:return scr_piano_params;
+        case SCREEN_PIANO:       return scr_piano;
+        default:                 return NULL;
+    }
+}
+
+bool ui_ensure_screen_created(Screen screen) {
+    if (screen_obj(screen)) return true;
+
+    switch (screen) {
+        case SCREEN_BOOT:        ui_create_boot_screen(); break;
+        case SCREEN_MENU:        ui_create_menu_screen(); break;
+        case SCREEN_LIVE:        ui_create_live_screen(); break;
+        case SCREEN_SEQUENCER:   ui_create_sequencer_screen(); break;
+        case SCREEN_VOLUMES:     ui_create_volumes_screen(); break;
+        case SCREEN_SETTINGS:    ui_create_settings_screen(); break;
+        case SCREEN_DIAGNOSTICS: ui_create_diagnostics_screen(); break;
+        case SCREEN_PATTERNS:    ui_create_patterns_screen(); break;
+        case SCREEN_SDCARD:      ui_create_sdcard_screen(); break;
+        case SCREEN_PERFORMANCE: ui_create_performance_screen(); break;
+        case SCREEN_SEQ_CIRCLE:  ui_create_seq_circle_screen(); break;
+        case SCREEN_MELODY:      ui_create_melody_screen(); break;
+        case SCREEN_PIANO_PARAMS:ui_create_piano_params_screen(); break;
+        case SCREEN_PIANO:       ui_create_piano_screen(); break;
+        case SCREEN_FILTERS:
+        case SCREEN_SAMPLES:
+            return scr_menu != NULL;
+        default:
+            return false;
+    }
+    return screen_obj(screen) != NULL;
+}
+
 static void nav_to(Screen screen, lv_obj_t* scr) {
+    if (!ui_ensure_screen_created(screen)) return;
+    scr = screen_obj(screen);
     if (!scr) return;
     if (currentScreen == screen || lv_scr_act() == scr) return;
 

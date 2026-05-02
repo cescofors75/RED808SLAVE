@@ -5,6 +5,7 @@
 
 #include "lvgl.h"
 #include <ArduinoJson.h>
+#include "../../include/system_state.h"
 
 // Screen objects
 extern lv_obj_t* scr_menu;
@@ -41,6 +42,7 @@ void ui_create_seq_circle_screen();
 void ui_create_melody_screen();      // v2.6 — piano roll editor
 void ui_create_piano_params_screen(); // v2.7 — synth params editor
 void ui_create_piano_screen();       // v2.10 — live vertical piano keyboard
+bool ui_ensure_screen_created(Screen screen);
 
 // v2.9 — Set by nav_to(SCREEN_MELODY) so loop() can request a fresh
 // melody_sync from master once the LVGL render is done.

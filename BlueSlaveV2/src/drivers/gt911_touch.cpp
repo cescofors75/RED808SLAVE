@@ -244,11 +244,17 @@ TouchPoint gt911_read() {
         if (gt911_read_reg(GT911_REG_POINT1, data, read_len)) {
             for (uint8_t point_idx = 0; point_idx < touchCount; point_idx++) {
                 uint8_t base = point_idx * 8;
-                uint16_t raw_x = (uint16_t)data[base + 0] | ((uint16_t)data[base + 1] << 8);
-                uint16_t raw_y = (uint16_t)data[base + 2] | ((uint16_t)data[base + 3] << 8);
+                // Waveshare 7B GT911 point data starts with track ID at byte 0.
+                // Coordinates are stored after it as little-endian 16-bit values.
+                uint16_t raw_x = (uint16_t)data[base + 1] | ((uint16_t)data[base + 2] << 8);
+                uint16_t raw_y = (uint16_t)data[base + 3] | ((uint16_t)data[base + 4] << 8);
                 TouchPoint mapped = {0, 0, false};
                 if (!gt911_map_point(raw_x, raw_y, &mapped)) {
-                    continue;
+                    raw_x = (uint16_t)data[base + 0] | ((uint16_t)data[base + 1] << 8);
+                    raw_y = (uint16_t)data[base + 2] | ((uint16_t)data[base + 3] << 8);
+                    if (!gt911_map_point(raw_x, raw_y, &mapped)) {
+                        continue;
+                    }
                 }
 
                 if (valid_points == 0) {

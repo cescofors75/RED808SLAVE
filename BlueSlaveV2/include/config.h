@@ -27,9 +27,9 @@
 #define SCREEN_WIDTH   1024
 #define SCREEN_HEIGHT  600
 
-// Mounting/orientation: 1 = rotate the whole S3 LCD/touch 180 degrees.
+// Mounting/orientation: 1 = rotate S3 panel output 180 degrees and mirror GT911 touch mapping.
 #ifndef S3_LCD_ROTATE_180
-#define S3_LCD_ROTATE_180 0
+#define S3_LCD_ROTATE_180 1
 #endif
 
 // Portrait mode: 0 = landscape (1024x600), 1 = portrait (600x1024 via SW rotation)
@@ -206,7 +206,7 @@ namespace Config {
     constexpr int DEFAULT_TRACK_VOLUME = 75;
 
     // Timing
-    constexpr uint32_t ENCODER_READ_MS    = 5;   // 200Hz polling — fast encoder response
+    constexpr uint32_t ENCODER_READ_MS    = 12;  // I2C encoders do not need 200Hz; frees bus/CPU for LVGL+touch
     constexpr uint32_t BUTTON_DEBOUNCE_MS = 25;
     constexpr uint32_t LED_FLASH_MS       = 100;
     constexpr uint32_t SCREEN_UPDATE_MS   = 12;  // ~83fps UI update — smoother step animation

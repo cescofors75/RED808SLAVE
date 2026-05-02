@@ -81,7 +81,9 @@ esp_lcd_panel_handle_t rgb_lcd_init() {
 #if S3_LCD_ROTATE_180
     esp_err_t mirror_err = esp_lcd_panel_mirror(panel_handle, true, true);
     if (mirror_err != ESP_OK) {
-        ESP_LOGW(TAG, "Panel mirror 180 not supported by driver: %s", esp_err_to_name(mirror_err));
+        ESP_LOGW(TAG, "Panel mirror 180 not supported by RGB driver: %s", esp_err_to_name(mirror_err));
+    } else {
+        ESP_LOGI(TAG, "Panel mirror 180 enabled");
     }
 #endif
 
