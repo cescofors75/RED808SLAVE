@@ -33,10 +33,10 @@
 #define LCD_V_RES   600
 #endif
 
-// Portrait mode: display is landscape 1024×600 natively.
-// For portrait, LVGL renders 600×1024 with sw_rotate.
+// Native panel mode: Guition P4 is landscape 1024x600.
+// Keep this at 0 unless the display port implements explicit LVGL rotation.
 #ifndef PORTRAIT_MODE
-#define PORTRAIT_MODE 1
+#define PORTRAIT_MODE 0
 #endif
 
 #if PORTRAIT_MODE
@@ -148,11 +148,9 @@ namespace Config {
     constexpr int MAX_VOLUME    = 150;
     constexpr int DEFAULT_BPM   = 120;
 
-    // UI timing
-    // 30Hz: reduces LVGL mutex contention on Core1 so the render task (Core0)
-    // and the touch task have lower latency. State-only updates (labels, pad
-    // colors) don't need 100Hz — hit flashes are driven by the 60Hz render loop.
-    constexpr uint32_t SCREEN_UPDATE_MS = 33;
+    // UI timing. Updates run inside the LVGL task, not from Core1 loop(), so
+    // 60Hz state refresh no longer stalls WiFi/UART/pad handling.
+    constexpr uint32_t SCREEN_UPDATE_MS = 16;
     constexpr uint32_t UART_RX_TIMEOUT_MS = 50;
     constexpr uint32_t HEARTBEAT_TIMEOUT_MS = 3000;
 }

@@ -5,8 +5,6 @@
 
 #include "udp_handler.h"
 #include "uart_handler.h"   // for P4State p4
-#include "ui/ui_screens.h"  // v2.9 — piano_apply_melody_sync
-#include "drivers/lvgl_port.h" // v2.9 — lvgl_port_lock/unlock
 #include "../include/config.h"
 #include <Arduino.h>
 #include <WiFi.h>
@@ -490,6 +488,8 @@ static void processJson(const char* json, int len) {
         p4.seq_volume = clamp_int(doc["sequencerVolume"] | p4.seq_volume, 0, 150);
         p4.live_volume = clamp_int(doc["liveVolume"] | p4.live_volume, 0, 150);
         uart_send_to_s3(MSG_SYSTEM, SYS_VOLUME, (uint8_t)masterVol);
+        uart_send_to_s3(MSG_SYSTEM, SYS_SEQ_VOL, (uint8_t)p4.seq_volume);
+        uart_send_to_s3(MSG_SYSTEM, SYS_LIVE_VOL, (uint8_t)p4.live_volume);
 
         JsonArray mute = doc["mute"];
         if (mute) {
@@ -520,7 +520,7 @@ static void processJson(const char* json, int len) {
                 if (track >= 16) break;
                 int vol = clamp_int(value.as<int>(), 0, 150);
                 p4.track_volume[track] = vol;
-                uart_send_to_s3(MSG_TRACK, TRK_VOLUME | (track & 0x0F), (uint8_t)clamp_int(vol, 0, 100));
+                uart_send_to_s3(MSG_TRACK, TRK_VOLUME | (track & 0x0F), (uint8_t)vol);
                 track++;
             }
         }
@@ -635,12 +635,17 @@ static void processJson(const char* json, int len) {
         p4.master_volume = v;
         p4.seq_volume = v;
         p4.live_volume = v;
+        uart_send_to_s3(MSG_SYSTEM, SYS_VOLUME, (uint8_t)v);
+        uart_send_to_s3(MSG_SYSTEM, SYS_SEQ_VOL, (uint8_t)v);
+        uart_send_to_s3(MSG_SYSTEM, SYS_LIVE_VOL, (uint8_t)v);
     }
     else if (strcmp(cmd, "volume_seq_sync") == 0 || strcmp(cmd, "setSequencerVolume") == 0) {
         p4.seq_volume = clamp_int(doc["value"] | 75, 0, 150);
+        uart_send_to_s3(MSG_SYSTEM, SYS_SEQ_VOL, (uint8_t)p4.seq_volume);
     }
     else if (strcmp(cmd, "volume_live_sync") == 0 || strcmp(cmd, "setLiveVolume") == 0) {
         p4.live_volume = clamp_int(doc["value"] | 75, 0, 150);
+        uart_send_to_s3(MSG_SYSTEM, SYS_LIVE_VOL, (uint8_t)p4.live_volume);
     }
     // ----- Track volumes -----
     else if (strcmp(cmd, "trackVolumes") == 0 || strcmp(cmd, "track_volumes") == 0 ||
@@ -654,6 +659,7 @@ static void processJson(const char* json, int len) {
             for (JsonVariant v : arr) {
                 if (i >= 16) break;
                 p4.track_volume[i] = clamp_int(v.as<int>(), 0, 150);
+                uart_send_to_s3(MSG_TRACK, TRK_VOLUME | (i & 0x0F), (uint8_t)p4.track_volume[i]);
                 i++;
             }
         }
@@ -661,7 +667,10 @@ static void processJson(const char* json, int len) {
     else if (strcmp(cmd, "trackVolume") == 0 || strcmp(cmd, "getTrackVolume") == 0) {
         int trk = doc["track"] | 0;
         int vol = clamp_int(doc["volume"] | doc["value"] | 75, 0, 150);
-        if (trk >= 0 && trk < 16) p4.track_volume[trk] = vol;
+        if (trk >= 0 && trk < 16) {
+            p4.track_volume[trk] = vol;
+            uart_send_to_s3(MSG_TRACK, TRK_VOLUME | (trk & 0x0F), (uint8_t)vol);
+        }
     }
     // ----- FX -----
     else if (strcmp(cmd, "setFilter") == 0) {
@@ -693,16 +702,18 @@ static void processJson(const char* json, int len) {
             udp_send_get_pattern(idx);
         }
     }
-    // v2.9 — master-authoritative melody state: apply to P4 piano UI
+    // v2.9 — master-authoritative melody state: defer P4 piano UI apply
+    // to the LVGL task. UDP/Core1 must never block on the LVGL mutex.
     else if (strcmp(cmd, "melody_sync") == 0) {
         uint8_t eng = (uint8_t)(doc["engine"] | 3);
         uint8_t oct = (uint8_t)(doc["octave"] | 4);
         bool    rec = doc["rec"] | false;
         uint8_t pad = (uint8_t)(doc["pad"]    | 0);
-        if (lvgl_port_lock(200)) {
-            piano_apply_melody_sync(eng, oct, rec, pad);
-            lvgl_port_unlock();
-        }
+        g_pending_melody_from_s3.engine = eng;
+        g_pending_melody_from_s3.octave = oct;
+        g_pending_melody_from_s3.rec    = rec ? 1 : 0;
+        g_pending_melody_from_s3.pad    = pad;
+        g_pending_melody_from_s3.pending = true;
         // v2.9 — forward melody state to S3 so its melody screen stays in sync.
         // S3 has no WiFi; it receives these via UART and applies under LVGL lock.
         uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MELODY_ENGINE, eng);

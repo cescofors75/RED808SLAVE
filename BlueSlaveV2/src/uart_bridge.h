@@ -29,6 +29,7 @@ void uart_bridge_heartbeat(void);
 // UART link statistics (for diagnostics)
 struct UartStats {
     uint32_t tx_packets;
+    uint32_t tx_dropped;          // skipped due to full TX buffer
     uint32_t rx_packets;
     uint32_t rx_checksum_errors;
     uint32_t rx_framing_errors;   // unexpected start byte
@@ -43,7 +44,6 @@ void uart_bridge_send_play_state(bool playing);
 void uart_bridge_send_pattern(int pattern);
 void uart_bridge_send_step(int step);
 void uart_bridge_send_volume(int master, int seq, int live);
-void uart_bridge_send_wifi_state(bool wifi, bool master);
 void uart_bridge_send_theme(int theme);
 void uart_bridge_send_screen(int screen);
 

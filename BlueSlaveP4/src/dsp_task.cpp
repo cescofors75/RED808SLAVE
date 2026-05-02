@@ -59,8 +59,6 @@ void dsp_set_bpm(float bpm) {
 // DSP TASK — runs continuously on Core 0
 // =============================================================================
 static void dsp_task_func(void* /*arg*/) {
-    TickType_t xLastWake = xTaskGetTickCount();
-
     for (;;) {
         bool changed = false;
 
@@ -88,7 +86,7 @@ static void dsp_task_func(void* /*arg*/) {
         s_spectrum.dirty = changed;
         portEXIT_CRITICAL(&s_spectrum_mux);
 
-        vTaskDelayUntil(&xLastWake, pdMS_TO_TICKS(DSP_TICK_MS));
+        vTaskDelay(pdMS_TO_TICKS(DSP_TICK_MS));
     }
 }
 

@@ -164,7 +164,7 @@ uint8_t encoderLEDColors[Config::MAX_TRACKS][3] = {
 // Live pad touch guard (prevent phantom triggers on screen enter)
 unsigned long liveScreenEnteredMs = 0;
 static constexpr unsigned long LIVE_TOUCH_GUARD_MS = 150;
-static constexpr unsigned long TOUCH_RELEASE_DEBOUNCE_MS = 16;  // avoid false releases on fast GT911 cache gaps
+static constexpr unsigned long TOUCH_RELEASE_DEBOUNCE_MS = 8;   // avoid false releases on fast GT911 cache gaps
 static constexpr unsigned long LIVE_PAD_REPEAT_INTERVAL_MS = 75;
 static constexpr unsigned long LIVE_PAD_FLASH_MS = 120;
 static unsigned long livePadReleaseMs[Config::MAX_SAMPLES] = {}; // when each pad last went untouched
@@ -286,13 +286,13 @@ static uint32_t ui_refresh_interval_ms(Screen screen, bool playing_now) {
         case SCREEN_SEQ_CIRCLE:
             return playing_now ? 16 : 80;
         case SCREEN_VOLUMES:
-            return 33;     // smooth but relaxed
+            return 50;     // event-driven sliders, no need to dirty LVGL at 30Hz
         case SCREEN_FILTERS:
             return 80;
         case SCREEN_PATTERNS:
             return 150;
         case SCREEN_PIANO:
-            return 16;
+            return 50;     // key events are callbacks; periodic refresh is light
         case SCREEN_DIAGNOSTICS:
         case SCREEN_PERFORMANCE:
             return 300;    // near-static text
@@ -2576,7 +2576,7 @@ static void touch_task(void* arg) {
         // internally (returns immediately when !bufferReady).
         // INT pin polling was unreliable (pulse mode, missed >99% of events).
         gt911_poll();
-        vTaskDelay(pdMS_TO_TICKS(2));  // ~500Hz poll, GT911 updates at ~100Hz
+        vTaskDelay(pdMS_TO_TICKS(1));  // ~1kHz poll, GT911 updates at ~100Hz
     }
 }
 
@@ -2749,12 +2749,17 @@ void loop() {
 
                 const int seqVel = map(constrain(sequencerVolume, 0, Config::MAX_VOLUME),
                                        0, Config::MAX_VOLUME, 32, 127);
+                bool anySeqPadFlash = false;
                 for (int t = 0; t < Config::MAX_TRACKS; t++) {
                     if (patterns[currentPattern].steps[t][safeStep] &&
                         !patterns[currentPattern].muted[t]) {
                         const int hitVel = sequencer_groove_velocity(t, safeStep, seqVel);
                         livePadFlashUntilMs[t] = now + LIVE_PAD_FLASH_MS;
+                        anySeqPadFlash = true;
                     }
+                }
+                if (anySeqPadFlash && currentScreen == SCREEN_LIVE) {
+                    livePadsVisualDirty.store(true, std::memory_order_release);
                 }
             }
         } else {

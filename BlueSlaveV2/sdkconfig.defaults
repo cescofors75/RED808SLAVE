@@ -1,0 +1,8 @@
+# BlueSlaveV2 — ESP32-S3 SDK overrides
+
+# ── Task Watchdog ─────────────────────────────────────────────────────────────
+# LVGL 9 FULL mode on 1024x600 takes ~31ms per frame (pixel-swap + vsync).
+# Extend WDT to 30s so screen transitions / SD loads never trip the timer.
+# Disable panic so a genuine stall prints the culprit instead of hard-resetting.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+CONFIG_ESP_TASK_WDT_PANIC=n

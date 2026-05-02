@@ -32,14 +32,14 @@
 // DISPLAY / HAL
 // =============================================================================
 #define LV_DPI_DEF         130
-#define LV_DEF_REFR_PERIOD 8
+#define LV_DEF_REFR_PERIOD 16   // 60fps target; SW renderer on 1024x600 needs >8ms
 #define LV_USE_OS          LV_OS_NONE
 
 // =============================================================================
 // RENDERING
 // =============================================================================
-#define LV_DRAW_BUF_STRIDE_ALIGN 1
-#define LV_DRAW_BUF_ALIGN        4
+#define LV_DRAW_BUF_STRIDE_ALIGN 64
+#define LV_DRAW_BUF_ALIGN        64
 #define LV_USE_DRAW_SW           1
 #define LV_DRAW_SW_SUPPORT_RGB565    1
 #define LV_DRAW_SW_SUPPORT_RGB565_SWAPPED 0
@@ -61,6 +61,14 @@
 #define LV_DRAW_SW_CIRCLE_CACHE_SIZE 4
 #define LV_USE_DRAW_SW_COMPLEX_GRADIENTS 0
 #define LV_USE_DRAW_SW_ASM LV_DRAW_SW_ASM_NONE
+
+// ESP32-P4 PPA backend is present in LVGL 9.5, but the Arduino core currently
+// ships a fixed sdkconfig where CONFIG_LV_DRAW_BUF_ALIGN != L2 cache line size.
+// Enabling it fails compilation inside LVGL's PPA backend. Keep zero-copy DPI
+// framebuffers as the stable hardware path until the framework config is rebuilt.
+#define LV_USE_PPA      0
+#define LV_USE_PPA_IMG  0
+#define LV_PPA_BURST_LENGTH 128
 
 // =============================================================================
 // FONTS

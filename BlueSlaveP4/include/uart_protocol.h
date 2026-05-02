@@ -242,13 +242,13 @@ static inline bool uart_validate_packet(const UartBasicPacket* pkt) {
             uint8_t trk = pkt->id & 0x0F;
             if (trk >= 16) return false;
             if (sub == TRK_MUTE_BIT || sub == TRK_SOLO_BIT) return pkt->value <= 1;
-            if (sub == TRK_VOLUME)                          return pkt->value <= 100;
+            if (sub == TRK_VOLUME)                          return pkt->value <= 150;
             return false;
         }
         case MSG_SCREEN:
             return pkt->id == SCR_NAVIGATE;
         case MSG_TOUCH_CMD:
-            return pkt->id <= TCMD_MELODY_NOTE;
+            return pkt->id <= TCMD_PIANO_NOTE_ON;
         case MSG_PATTERN_DATA:
         case MSG_SD_DATA:
         case MSG_SYNTH_DATA:

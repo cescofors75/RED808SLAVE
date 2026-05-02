@@ -30,6 +30,14 @@ static portMUX_TYPE s_usb_rx_mux = portMUX_INITIALIZER_UNLOCKED;
 // CDC device handle
 static cdc_acm_dev_hdl_t s_cdc_dev = NULL;
 static volatile bool s_usb_connected = false;
+static SemaphoreHandle_t s_cdc_tx_mutex = NULL;  // Protects s_cdc_dev during TX
+
+// TX queue — decouples loop()/Core1 from USB blocking on Core0
+// usb_cdc_write() enqueues (non-blocking); usb_cdc_tx_task drains from Core0
+#define CDC_TX_QUEUE_DEPTH 16
+#define CDC_TX_MAX_LEN     64  // basic pkt=5, extended pattern payload=32 + hdr/checksum
+typedef struct { uint8_t data[CDC_TX_MAX_LEN]; uint8_t len; } CdcTxPkt;
+static QueueHandle_t s_tx_queue = NULL;
 static volatile bool s_usb_init_ok = false;
 static unsigned long s_last_open_attempt = 0;
 static const unsigned long OPEN_RETRY_MS = 2000;
@@ -74,11 +82,16 @@ static void on_cdc_event(const cdc_acm_host_dev_event_data_t *event, void *user_
             snprintf(buf, sizeof(buf), "[USB-CDC] DISCONNECTED (#%d) at %lums\n",
                      disconnect_count, millis());
             P4_LOG_PRINT(buf);
-            if (s_cdc_dev) {
-                cdc_acm_host_close(s_cdc_dev);
-                s_cdc_dev = NULL;
-            }
+            // Acquire TX mutex to synchronize with any in-progress usb_cdc_write().
+            // IMPORTANT: Do NOT call cdc_acm_host_close() from within this callback.
+            // Calling it here causes re-entry into the CDC driver (which is still
+            // processing this event) and triggers an assertion/crash in the USB host
+            // library. The driver auto-invalidates the handle after the callback returns.
+            // usb_cdc_process() will call cdc_acm_host_open() to reconnect.
+            if (s_cdc_tx_mutex) xSemaphoreTake(s_cdc_tx_mutex, pdMS_TO_TICKS(50));
+            s_cdc_dev = NULL;
             s_usb_connected = false;
+            if (s_cdc_tx_mutex) xSemaphoreGive(s_cdc_tx_mutex);
             }
             break;
         case CDC_ACM_HOST_ERROR:
@@ -135,6 +148,30 @@ static void on_new_dev(usb_device_handle_t usb_dev) {
 }
 
 // =============================================================================
+// USB CDC TX TASK — Core 0, priority 3
+// Runs below USB host / LVGL tasks (pri 5) but drains the TX queue
+// whenever Core 0 has free cycles. This prevents loop()/Core1 from ever
+// blocking on cdc_acm_host_data_tx_blocking(), which was the root cause
+// of the LVGL-9 crash (USB TX timeout → corrupted CDC driver state).
+// =============================================================================
+static void usb_cdc_tx_task(void* arg) {
+    CdcTxPkt pkt;
+    while (true) {
+        if (xQueueReceive(s_tx_queue, &pkt, pdMS_TO_TICKS(20)) == pdTRUE) {
+            // Take mutex to serialise with on_cdc_event disconnect handler
+            if (xSemaphoreTake(s_cdc_tx_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                if (s_cdc_dev && s_usb_connected) {
+                    // 50 ms timeout is generous — this task is not holding any
+                    // shared mutex that other tasks need, so blocking here is safe
+                    cdc_acm_host_data_tx_blocking(s_cdc_dev, pkt.data, pkt.len, 50);
+                }
+                xSemaphoreGive(s_cdc_tx_mutex);
+            }
+        }
+    }
+}
+
+// =============================================================================
 // USB HOST DAEMON TASK
 // =============================================================================
 static void usb_host_lib_task(void *arg) {
@@ -157,6 +194,20 @@ static void usb_host_lib_task(void *arg) {
 void usb_cdc_init(void) {
     P4_LOG_PRINTLN("[USB-CDC] === Initializing USB Host ===");
 
+    // Create TX mutex (guards s_cdc_dev access between write and disconnect)
+    if (!s_cdc_tx_mutex) {
+        s_cdc_tx_mutex = xSemaphoreCreateMutex();
+    }
+
+    // Create TX queue — non-blocking enqueue from loop()/Core1
+    if (!s_tx_queue) {
+        s_tx_queue = xQueueCreate(CDC_TX_QUEUE_DEPTH, sizeof(CdcTxPkt));
+        if (!s_tx_queue) {
+            P4_LOG_PRINTLN("[USB-CDC] Failed to create TX queue!");
+            return;
+        }
+    }
+
     // 1. Install USB Host Library (drives OTG-HS controller)
     const usb_host_config_t host_config = {
         .skip_phy_setup = false,
@@ -177,6 +228,16 @@ void usb_cdc_init(void) {
         return;
     }
     P4_LOG_PRINTLN("[USB-CDC] Daemon task created");
+
+    // 3b. TX task — Core 0, priority 3 (below USB host/LVGL at 5)
+    // Drains s_tx_queue when Core 0 has free cycles; never blocks loop()
+    ok = xTaskCreatePinnedToCore(
+        usb_cdc_tx_task, "usb_tx", 2048, NULL, 3, NULL, 0);
+    if (ok != pdPASS) {
+        P4_LOG_PRINTLN("[USB-CDC] Failed to create usb_tx task!");
+    } else {
+        P4_LOG_PRINTLN("[USB-CDC] TX task created (Core0, pri3)");
+    }
 
     // 3. Install CDC-ACM class driver with new_dev callback for diagnostics
     const cdc_acm_host_driver_config_t drv_cfg = {
@@ -321,9 +382,19 @@ int usb_cdc_read(void) {
 }
 
 size_t usb_cdc_write(const uint8_t* data, size_t len) {
-    if (!s_cdc_dev || !s_usb_connected || !data || len == 0) return 0;
-    esp_err_t err = cdc_acm_host_data_tx_blocking(s_cdc_dev, data, len, 100);
-    return (err == ESP_OK) ? len : 0;
+    // Non-blocking enqueue — loop()/Core1 NEVER waits on USB hardware.
+    // The actual cdc_acm_host_data_tx_blocking() runs from usb_cdc_tx_task
+    // on Core0, where the USB host lib task also lives, eliminating the
+    // cross-core blocking that was causing TX timeouts and CDC driver crashes
+    // under LVGL 9's heavier Core0 load.
+    if (!s_usb_connected || !data || len == 0 || len > CDC_TX_MAX_LEN) return 0;
+    if (!s_tx_queue) return 0;
+    CdcTxPkt pkt;
+    memcpy(pkt.data, data, len);
+    pkt.len = (uint8_t)len;
+    // xQueueSend with 0 timeout: drop silently if queue full (pad events are
+    // best-effort visual sync; dropped frames don't affect audio)
+    return (xQueueSend(s_tx_queue, &pkt, 0) == pdTRUE) ? len : 0;
 }
 
 const char* usb_cdc_status_str(void) {

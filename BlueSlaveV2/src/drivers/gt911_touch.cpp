@@ -16,6 +16,9 @@ static uint8_t gt911_addr = GT911_ADDR;
 static portMUX_TYPE gt911_cache_mux = portMUX_INITIALIZER_UNLOCKED;
 static TouchPoint gt911_cached_points[Config::TOUCH_MAX_POINTS] = {};
 static uint8_t gt911_cached_count = 0;
+static int32_t gt911_raw_max_x = Config::TOUCH_RAW_MAX_X;
+static int32_t gt911_raw_max_y = Config::TOUCH_RAW_MAX_Y;
+static bool gt911_auto_swap_xy = false;
 
 static int32_t remap_touch_axis(int32_t raw, int32_t raw_min, int32_t raw_max, int32_t screen_max) {
     if (raw_max <= raw_min || screen_max <= 0) {
@@ -69,11 +72,11 @@ static bool gt911_map_point(uint16_t raw_x, uint16_t raw_y, TouchPoint* out_poin
     int32_t x = raw_x;
     int32_t y = raw_y;
     int32_t raw_min_x = Config::TOUCH_RAW_MIN_X;
-    int32_t raw_max_x = Config::TOUCH_RAW_MAX_X;
+    int32_t raw_max_x = gt911_raw_max_x;
     int32_t raw_min_y = Config::TOUCH_RAW_MIN_Y;
-    int32_t raw_max_y = Config::TOUCH_RAW_MAX_Y;
+    int32_t raw_max_y = gt911_raw_max_y;
 
-    if (Config::TOUCH_SWAP_XY) {
+    if (Config::TOUCH_SWAP_XY || gt911_auto_swap_xy) {
         int32_t tmp = x;
         x = y;
         y = tmp;
@@ -95,6 +98,11 @@ static bool gt911_map_point(uint16_t raw_x, uint16_t raw_y, TouchPoint* out_poin
 
     x = (x * Config::TOUCH_X_SCALE_PCT) / 100 + Config::TOUCH_X_OFFSET;
     y = (y * Config::TOUCH_Y_SCALE_PCT) / 100 + Config::TOUCH_Y_OFFSET;
+
+#if S3_LCD_ROTATE_180
+    x = (SCREEN_WIDTH - 1) - x;
+    y = (SCREEN_HEIGHT - 1) - y;
+#endif
 
     if (x < 0 || x >= SCREEN_WIDTH || y < 0 || y >= SCREEN_HEIGHT) {
         return false;
@@ -182,6 +190,14 @@ void gt911_init() {
         uint16_t xRes = res[0] | (res[1] << 8);
         uint16_t yRes = res[2] | (res[3] << 8);
         RED808_LOG_PRINTF("[GT911] Resolution config: %dx%d\n", xRes, yRes);
+        if (xRes > 0 && yRes > 0) {
+            gt911_raw_max_x = (int32_t)xRes - 1;
+            gt911_raw_max_y = (int32_t)yRes - 1;
+            gt911_auto_swap_xy = (xRes <= (SCREEN_HEIGHT + 80)) && (yRes >= (SCREEN_WIDTH - 80));
+            RED808_LOG_PRINTF("[GT911] Touch map: raw=%dx%d -> lcd=%dx%d%s\n",
+                              xRes, yRes, SCREEN_WIDTH, SCREEN_HEIGHT,
+                              gt911_auto_swap_xy ? " SWAP_XY" : " DIRECT");
+        }
     }
     
     RED808_LOG_PRINTF("[GT911] Init complete, addr=0x%02X, ok=%d\n", gt911_addr, gt911_ok);

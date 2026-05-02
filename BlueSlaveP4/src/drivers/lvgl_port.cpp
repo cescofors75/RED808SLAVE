@@ -8,6 +8,7 @@
 #include "display_init.h"
 #include "../include/config.h"
 #include "../ui/ui_screens.h"
+#include "../uart_handler.h"
 #include <Arduino.h>
 #include <Wire.h>
 #include <lvgl.h>
@@ -57,14 +58,16 @@ static bool IRAM_ATTR dpi_on_refresh_done(esp_lcd_panel_handle_t panel,
 #define LVGL_BUF_PIXELS   (LCD_H_RES * LCD_V_RES)
 
 // =============================================================================
-// DISPLAY FLUSH \u2014 zero-copy swap + vsync-gated completion
-// draw_bitmap with internal FB pointer \u2192 pointer swap (no memcpy!)
-// In direct_mode + partial refresh, LVGL may call this multiple times per
-// frame (one per dirty area). Only the LAST call actually swaps + waits vsync.
+// DISPLAY FLUSH - zero-copy swap + synchronous vsync completion
+// draw_bitmap with internal FB pointer -> pointer swap (no memcpy!)
+// In DIRECT mode LVGL may call this multiple times per frame (one per dirty
+// area). Only the LAST call swaps and waits for VSYNC. Keep flush completion
+// inside the LVGL task: LVGL 9 is not safe to complete a flush from a second
+// FreeRTOS task while other code can also call LVGL on Core 1.
 // =============================================================================
 static void disp_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
     (void)area;
-    // Intermediate dirty regions \u2014 LVGL is still composing the frame.
+    // Intermediate dirty regions: LVGL is still composing the frame.
     // In direct_mode the whole FB pointer is valid, so we just ack.
     if (!lv_display_flush_is_last(disp)) {
         lv_display_flush_ready(disp);
@@ -73,15 +76,21 @@ static void disp_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px
 
     esp_lcd_panel_handle_t panel = display_get_panel();
 
-    // Step 1: swap active FB (DPI recognises internal pointer \u2192 zero-copy)
+    // Clear stale semaphore state before arming this frame. If a previous
+    // timeout was followed by a late ISR, the next flush must not consume it.
+    xSemaphoreTake(sem_gui_ready, 0);
+    xSemaphoreTake(sem_vsync_end, 0);
+
+    // Step 1: swap active FB (DPI recognises internal pointer -> zero-copy)
     esp_lcd_panel_draw_bitmap(panel, 0, 0, LCD_H_RES, LCD_V_RES, px_map);
 
-    // Step 2: arm handshake \u2014 must come AFTER draw_bitmap
+    // Step 2: arm handshake - must come AFTER draw_bitmap
     xSemaphoreGive(sem_gui_ready);
 
-    // Step 3: wait for next frame refresh (vsync ACK)
-    xSemaphoreTake(sem_vsync_end, pdMS_TO_TICKS(500));
-
+    // Step 3: wait for the next VSYNC, then complete flush in this same
+    // LVGL task context. Timeout still completes the flush so LVGL cannot
+    // wedge forever if a panel interrupt is missed.
+    xSemaphoreTake(sem_vsync_end, pdMS_TO_TICKS(34));
     lv_display_flush_ready(disp);
 }
 
@@ -93,7 +102,8 @@ static void disp_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px
 static bool gt911_initialized = false;
 
 static void gt911_init(void) {
-    Wire.begin(TOUCH_I2C_SDA, TOUCH_I2C_SCL, 400000);
+    Wire.begin(TOUCH_I2C_SDA, TOUCH_I2C_SCL, 800000);
+    Wire.setClock(800000);
 
     pinMode(TOUCH_INT_GPIO, OUTPUT);
     pinMode(TOUCH_RST_GPIO, OUTPUT);
@@ -192,7 +202,7 @@ static void touch_task(void* arg) {
 
         ui_pad_frame_update(pressed, velocity);
 
-        vTaskDelay(pdMS_TO_TICKS(5));   // 200Hz touch polling
+        vTaskDelay(pdMS_TO_TICKS(5));   // 200Hz poll, faster touch edge detection
     }
 }
 
@@ -212,16 +222,30 @@ static void lvgl_task(void* arg) {
     (void)arg;
     while (!task_started) vTaskDelay(pdMS_TO_TICKS(10));
 
-    TickType_t last_wake = xTaskGetTickCount();
+    unsigned long last_ui_update = 0;
     while (true) {
         if (lvgl_port_lock(5)) {
+            if (g_pending_melody_from_s3.pending) {
+                uint8_t engine = g_pending_melody_from_s3.engine;
+                uint8_t octave = g_pending_melody_from_s3.octave;
+                uint8_t rec    = g_pending_melody_from_s3.rec;
+                uint8_t pad    = g_pending_melody_from_s3.pad;
+                g_pending_melody_from_s3.pending = false;
+                piano_apply_melody_sync(engine, octave, rec != 0, pad);
+            }
+
+            unsigned long now = millis();
+            if (now - last_ui_update >= Config::SCREEN_UPDATE_MS) {
+                last_ui_update = now;
+                ui_update_current_screen();
+            }
+
             lv_timer_handler();
             lvgl_port_unlock();
         }
-        // 8ms (125Hz tick) lets pad flashes appear on the very next vsync
-        // after a touch. The actual paint cost is now tiny (partial refresh),
-        // so the CPU spends most of the 8ms idle waiting for vsync.
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(8));
+        // lv_timer_handler() already blocks on VSYNC during flush. Yield briefly
+        // so idle/USB/touch run, then let LVGL decide whether another frame is due.
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -229,7 +253,7 @@ static void lvgl_task(void* arg) {
 // INIT
 // =============================================================================
 void lvgl_port_init(void) {
-    P4_LOG_PRINTLN("[LVGL] Initializing (zero-copy + vsync + dual-task)...");
+    P4_LOG_PRINTLN("[LVGL] Initializing (zero-copy + sync-vsync + dual-task)...");
 
     lvgl_mutex    = xSemaphoreCreateMutex();
     sem_vsync_end = xSemaphoreCreateBinary();
@@ -289,7 +313,7 @@ void lvgl_port_init(void) {
         P4_LOG_PRINTLN("[LVGL] Failed to create render task");
     }
 
-    P4_LOG_PRINTF("[LVGL] Ready: %dx%d, zero-copy, vsync, touch+lvgl@Core0, wifi@Core1\n",
+    P4_LOG_PRINTF("[LVGL] Ready: %dx%d, zero-copy, sync-vsync, touch+lvgl@Core0, wifi@Core1\n",
                   LCD_H_RES, LCD_V_RES);
 }
 

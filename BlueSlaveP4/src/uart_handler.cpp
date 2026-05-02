@@ -76,8 +76,8 @@ static bool s_master_step_cache[16][16][16] = {};
 static bool s_master_step_cache_valid[16] = {};
 
 // Tunables — small delays keep WiFi/stack happy without stalling the loop.
-static constexpr int PP_PACKETS_PER_TICK = 6;   // packets drained per loop()
-static constexpr uint32_t PP_INTER_MS    = 2;   // pacing between bursts
+static constexpr int PP_PACKETS_PER_TICK = 12;  // packets drained per loop()
+static constexpr uint32_t PP_INTER_MS    = 1;   // pacing between bursts
 
 static void stage_pattern_push(uint8_t slot, const bool steps[16][16]) {
     s_push.phase   = PP_SELECT;
@@ -159,6 +159,13 @@ void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value) {
 void uart_send_pattern_to_s3(int pattern, const bool steps[16][16]) {
     remember_master_pattern((uint8_t)constrain(pattern, 0, 15), steps);
 
+#if P4_USB_CDC_ENABLED
+    bool has_usb_s3 = usb_cdc_connected();
+#else
+    bool has_usb_s3 = false;
+#endif
+    if (!has_usb_s3 && !p4.s3_connected) return;
+
     // Pack 16 tracks × 16 steps into 32 bytes (2 bytes/track, big-endian, bit per step)
     uint8_t packed[32];
     for (int t = 0; t < 16; t++) {
@@ -180,7 +187,7 @@ void uart_send_pattern_to_s3(int pattern, const bool steps[16][16]) {
     for (int i = 0; i < 32; i++) cs += packed[i];
 
 #if P4_USB_CDC_ENABLED
-    if (usb_cdc_connected()) {
+    if (has_usb_s3) {
         usb_cdc_write(hdr, UART_EXT_HEADER_LEN);
         usb_cdc_write(packed, 32);
         usb_cdc_write(&cs, 1);
@@ -253,8 +260,10 @@ static void process_basic(const UartBasicPacket* pkt) {
                 p4.pad_velocity[id] = val;
                 p4.pad_flash_until[id] = millis() + 120;
                 dsp_notify_pad(id, val);
-                // Relay S3 pad triggers to Master when S3 WiFi is down
-                if (!p4.s3_wifi_connected && udp_wifi_connected()) {
+                // Always relay S3 pad triggers to Master via P4 WiFi.
+                // S3 is UART-only bridge (sendLivePadTrigger is a stub — no direct
+                // WiFi path from S3 to Master). Do NOT gate on p4.s3_wifi_connected.
+                if (udp_wifi_connected()) {
                     udp_send_trigger(id, val);
                 }
             }

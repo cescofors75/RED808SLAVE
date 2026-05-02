@@ -104,7 +104,6 @@ struct DrumKit {
 };
 
 struct DiagnosticInfo {
-    bool wifiOk;
     bool touchOk;
     bool lcdOk;
     bool sdOk;

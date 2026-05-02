@@ -36,6 +36,8 @@ void uart_bridge_init(void) {
     // CH343 is transparent: whatever baud rate we set on UART0,
     // the P4 USB Host sets the same via CDC LineCoding.
     P4Serial.begin(UART_BAUD_RATE);
+    P4Serial.setRxBufferSize(2048);
+    P4Serial.setTxBufferSize(512);
     RED808_LOG_PRINTLN("[UART] Bridge: UART0 → CH343 → USB-C → P4");
 #else
     P4Serial.begin(UART_BAUD_RATE, SERIAL_8N1, Config::UART_P4_RX_PIN, Config::UART_P4_TX_PIN);
@@ -52,8 +54,9 @@ void uart_bridge_init(void) {
 void uart_bridge_send(uint8_t type, uint8_t id, uint8_t value) {
     UartBasicPacket pkt;
     uart_build_basic(&pkt, type, id, value);
-    P4Serial.write((const uint8_t*)&pkt, UART_BASIC_LEN);
-    uart_stats.tx_packets++;
+    size_t written = P4Serial.write((const uint8_t*)&pkt, UART_BASIC_LEN);
+    if (written == UART_BASIC_LEN) uart_stats.tx_packets++;
+    else uart_stats.tx_dropped++;
 }
 
 // =============================================================================
@@ -154,6 +157,34 @@ int uart_bridge_receive(void) {
                 lastLocalStepMs = millis();
                 lastLocalStepUs = micros();
                 count++;
+            } else if (pkt->type == MSG_SYSTEM && pkt->id == SYS_VOLUME) {
+                extern int masterVolume;
+                masterVolume = constrain((int)pkt->value, 0, Config::MAX_VOLUME);
+                count++;
+            } else if (pkt->type == MSG_SYSTEM && pkt->id == SYS_SEQ_VOL) {
+                extern int sequencerVolume;
+                sequencerVolume = constrain((int)pkt->value, 0, Config::MAX_VOLUME);
+                count++;
+            } else if (pkt->type == MSG_SYSTEM && pkt->id == SYS_LIVE_VOL) {
+                extern int livePadsVolume;
+                livePadsVolume = constrain((int)pkt->value, 0, Config::MAX_VOLUME);
+                count++;
+            } else if (pkt->type == MSG_TRACK) {
+                extern int trackVolumes[];
+                extern bool trackMuted[];
+                extern bool trackSolo[];
+                extern bool needsFullRedraw;
+                extern uint32_t patternUiRevision;
+                uint8_t sub = pkt->id & 0xF0;
+                uint8_t trk = pkt->id & 0x0F;
+                if (trk < Config::MAX_TRACKS) {
+                    if (sub == TRK_VOLUME) trackVolumes[trk] = constrain((int)pkt->value, 0, Config::MAX_VOLUME);
+                    else if (sub == TRK_MUTE_BIT) trackMuted[trk] = (pkt->value != 0);
+                    else if (sub == TRK_SOLO_BIT) trackSolo[trk] = (pkt->value != 0);
+                    needsFullRedraw = true;
+                    patternUiRevision++;
+                    count++;
+                }
             }
 
         } else if (peek == UART_START_EXTENDED) {
@@ -231,11 +262,6 @@ void uart_bridge_send_volume(int master, int seq, int live) {
     uart_bridge_send(MSG_SYSTEM, SYS_LIVE_VOL, (uint8_t)constrain(live, 0, 150));
 }
 
-void uart_bridge_send_wifi_state(bool wifi, bool master) {
-    uart_bridge_send(MSG_SYSTEM, SYS_WIFI_STATE, wifi ? 1 : 0);
-    uart_bridge_send(MSG_SYSTEM, SYS_MASTER_CONN, master ? 1 : 0);
-}
-
 void uart_bridge_send_theme(int theme) {
     uart_bridge_send(MSG_SYSTEM, SYS_THEME, (uint8_t)constrain(theme, 0, 5));
 }
@@ -274,7 +300,7 @@ void uart_bridge_send_track_mute(int track, bool muted) {
 }
 
 void uart_bridge_send_track_volume(int track, int volume) {
-    uart_bridge_send(MSG_TRACK, TRK_VOLUME | (track & 0x0F), (uint8_t)constrain(volume, 0, 127));
+    uart_bridge_send(MSG_TRACK, TRK_VOLUME | (track & 0x0F), (uint8_t)constrain(volume, 0, 150));
 }
 
 void uart_bridge_send_pad_trigger(int pad, uint8_t velocity) {

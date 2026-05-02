@@ -1298,11 +1298,16 @@ static void update_fx_screen(void) {
         { p4.pot_value[2], p4.pot_muted[2] },  // Resonance (S3 pot2)
     };
 
+    static uint16_t prev_key[6] = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
     for (int cell = 0; cell < 6; cell++) {
         int val   = src[cell].val;
         bool muted = src[cell].muted;
 
         int display_val = muted ? 0 : val;
+        uint16_t key = (uint16_t)((muted ? 0x100 : 0) | (display_val & 0xFF));
+        if (key == prev_key[cell]) continue;
+        prev_key[cell] = key;
+
         int pct = (int)((float)display_val / 127.0f * 100.0f + 0.5f);
 
         if (fx_arcs[cell])
@@ -1923,6 +1928,26 @@ static void update_sequencer_screen(void) {
     int step = p4.current_step;
     bool playing = p4.is_playing;
 
+    // ── Dirty tracking state (persistent across calls) ──
+    // Cell visual key: bit2=active, bit1=is_cur(col), bit0=muted
+    // Track key:       bit1=soloed, bit0=muted
+    // 0xFF = uninitialized/force-refresh
+    static uint8_t prev_cell_key[16][16];
+    static uint8_t prev_trk_key[16];
+    static int     prev_seq_theme = -1;
+    static bool    seq_dt_init = false;
+    if (!seq_dt_init) {
+        seq_dt_init = true;
+        memset(prev_cell_key, 0xFF, sizeof(prev_cell_key));
+        memset(prev_trk_key,  0xFF, sizeof(prev_trk_key));
+    }
+    // Theme change invalidates all color-dependent styles
+    if (currentTheme != prev_seq_theme) {
+        prev_seq_theme = currentTheme;
+        memset(prev_cell_key, 0xFF, sizeof(prev_cell_key));
+        memset(prev_trk_key,  0xFF, sizeof(prev_trk_key));
+    }
+
     // ── Auto-advance pages on bar wrap (song mode) ──
     // When a MEM-MIDI with multiple bars is loaded (seq_raw_len > 16), we
     // walk the pages in a loop: each time the Master's step wraps from 15→0
@@ -1934,12 +1959,18 @@ static void update_sequencer_screen(void) {
             int next_page = (seq_page + 1) % num_pages;
             seq_copy_page_to_p4(next_page);
             seq_apply_page_styles();
+            // p4.steps changed — force full cell refresh on next frame
+            memset(prev_cell_key, 0xFF, sizeof(prev_cell_key));
         }
     }
     prev_step = step;
 
-    // ── Move / show glowing playhead line ──
-    if (seq_playhead_line) {
+    // ── Move / show glowing playhead line — only when changed ──
+    static int  prev_ph_step    = -2;
+    static bool prev_ph_playing = false;
+    if (seq_playhead_line && (step != prev_ph_step || playing != prev_ph_playing)) {
+        prev_ph_step    = step;
+        prev_ph_playing = playing;
         if (playing && step >= 0 && step < 16) {
             lv_obj_set_x(seq_playhead_line, seq_step_x[step]);
             lv_obj_clear_flag(seq_playhead_line, LV_OBJ_FLAG_HIDDEN);
@@ -1948,73 +1979,98 @@ static void update_sequencer_screen(void) {
         }
     }
 
-    // ── Status bar step counter ──
-    if (seq_status_step_lbl) {
+    // ── Status bar step counter — only when changed ──
+    static int  prev_stp_step    = -2;
+    static bool prev_stp_playing = false;
+    if (seq_status_step_lbl && (step != prev_stp_step || playing != prev_stp_playing)) {
+        prev_stp_step    = step;
+        prev_stp_playing = playing;
         if (playing && step >= 0 && step < 16) {
             lv_label_set_text_fmt(seq_status_step_lbl, "STEP %02d / 16", step + 1);
         } else {
             lv_label_set_text(seq_status_step_lbl, "STEP -- / 16");
         }
     }
-    if (seq_status_pat_lbl) {
+    static int prev_stp_pat = -1;
+    if (seq_status_pat_lbl && p4.current_pattern != prev_stp_pat) {
+        prev_stp_pat = p4.current_pattern;
         lv_label_set_text_fmt(seq_status_pat_lbl, "PATTERN %02d", p4.current_pattern + 1);
     }
-    if (seq_status_bpm_lbl) {
+    static int prev_stp_bpm_int = -1, prev_stp_bpm_frac = -1;
+    if (seq_status_bpm_lbl &&
+            (p4.bpm_int != prev_stp_bpm_int || p4.bpm_frac != prev_stp_bpm_frac)) {
+        prev_stp_bpm_int  = p4.bpm_int;
+        prev_stp_bpm_frac = p4.bpm_frac;
         lv_label_set_text_fmt(seq_status_bpm_lbl, "BPM %d.%d", p4.bpm_int, p4.bpm_frac);
     }
 
-    // ── Sequencer header play/pause + pattern number ──
-    if (seq_hdr_play_btn && seq_hdr_play_lbl) {
+    // ── Sequencer header play/pause + pattern — only when changed ──
+    static bool prev_hdr_playing = false;
+    if (seq_hdr_play_btn && seq_hdr_play_lbl && playing != prev_hdr_playing) {
+        prev_hdr_playing = playing;
         lv_label_set_text(seq_hdr_play_lbl, playing ? "PAUSE" : "PLAY");
         lv_obj_set_style_bg_color(seq_hdr_play_btn,
             playing ? RED808_SUCCESS : RED808_ACCENT, 0);
         lv_obj_set_style_border_color(seq_hdr_play_btn,
             playing ? RED808_CYAN : RED808_ACCENT2, 0);
     }
-    if (seq_hdr_pat_lbl) {
+    static int prev_hdr_pat = -1;
+    if (seq_hdr_pat_lbl && p4.current_pattern != prev_hdr_pat) {
+        prev_hdr_pat = p4.current_pattern;
         lv_label_set_text_fmt(seq_hdr_pat_lbl, "P%02d", p4.current_pattern + 1);
     }
 
-    // ── Per-track updates ──
+    // ── Per-track updates — dirty tracking ──
+    // Only call lv_obj_set_style_* when visual state actually changes.
+    // During playback the cursor column changes every step (16 cells update).
+    // Static patterns: only toggled cells update (1 cell per tap).
+    // This reduces 1280 style-calls/frame → ~2-32 calls/frame typical.
     for (int t = 0; t < 16; t++) {
-        lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[t]);
-        bool muted = p4.track_muted[t];
+        bool muted  = p4.track_muted[t];
         bool soloed = p4.track_solo[t];
+        uint8_t trk_key = (uint8_t)((soloed ? 2 : 0) | (muted ? 1 : 0));
+        lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[t]);
 
-        // Mute button appearance
-        if (seq_mute_btns[t]) {
-            if (muted) {
-                lv_obj_set_style_bg_color(seq_mute_btns[t], RED808_ERROR, 0);
-                lv_obj_set_style_bg_opa(seq_mute_btns[t], LV_OPA_90, 0);
-                lv_obj_set_style_border_color(seq_mute_btns[t], RED808_ERROR, 0);
-            } else {
-                lv_obj_set_style_bg_color(seq_mute_btns[t], RED808_SURFACE, 0);
-                lv_obj_set_style_bg_opa(seq_mute_btns[t], LV_OPA_50, 0);
-                lv_obj_set_style_border_color(seq_mute_btns[t], tc, 0);
+        if (trk_key != prev_trk_key[t]) {
+            prev_trk_key[t] = trk_key;
+
+            if (seq_mute_btns[t]) {
+                if (muted) {
+                    lv_obj_set_style_bg_color(seq_mute_btns[t], RED808_ERROR, 0);
+                    lv_obj_set_style_bg_opa(seq_mute_btns[t], LV_OPA_90, 0);
+                    lv_obj_set_style_border_color(seq_mute_btns[t], RED808_ERROR, 0);
+                } else {
+                    lv_obj_set_style_bg_color(seq_mute_btns[t], RED808_SURFACE, 0);
+                    lv_obj_set_style_bg_opa(seq_mute_btns[t], LV_OPA_50, 0);
+                    lv_obj_set_style_border_color(seq_mute_btns[t], tc, 0);
+                }
             }
-        }
-        if (seq_track_labels[t]) {
-            lv_obj_set_style_text_color(seq_track_labels[t],
-                muted ? lv_color_white() : tc, 0);
+            if (seq_track_labels[t]) {
+                lv_obj_set_style_text_color(seq_track_labels[t],
+                    muted ? lv_color_white() : tc, 0);
+            }
+            if (seq_solo_btns[t]) {
+                lv_obj_set_style_bg_color(seq_solo_btns[t], soloed ? tc : RED808_SURFACE, 0);
+                lv_obj_set_style_border_color(seq_solo_btns[t], soloed ? tc : RED808_BORDER, 0);
+                lv_obj_set_style_shadow_width(seq_solo_btns[t], soloed ? 14 : 0, 0);
+                lv_obj_set_style_shadow_color(seq_solo_btns[t], tc, 0);
+            }
+            if (seq_solo_labels[t]) {
+                lv_obj_set_style_text_color(seq_solo_labels[t],
+                    soloed ? lv_color_black() : RED808_TEXT_DIM, 0);
+            }
+            // Mute change affects all cells in this track — invalidate their keys
+            for (int s = 0; s < 16; s++) prev_cell_key[t][s] = 0xFF;
         }
 
-        // Solo button
-        if (seq_solo_btns[t]) {
-            lv_obj_set_style_bg_color(seq_solo_btns[t], soloed ? tc : RED808_SURFACE, 0);
-            lv_obj_set_style_border_color(seq_solo_btns[t], soloed ? tc : RED808_BORDER, 0);
-            lv_obj_set_style_shadow_width(seq_solo_btns[t], soloed ? 14 : 0, 0);
-            lv_obj_set_style_shadow_color(seq_solo_btns[t], tc, 0);
-        }
-        if (seq_solo_labels[t]) {
-            lv_obj_set_style_text_color(seq_solo_labels[t],
-                soloed ? lv_color_black() : RED808_TEXT_DIM, 0);
-        }
-
-        // Step cells
+        // Step cells — skip if visual key unchanged
         for (int s = 0; s < 16; s++) {
             if (!seq_step_btns[t][s]) continue;
             bool active = p4.steps[t][s];
             bool is_cur = playing && (step == s);
+            uint8_t cell_key = (uint8_t)((active ? 4 : 0) | (is_cur ? 2 : 0) | (muted ? 1 : 0));
+            if (cell_key == prev_cell_key[t][s]) continue;
+            prev_cell_key[t][s] = cell_key;
 
             lv_color_t bg;
             lv_opa_t opa;
@@ -2189,9 +2245,22 @@ static void create_volumes_screen(void) {
 }
 
 static void update_volumes_screen(void) {
+    static int  prev_volume[16] = {-1, -1, -1, -1, -1, -1, -1, -1,
+                                   -1, -1, -1, -1, -1, -1, -1, -1};
+    static bool prev_muted[16] = {};
+    static bool prev_init = false;
     for (int i = 0; i < 16; i++) {
-        if (vol_sliders[i]) lv_slider_set_value(vol_sliders[i], p4.track_volume[i], LV_ANIM_OFF);
-        if (vol_labels[i]) lv_label_set_text_fmt(vol_labels[i], "%d", p4.track_volume[i]);
+        bool volume_changed = p4.track_volume[i] != prev_volume[i];
+        bool mute_changed = !prev_init || p4.track_muted[i] != prev_muted[i];
+        if (!volume_changed && !mute_changed) continue;
+
+        prev_volume[i] = p4.track_volume[i];
+        prev_muted[i] = p4.track_muted[i];
+
+        if (volume_changed) {
+            if (vol_sliders[i]) lv_slider_set_value(vol_sliders[i], p4.track_volume[i], LV_ANIM_OFF);
+            if (vol_labels[i]) lv_label_set_text_fmt(vol_labels[i], "%d", p4.track_volume[i]);
+        }
         if (vol_mute_dots[i]) {
             lv_obj_set_style_bg_color(vol_mute_dots[i],
                 p4.track_muted[i] ? RED808_ERROR : RED808_SUCCESS, 0);
@@ -2213,6 +2282,7 @@ static void update_volumes_screen(void) {
                 lv_color_hex(theme_presets[currentTheme].track_colors[i]), 0);
         }
     }
+    prev_init = true;
 }
 
 // =============================================================================
@@ -3133,13 +3203,17 @@ static void piano_send_off(void) {
 
 static void piano_send_on(uint8_t midi_note) {
     piano_send_off();
+#if P4_ENABLE_DEBUG_LOG
     Serial.printf("[P4 piano] note=%u rec=%d transport=%d\n", midi_note, (int)s_piano_rec_active, (int)ui_use_udp_transport());
+#endif
     if (ui_use_udp_transport()) {
         udp_send_synth_note_on_ex(PIANO_ENGINES[s_piano_engine_idx],
                                    midi_note, 110, false, false);
         if (s_piano_rec_active) {
             // v2.7 — also notify master to forward to S3 melody screen
+#if P4_ENABLE_DEBUG_LOG
             Serial.printf("[P4 piano] -> melodyRecNote eng=%u note=%u\n", PIANO_ENGINES[s_piano_engine_idx], midi_note);
+#endif
             udp_send_melody_rec_note(PIANO_ENGINES[s_piano_engine_idx], midi_note);
         }
     }
@@ -4328,6 +4402,8 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
 }
 
 void ui_update_current_screen(void) {
+    unsigned long now = millis();
+
     // Auto-navigate from boot to live when Master or optional S3 connects
     if (active_screen == 0 && (p4.master_connected || p4.s3_connected)) {
         ui_navigate_to(2);  // SCREEN_LIVE
@@ -4352,8 +4428,18 @@ void ui_update_current_screen(void) {
 
     ui_update_header();
 
-    // Update active screen content
+    // Per-screen pacing. LIVE and STEPS need 60Hz for pad fades/playhead.
+    // Static editors do not: most interaction is handled by event callbacks.
+    static unsigned long last_active_update_ms = 0;
+    uint32_t period_ms = 33;
     lv_obj_t* active = lv_scr_act();
+    if (active == scr_live || active == scr_sequencer) period_ms = 16;
+    else if (active == scr_sdcard) period_ms = p4sd.needs_refresh ? 16 : 100;
+    else if (active == scr_piano || active == scr_piano_params) period_ms = 50;
+    if (now - last_active_update_ms < period_ms) return;
+    last_active_update_ms = now;
+
+    // Update active screen content
     if (active == scr_live) update_live_screen();
     else if (active == scr_sequencer) update_sequencer_screen();
     else if (active == scr_fx) update_fx_screen();

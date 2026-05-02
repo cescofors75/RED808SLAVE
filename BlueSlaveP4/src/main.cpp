@@ -20,8 +20,6 @@
 #include "usb_cdc_handler.h"
 #endif
 
-static unsigned long lastScreenUpdate = 0;
-
 void setup() {
     // 1. Debug serial (only waits if debug logging is enabled)
     Serial.begin(115200);
@@ -94,22 +92,6 @@ void loop() {
     // Process UART packets from S3 (optional secondary)
     uart_handler_process();
 
-    // v2.9 — Apply melody state received from S3 DIRECTLY to piano UI (no master needed)
-    // Same direct sync model as pad sync (S3↔P4 UART only)
-    {
-        if (g_pending_melody_from_s3.pending) {
-            g_pending_melody_from_s3.pending = false;
-            if (lvgl_port_lock(200)) {
-                piano_apply_melody_sync(
-                    g_pending_melody_from_s3.engine,
-                    g_pending_melody_from_s3.octave,
-                    g_pending_melody_from_s3.rec != 0,
-                    g_pending_melody_from_s3.pad);
-                lvgl_port_unlock();
-            }
-        }
-    }
-
     // Drain deferred MIDI→Master UDP burst (staged by MSG_PATTERN_PUSH)
     uart_handler_tick_pending_push();
 
@@ -118,16 +100,5 @@ void loop() {
     usb_cdc_process();
 #endif
 
-    // Update LVGL screen content at target framerate (mutex-protected)
-    unsigned long now = millis();
-    if (now - lastScreenUpdate >= Config::SCREEN_UPDATE_MS) {
-        lastScreenUpdate = now;
-        // Short timeout: if render task is mid-frame, skip this update cycle
-        // instead of stalling Core1 (which must keep WiFi/UART responsive).
-        if (lvgl_port_lock(3)) {
-            ui_update_current_screen();
-            lvgl_port_unlock();
-        }
-    }
-    // LVGL rendering handled by dedicated FreeRTOS task
+    // LVGL screen updates and rendering are handled by the dedicated LVGL task.
 }

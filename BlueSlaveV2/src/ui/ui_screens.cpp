@@ -24,7 +24,7 @@ extern int get_sequencer_swing_percent();
 extern int get_master_drive_percent();
 extern void apply_mpc_preset(bool saveToNvs);
 
-// UART bridge relay (for when S3 WiFi is off — P4 forwards to Master)
+// UART bridge relay — S3 sends all commands to P4, P4 forwards to Master
 extern void uart_bridge_send(uint8_t type, uint8_t id, uint8_t value);
 extern void uart_bridge_send_extended(uint8_t type, uint8_t id, const uint8_t* data, uint16_t len);
 extern void uart_bridge_send_synth_param(uint8_t engine, uint8_t instrument, uint8_t paramId, float value);
@@ -59,7 +59,6 @@ static lv_obj_t* chip_seq_volume[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_bpm[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_pattern[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_play[HEADER_SLOT_COUNT] = {};
-static lv_obj_t* lbl_wifi[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* lbl_fx_values[HEADER_SLOT_COUNT] = {};  // legacy — unused in footer
 static lv_obj_t* lbl_master_conn[HEADER_SLOT_COUNT] = {};
 static lv_obj_t* chip_master_conn[HEADER_SLOT_COUNT] = {};
@@ -166,6 +165,8 @@ static lv_coord_t live_pad_h[Config::MAX_SAMPLES] = {};
 static constexpr int LIVE_PAD_COLS = 4;
 static constexpr int LIVE_PAD_GAP = 12;
 static constexpr int LIVE_PAD_AREA_TOP = 4;
+static constexpr int UI_FOOTER_TOP = UI_H - 92;
+static constexpr int UI_CONTENT_BOTTOM = UI_FOOTER_TOP;
 static constexpr int LIVE_VIEW_MODE_COUNT = 5;
 static const uint8_t live_view_options[LIVE_VIEW_MODE_COUNT] = {16, 8, 4, 2, 1};
 static lv_obj_t* live_view_btns[LIVE_VIEW_MODE_COUNT] = {};
@@ -231,10 +232,11 @@ static void live_layout_pads() {
     if (livePadViewStart >= Config::MAX_SAMPLES) livePadViewStart = 0;
     livePadViewStart = (livePadViewStart / visible) * visible;
 
-    const int left_panel_w = 76;
+    const int left_panel_w = 68;
     const int left_panel_x = 12;
-    const int right_panel_w = 88;
-    const int right_panel_margin = 12;
+    const int side_panel_gap = 8;
+    const int right_panel_w = 72;
+    const int right_panel_margin = 8;
 #if PORTRAIT_MODE
     const int grid_left = 12;
     const int grid_right = UI_W - 12;
@@ -242,10 +244,10 @@ static void live_layout_pads() {
     const int ctrl_zone = 210;
     const int grid_height = UI_H - 72 - LIVE_PAD_AREA_TOP - ctrl_zone;
 #else
-    const int grid_left = left_panel_x + left_panel_w + 12;
-    const int grid_right = 1024 - right_panel_w - right_panel_margin;
+    const int grid_left = left_panel_x + left_panel_w + side_panel_gap;
+    const int grid_right = UI_W - right_panel_w - right_panel_margin;
     const int grid_width = grid_right - grid_left;
-    const int grid_height = 508 - LIVE_PAD_AREA_TOP;
+    const int grid_height = UI_CONTENT_BOTTOM - LIVE_PAD_AREA_TOP;
 #endif
 
     int cols = 4;
@@ -709,7 +711,6 @@ void ui_update_header() {
     static int prev_bpm10 = -1;
     static int prev_pattern = -1;
     static int prev_playing = -1;
-    static int prev_wifi = -1;
     static uint8_t prev_slot = 255;
 
     // Only update the active screen's header slot — avoids dirtying hidden screens
@@ -723,7 +724,6 @@ void ui_update_header() {
         prev_bpm10 = -1;
         prev_pattern = -1;
         prev_playing = -1;
-        prev_wifi = -1;
     }
 
     int bpm10 = (int)lroundf(currentBPMPrecise * 10.0f);
@@ -749,15 +749,6 @@ void ui_update_header() {
             lv_obj_set_style_border_color(chip_seq_volume[slot], isPlaying ? RED808_SUCCESS : RED808_ERROR, 0);
         }
     }
-#if S3_WIFI_ENABLED
-    if ((int)wifiConnected != prev_wifi) {
-        prev_wifi = (int)wifiConnected;
-        if (lbl_wifi[slot]) {
-            lv_label_set_text(lbl_wifi[slot], wifiConnected ? LV_SYMBOL_WIFI " ON" : LV_SYMBOL_CLOSE " OFF");
-            lv_obj_set_style_text_color(lbl_wifi[slot], wifiConnected ? RED808_SUCCESS : RED808_ERROR, 0);
-        }
-    }
-#endif
     static int prev_master_conn = -1;
     if (slotChanged) {
         prev_master_conn = -1;
@@ -811,7 +802,7 @@ void ui_create_menu_screen() {
 
     ui_create_header(scr_menu);
 
-    // 3×3 grid — full height fill, P4-style neon ring buttons (8 items: 3+3+2)
+    // Horizontal 1024x600: 5x2 grid of large touch buttons above the footer.
     static const char* menu_names[] = {
         LV_SYMBOL_AUDIO "\nLIVE PADS",
         LV_SYMBOL_LIST "\nSEQUENCER",
@@ -848,14 +839,12 @@ void ui_create_menu_screen() {
     static const int btn_w   = (UI_W - 2 * x_start - gap) / cols;
     static const int btn_h   = (UI_H - 72 - y_start - 4 * gap) / 5;
 #else
-    // Landscape 1024×600: 3 cols, 4 rows, 10 botones (8 activos + 2 placeholder)
-    // Footer at bottom (86px). Content area 0..508.
-    static const int cols    = 3;
+    static const int cols    = 5;
     static const int x_start = 12;
-    static const int y_start = 8;
+    static const int y_start = 10;
     static const int gap     = 12;
-    static const int btn_w   = (UI_W - 2 * x_start - 2 * gap) / cols;  // 325px
-    static const int btn_h   = (UI_H - 92 - y_start - 3 * gap) / 4;    // 116px
+    static const int btn_w   = (UI_W - 2 * x_start - (cols - 1) * gap) / cols;
+    static const int btn_h   = (UI_CONTENT_BOTTOM - y_start - gap) / 2;
 #endif
 
     for (int i = 0; i < menu_total; i++) {
@@ -946,15 +935,14 @@ static void ratchet_plus_cb(lv_event_t* e) {
 }
 
 int ui_live_pad_hit_test(int x, int y) {
-    // GT911 delivers physical LCD coordinates (0..1023 x 0..599).
-    // Pad geometry is in LVGL portrait space (0..599 x 0..1023).
-    // LVGL sw_rotate + ROT_90: swap X↔Y, invert new X.
+    // GT911 cache uses physical LCD coordinates. In the supported horizontal
+    // mode those are the same coordinates LVGL uses for pad geometry.
 #if PORTRAIT_MODE
     int vx = (SCREEN_HEIGHT - 1) - y;  // physical Y (0..599) → virtual X (599..0)
     int vy = x;                         // physical X (0..1023) → virtual Y (0..1023)
 #else
-    int vx = x;
-    int vy = y;
+    int vx = constrain(x, 0, UI_W - 1);
+    int vy = constrain(y, 0, UI_H - 1);
 #endif
 
     int bestPad = -1;
@@ -1026,10 +1014,11 @@ void ui_create_live_screen() {
     lv_obj_set_style_bg_color(scr_live, RED808_BG, 0);
     ui_create_header(scr_live);
 
-    const int left_panel_w = 76;
+    const int left_panel_w = 68;
     const int left_panel_x = 12;
-    const int right_panel_w = 88;
-    const int right_panel_margin = 12;
+    const int side_panel_gap = 8;
+    const int right_panel_w = 72;
+    const int right_panel_margin = 8;
 #if PORTRAIT_MODE
     const int grid_left = 12;
     const int grid_right = UI_W - 12;
@@ -1039,10 +1028,10 @@ void ui_create_live_screen() {
     const int row_h = (UI_H - 72 - LIVE_PAD_AREA_TOP - ctrl_zone - 3 * LIVE_PAD_GAP) / 4;
     const int default_pad_w = (grid_width - 3 * LIVE_PAD_GAP) / LIVE_PAD_COLS;
 #else
-    const int grid_left = left_panel_x + left_panel_w + 12;
-    const int grid_right = 1024 - right_panel_w - right_panel_margin;
+    const int grid_left = left_panel_x + left_panel_w + side_panel_gap;
+    const int grid_right = UI_W - right_panel_w - right_panel_margin;
     const int grid_width = grid_right - grid_left;
-    const int row_h = (508 - LIVE_PAD_AREA_TOP - 3 * LIVE_PAD_GAP) / 4;
+    const int row_h = (UI_CONTENT_BOTTOM - LIVE_PAD_AREA_TOP - 3 * LIVE_PAD_GAP) / 4;
     const int default_pad_w = (grid_width - 3 * LIVE_PAD_GAP) / LIVE_PAD_COLS;
 #endif
 
@@ -1053,7 +1042,8 @@ void ui_create_live_screen() {
     int ctrl_h = UI_H - 72 - bottom_y;  // stop above footer
     lv_obj_t* left_panel = create_section_shell(scr_live, 12, bottom_y, UI_W / 2 - 18, ctrl_h);
 #else
-    lv_obj_t* left_panel = create_section_shell(scr_live, left_panel_x, LIVE_PAD_AREA_TOP, left_panel_w, 504);
+    lv_obj_t* left_panel = create_section_shell(scr_live, left_panel_x, LIVE_PAD_AREA_TOP,
+                                                left_panel_w, UI_CONTENT_BOTTOM - LIVE_PAD_AREA_TOP);
 #endif
     lv_obj_set_style_pad_all(left_panel, 8, 0);
 #if PORTRAIT_MODE
@@ -1205,12 +1195,12 @@ void ui_create_live_screen() {
         int y_start = bottom_y + (ctrl_h - total_h) / 2;
 #else
         int ctrl_x = grid_right + 4;
-        int ctrl_w = 1024 - ctrl_x - 8;  // fill remaining width
+        int ctrl_w = UI_W - ctrl_x - 8;  // fill remaining width
         int btn_h = 80;
         int label_h = 50;
         int gap_v = 12;
         int total_h = btn_h + label_h + btn_h + gap_v*2;  // 2 gaps
-        int y_start = LIVE_PAD_AREA_TOP + (508 - LIVE_PAD_AREA_TOP - total_h) / 2;
+        int y_start = LIVE_PAD_AREA_TOP + (UI_CONTENT_BOTTOM - LIVE_PAD_AREA_TOP - total_h) / 2;
 #endif
 
         // Title
@@ -1313,21 +1303,29 @@ void ui_update_live_pads() {
         bool active = (state_mask & (1UL << pad)) != 0;
 
         if (active) {
-            // === NEON RING HIT — thick bright border + outline glow ===
+            // === NEON HIT — filled pad + thick bright border + outline glow ===
+            lv_obj_set_style_bg_color(live_pads[pad], inst_colors[pad], 0);
+            lv_obj_set_style_bg_opa(live_pads[pad], LV_OPA_70, 0);
             lv_obj_set_style_border_width(live_pads[pad], 5, 0);
             lv_obj_set_style_border_color(live_pads[pad], lv_color_white(), 0);
             lv_obj_set_style_outline_width(live_pads[pad], 5, 0);
             lv_obj_set_style_outline_color(live_pads[pad], inst_colors[pad], 0);
             lv_obj_set_style_outline_opa(live_pads[pad], LV_OPA_COVER, 0);
+            lv_obj_set_style_shadow_width(live_pads[pad], 0, 0);
+            lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_TRANSP, 0);
             if (live_pad_names[pad])
                 lv_obj_set_style_text_color(live_pad_names[pad], lv_color_white(), 0);
         } else {
             // === IDLE — thin colored border ===
+            lv_obj_set_style_bg_color(live_pads[pad], lv_color_black(), 0);
+            lv_obj_set_style_bg_opa(live_pads[pad], LV_OPA_90, 0);
             lv_obj_set_style_border_width(live_pads[pad], 3, 0);
             lv_obj_set_style_border_color(live_pads[pad], inst_colors[pad], 0);
             lv_obj_set_style_outline_width(live_pads[pad], 3, 0);
             lv_obj_set_style_outline_color(live_pads[pad], inst_colors[pad], 0);
             lv_obj_set_style_outline_opa(live_pads[pad], LV_OPA_60, 0);
+            lv_obj_set_style_shadow_width(live_pads[pad], 0, 0);
+            lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_TRANSP, 0);
             if (live_pad_names[pad])
                 lv_obj_set_style_text_color(live_pad_names[pad], inst_colors[pad], 0);
         }
@@ -2516,59 +2514,7 @@ void ui_create_settings_screen() {
         nav_to(SCREEN_DIAGNOSTICS, scr_diagnostics);
     }, LV_EVENT_CLICKED, NULL);
 
-    // ── NETWORK Card (full width) ──
-#if S3_WIFI_ENABLED
-    lv_obj_t* net_card = lv_obj_create(scr_settings);
-#if PORTRAIT_MODE
-    lv_obj_set_size(net_card, UI_W - 40, 160);
-    lv_obj_set_pos(net_card, 20, 4);
-#else
-    lv_obj_set_size(net_card, 970, 130);
-    lv_obj_set_pos(net_card, 30, 4);
-#endif
-    lv_obj_clear_flag(net_card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(net_card, RED808_PANEL, 0);
-    lv_obj_set_style_bg_opa(net_card, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(net_card, 12, 0);
-    lv_obj_set_style_border_color(net_card, RED808_BORDER, 0);
-    lv_obj_set_style_border_width(net_card, 1, 0);
-    lv_obj_set_style_pad_all(net_card, 16, 0);
-
-    lv_obj_t* net_icon = lv_label_create(net_card);
-    lv_label_set_text(net_icon, LV_SYMBOL_WIFI " NETWORK");
-    lv_obj_set_style_text_font(net_icon, &lv_font_montserrat_22, 0);
-    lv_obj_set_style_text_color(net_icon, RED808_INFO, 0);
-    lv_obj_set_pos(net_icon, 0, 0);
-
-    // Left info block
-    lv_obj_t* wifi_info = lv_label_create(net_card);
-    lv_label_set_text_fmt(wifi_info,
-        "SSID:    %s\n"
-        "Master:  %s:%d",
-        WiFiConfig::SSID,
-        WiFiConfig::MASTER_IP, WiFiConfig::UDP_PORT);
-    lv_obj_set_style_text_font(wifi_info, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(wifi_info, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(wifi_info, 20, 40);
-    lv_obj_set_style_text_line_space(wifi_info, 8, 0);
-
-    // Right info block
-    lv_obj_t* role_info = lv_label_create(net_card);
-    lv_label_set_text_fmt(role_info,
-        "Role:     SURFACE CONTROLLER\n"
-        "Cores:    %d x %d MHz", 2, ESP.getCpuFreqMHz());
-    lv_obj_set_style_text_font(role_info, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(role_info, RED808_TEXT_DIM, 0);
-#if PORTRAIT_MODE
-    lv_obj_set_pos(role_info, 20, 90);
-#else
-    lv_obj_set_pos(role_info, 480, 40);
-#endif
-    lv_obj_set_style_text_line_space(role_info, 8, 0);
-#endif  // S3_WIFI_ENABLED
-
-    // ── USB CONNECTION INFO (when WiFi disabled) ──
-#if !S3_WIFI_ENABLED
+    // ── USB CONNECTION INFO ──
     lv_obj_t* usb_card = lv_obj_create(scr_settings);
 #if PORTRAIT_MODE
     lv_obj_set_size(usb_card, UI_W - 40, 120);
@@ -2599,7 +2545,6 @@ void ui_create_settings_screen() {
     lv_obj_set_style_text_color(usb_info, RED808_TEXT_DIM, 0);
     lv_obj_set_pos(usb_info, 20, 36);
     lv_obj_set_style_text_line_space(usb_info, 8, 0);
-#endif  // !S3_WIFI_ENABLED
 
     // ── THEME SELECTOR Section ──
     // Statics to allow refresh without screen rebuild
@@ -2617,11 +2562,7 @@ void ui_create_settings_screen() {
 #endif
 #else
     lv_obj_set_size(theme_card, 970, 340);
-#if S3_WIFI_ENABLED
-    lv_obj_set_pos(theme_card, 30, 148);
-#else
     lv_obj_set_pos(theme_card, 30, 118);
-#endif
 #endif
     lv_obj_clear_flag(theme_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(theme_card, RED808_PANEL, 0);
@@ -2774,7 +2715,7 @@ struct DiagRowMeta {
     const char* type;   // short tag (ENCODER / ROTARY / HUB / FADER / BYBUTTON…)
 };
 static const DiagRowMeta DIAG_META[DIAG_ROWS] = {
-    { "WiFi",          "NET"      },
+    { "USB-C Bridge",  "CDC-ACM"  },
     { "UDP Master",    "LINK"     },
     { "P4 Display",    "BRIDGE"   },
     { "I2C Hub",       "HUB"      },
@@ -2961,7 +2902,7 @@ void ui_update_diagnostics() {
     snprintf(proto_dfenc, sizeof(proto_dfenc), "I2C 4x (%d/4)", dfEncCount);
 
     DiagRowRuntime rows[DIAG_ROWS] = {
-        { diagInfo.wifiOk,        "TCP/IP Red808" },   // WiFi
+        { masterConnected,        "UART 921600 CDC" },  // USB-C Bridge
         { false,                  "UDP :8888 JSON" },  // UDP Master (UART-only)
         { masterConnected,        "UART 921600" },     // P4 Display link (heartbeat)
         { diagInfo.i2cHubOk,      "I2C 0x70" },        // PCA9548A mux
@@ -3032,13 +2973,7 @@ void ui_update_diagnostics() {
         unsigned long step_age = lastStepUpdateMs ? (now_millis - lastStepUpdateMs) : 0;
 
         lv_label_set_text(diag_runtime_values[0], screen_name(currentScreen));
-#if S3_WIFI_ENABLED
-        lv_label_set_text(diag_runtime_values[1],
-            wifiConnected ? (wifiReconnecting ? "ONLINE / RECOVER" : "ONLINE") :
-                            (wifiReconnecting ? "RECONNECTING" : "OFFLINE"));
-#else
         lv_label_set_text(diag_runtime_values[1], "USB-ONLY");
-#endif
         lv_label_set_text_fmt(diag_runtime_values[2], lastMasterPacketMs ? "%lu ms" : "No packets", master_age);
         lv_label_set_text_fmt(diag_runtime_values[3], lastStepUpdateMs ? "%lu ms" : "No sync", step_age);
         lv_label_set_text_fmt(diag_runtime_values[4], "%lu ms", (unsigned long)uiLastIntervalMs);
