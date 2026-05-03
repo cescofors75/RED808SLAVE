@@ -2222,12 +2222,10 @@ static const LV_ATTRIBUTE_MEM_ALIGN uint8_t dev_name_map[] = {
 };
 
 const lv_img_dsc_t img_dev_name = {
-  .header.magic = LV_IMAGE_HEADER_MAGIC,
-  .header.cf = LV_COLOR_FORMAT_RGB565,
-  .header.flags = 0,
+  .header.always_zero = 0,
   .header.w = 200,
   .header.h = 133,
-  .header.stride = 400,
   .data_size = 53200,
+  .header.cf = LV_IMG_CF_TRUE_COLOR,
   .data = dev_name_map,
 };

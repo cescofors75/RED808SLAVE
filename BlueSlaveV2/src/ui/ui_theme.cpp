@@ -164,7 +164,7 @@ void theme_encoder_color(int track, uint8_t out_rgb[3]) {
 
 // Compare two lv_color_t values (RGB565) — avoids 32-bit roundtrip precision loss
 static inline bool color_eq(lv_color_t a, lv_color_t b) {
-    return lv_color_eq(a, b);
+    return a.full == b.full;
 }
 
 // Recursively restyle all children with current theme colors

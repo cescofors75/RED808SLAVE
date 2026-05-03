@@ -11,6 +11,9 @@
 #define GT911_REG_STATUS   0x814E
 #define GT911_REG_POINT1   0x8150
 
+static constexpr uint8_t GT911_STATUS_BUFFER_READY = 0x80;
+static constexpr uint8_t GT911_STATUS_TOUCH_MASK = 0x0F;
+
 static bool gt911_ok = false;
 static uint8_t gt911_addr = GT911_ADDR;
 static portMUX_TYPE gt911_cache_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -114,6 +117,20 @@ static bool gt911_map_point(uint16_t raw_x, uint16_t raw_y, TouchPoint* out_poin
     return true;
 }
 
+static bool gt911_decode_point(const uint8_t* data, TouchPoint* out_point) {
+    if (!data || !out_point) return false;
+
+    uint16_t raw_x = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
+    uint16_t raw_y = (uint16_t)data[3] | ((uint16_t)data[4] << 8);
+    if (gt911_map_point(raw_x, raw_y, out_point)) {
+        return true;
+    }
+
+    raw_x = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+    raw_y = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+    return gt911_map_point(raw_x, raw_y, out_point);
+}
+
 void gt911_init() {
     RED808_LOG_PRINTLN("[GT911] Starting init sequence...");
     
@@ -199,6 +216,8 @@ void gt911_init() {
                               gt911_auto_swap_xy ? " SWAP_XY" : " DIRECT");
         }
     }
+
+    gt911_write_reg(GT911_REG_STATUS, 0);
     
     RED808_LOG_PRINTF("[GT911] Init complete, addr=0x%02X, ok=%d\n", gt911_addr, gt911_ok);
 }
@@ -223,13 +242,13 @@ TouchPoint gt911_read() {
         return tp;
     }
 
-    uint8_t touchCount = status & 0x0F;
-    bool bufferReady = (status & 0x80) != 0;
+    uint8_t touchCount = status & GT911_STATUS_TOUCH_MASK;
+    bool bufferReady = (status & GT911_STATUS_BUFFER_READY) != 0;
 
     // No new scan from GT911 yet — keep cache with previous valid data.
     // Clearing cache here would cause phantom "release" events between GT911
     // internal samples (~100Hz), making debounce fire on every gap.
-    if (!bufferReady) {
+    if (!bufferReady && touchCount == 0) {
         i2c_unlock();
         return tp;
     }
@@ -243,18 +262,9 @@ TouchPoint gt911_read() {
         uint8_t read_len = touchCount * 8;
         if (gt911_read_reg(GT911_REG_POINT1, data, read_len)) {
             for (uint8_t point_idx = 0; point_idx < touchCount; point_idx++) {
-                uint8_t base = point_idx * 8;
-                // Waveshare 7B GT911 point data starts with track ID at byte 0.
-                // Coordinates are stored after it as little-endian 16-bit values.
-                uint16_t raw_x = (uint16_t)data[base + 1] | ((uint16_t)data[base + 2] << 8);
-                uint16_t raw_y = (uint16_t)data[base + 3] | ((uint16_t)data[base + 4] << 8);
                 TouchPoint mapped = {0, 0, false};
-                if (!gt911_map_point(raw_x, raw_y, &mapped)) {
-                    raw_x = (uint16_t)data[base + 0] | ((uint16_t)data[base + 1] << 8);
-                    raw_y = (uint16_t)data[base + 2] | ((uint16_t)data[base + 3] << 8);
-                    if (!gt911_map_point(raw_x, raw_y, &mapped)) {
-                        continue;
-                    }
+                if (!gt911_decode_point(&data[point_idx * 8], &mapped)) {
+                    continue;
                 }
 
                 if (valid_points == 0) {

@@ -349,8 +349,7 @@ static void create_boot_screen(void) {
     lv_obj_set_style_text_color(sub, RED808_TEXT_DIM, 0);
     lv_obj_align(sub, LV_ALIGN_CENTER, 0, 20);
 
-    lv_obj_t* spinner = lv_spinner_create(scr_boot);
-    lv_spinner_set_anim_params(spinner, 1000, 60);
+    lv_obj_t* spinner = lv_spinner_create(scr_boot, 1000, 60);
     lv_obj_set_size(spinner, 60, 60);
     lv_obj_align(spinner, LV_ALIGN_CENTER, 0, 80);
 }

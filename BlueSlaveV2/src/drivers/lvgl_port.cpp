@@ -20,8 +20,9 @@ static SemaphoreHandle_t sem_vsync_end = NULL;  // vsync that acked our swap
 static SemaphoreHandle_t sem_gui_ready = NULL;  // swap is pending, wait for vsync
 static volatile bool task_started = false;
 static esp_lcd_panel_handle_t lcd_panel = NULL;
-static lv_display_t* display = NULL;
-static lv_indev_t* touch_indev = NULL;
+static lv_disp_draw_buf_t draw_buf;
+static lv_disp_drv_t disp_drv;
+static lv_indev_drv_t indev_drv;
 
 // Vsync ISR — Espressif dual-semaphore handshake pattern.
 //
@@ -53,33 +54,40 @@ static bool IRAM_ATTR lvgl_on_vsync(esp_lcd_panel_handle_t panel,
 //
 // Because sem_gui_ready is given AFTER draw_bitmap, the ISR cannot fire for a
 // vsync that precedes the swap, eliminating the drain-loop race condition.
-static void disp_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
-    (void)area;
-    esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
-
-    if (!lv_display_flush_is_last(disp)) {
-        lv_display_flush_ready(disp);
-        return;
-    }
-
-    xSemaphoreTake(sem_gui_ready, 0);
-    xSemaphoreTake(sem_vsync_end, 0);
+#if !PORTRAIT_MODE
+static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
+    esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)drv->user_data;
 
     // Step 1: swap FB index (bounce buffers defer display switch to frame end)
-    esp_lcd_panel_draw_bitmap(panel, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, px_map);
+    esp_lcd_panel_draw_bitmap(panel, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, color_p);
 
     // Step 2: arm the handshake — must come AFTER draw_bitmap
     xSemaphoreGive(sem_gui_ready);
 
-    // Step 3: complete the flush in the LVGL task, matching the safer P4 path.
-    // Timeout still releases LVGL if a VSYNC interrupt is missed.
-    xSemaphoreTake(sem_vsync_end, pdMS_TO_TICKS(34));
-    lv_display_flush_ready(disp);
+    // Step 3-5: wait for the first vsync that fires after our swap
+    xSemaphoreTake(sem_vsync_end, pdMS_TO_TICKS(500));
+
+    lv_disp_flush_ready(drv);
 }
+#endif
+
+// Portrait mode: partial-area flush — sw_rotate already rotated pixels to physical coords.
+// Writes the rendered area into the active framebuffer; bounce-buffer DMA picks it up.
+#if PORTRAIT_MODE
+static void disp_flush_portrait_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
+    esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)drv->user_data;
+    if (area->x2 < 0 || area->y2 < 0 || area->x1 >= SCREEN_WIDTH || area->y1 >= SCREEN_HEIGHT) {
+        lv_disp_flush_ready(drv);
+        return;
+    }
+    esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1, color_p);
+    lv_disp_flush_ready(drv);
+}
+#endif
 
 // Touch read
-static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
-    (void)indev;
+static void touch_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
+    (void)drv;
     if (!gt911_is_ready()) {
         data->state = LV_INDEV_STATE_RELEASED;
         return;
@@ -89,13 +97,10 @@ static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     uint8_t count = gt911_get_points(points, 1);
     if (count > 0 && points[0].pressed) {
         data->state = LV_INDEV_STATE_PRESSED;
-#if PORTRAIT_MODE
-        data->point.x = UI_W - 1 - points[0].y;
-        data->point.y = points[0].x;
-#else
-    data->point.x = constrain((int)points[0].x, 0, UI_W - 1);
-    data->point.y = constrain((int)points[0].y, 0, UI_H - 1);
-#endif
+        // Pass raw physical coordinates — LVGL's sw_rotate handles
+        // the coordinate transformation automatically via disp_drv.rotated
+        data->point.x = points[0].x;
+        data->point.y = points[0].y;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
     }
@@ -105,7 +110,12 @@ static void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
 static void lvgl_task(void* arg) {
     (void)arg;
     while (!task_started) vTaskDelay(pdMS_TO_TICKS(10));
+
+    TickType_t last_wake = xTaskGetTickCount();
     while (true) {
+        // Touch polling moved to dedicated touch_task (Core 0, pri 3).
+        // LVGL indev callback reads from gt911 cache — no I2C here.
+
         if (lvgl_port_lock(15)) {
             // Check if live pads need visual refresh (set by Core 0 loop)
             if (livePadsVisualDirty.exchange(false) && currentScreen == SCREEN_LIVE) {
@@ -114,7 +124,8 @@ static void lvgl_task(void* arg) {
             lv_timer_handler();
             lvgl_port_unlock();
         }
-        vTaskDelay(pdMS_TO_TICKS(1));
+        // Match the stable LCD profile more closely to avoid PSRAM/RGB bus saturation.
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(S3_LVGL_TASK_PERIOD_MS));
     }
 }
 
@@ -130,9 +141,39 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     }
 
     lv_init();
-    lv_tick_set_cb([]() -> uint32_t { return (uint32_t)millis(); });
     rgb_lcd_register_vsync_cb(lcd_panel, lvgl_on_vsync, NULL);
 
+#if PORTRAIT_MODE
+    // Portrait mode: partial rendering + sw_rotate.
+    // Prefer small internal-SRAM buffers to reduce PSRAM contention with RGB DMA.
+    static constexpr size_t PORT_BUF_LINES = S3_LVGL_PORT_BUF_LINES;
+    const size_t buf_px = SCREEN_WIDTH * PORT_BUF_LINES;
+    lv_color_t* buf_a = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    lv_color_t* buf_b = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!buf_a || !buf_b) {
+        if (buf_a) heap_caps_free(buf_a);
+        if (buf_b) heap_caps_free(buf_b);
+        buf_a = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        buf_b = (lv_color_t*)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        ESP_LOGW(TAG, "Portrait draw buffers fell back to PSRAM");
+    }
+    if (!buf_a || !buf_b) {
+        ESP_LOGE(TAG, "Failed to allocate portrait draw buffers");
+        return;
+    }
+    lv_disp_draw_buf_init(&draw_buf, buf_a, buf_b, buf_px);
+
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res      = SCREEN_WIDTH;   // Physical: 1024
+    disp_drv.ver_res      = SCREEN_HEIGHT;  // Physical: 600
+    disp_drv.flush_cb     = disp_flush_portrait_cb;
+    disp_drv.draw_buf     = &draw_buf;
+    disp_drv.user_data    = lcd_panel;
+    disp_drv.sw_rotate    = 1;
+    disp_drv.rotated      = LV_DISP_ROT_90;
+    disp_drv.direct_mode  = 0;
+    disp_drv.full_refresh = 0;
+#else
     // Landscape: zero-copy double-buffer (original fast path).
     // Get the panel's own PSRAM framebuffers — LVGL renders directly into
     // these. On flush, draw_bitmap recognises the pointer and does a
@@ -147,29 +188,27 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     }
 
     const size_t buf_pixels = SCREEN_WIDTH * SCREEN_HEIGHT;
+    lv_disp_draw_buf_init(&draw_buf, fb0, fb1, buf_pixels);
+
     // full_refresh: LVGL calls flush once per frame with full screen area.
     // The swap is zero-copy so sending the "full screen" costs nothing.
     // This avoids multi-flush sync issues that cause flickering in direct_mode.
-    display = lv_display_create(SCREEN_WIDTH, SCREEN_HEIGHT);
-    lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
-    lv_display_set_flush_cb(display, disp_flush_cb);
-    lv_display_set_user_data(display, lcd_panel);
-    lv_display_set_buffers(display, fb0, fb1,
-                           buf_pixels * sizeof(lv_color_t),
-                           LV_DISPLAY_RENDER_MODE_DIRECT);
-#if PORTRAIT_MODE
-    // Keep the proven 1024x600 RGB framebuffer path, but expose a 600x1024
-    // logical canvas to the UI. LVGL rotates drawing into the direct buffers.
-    lv_display_set_rotation(display, LV_DISPLAY_ROTATION_90);
-    lv_display_set_matrix_rotation(display, true);
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res      = SCREEN_WIDTH;
+    disp_drv.ver_res      = SCREEN_HEIGHT;
+    disp_drv.flush_cb     = disp_flush_cb;
+    disp_drv.draw_buf     = &draw_buf;
+    disp_drv.user_data    = lcd_panel;
+    disp_drv.direct_mode  = 1;
+    disp_drv.full_refresh = 1;
 #endif
-    lv_display_set_default(display);
+    lv_disp_drv_register(&disp_drv);
 
     // Touch
-    touch_indev = lv_indev_create();
-    lv_indev_set_type(touch_indev, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_display(touch_indev, display);
-    lv_indev_set_read_cb(touch_indev, touch_read_cb);
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type    = LV_INDEV_TYPE_POINTER;
+    indev_drv.read_cb = touch_read_cb;
+    lv_indev_drv_register(&indev_drv);
 
     // LVGL task — core 1, priority 3 (higher = less preemption during flush)
     BaseType_t task_ok = xTaskCreatePinnedToCore(lvgl_task, "lvgl", 12288, NULL, 3, NULL, 1);
@@ -179,8 +218,8 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
 
     ESP_LOGI(TAG, "LVGL port: %dx%d %s, %s",
              UI_W, UI_H,
-             PORTRAIT_MODE ? "portrait experimental" : "landscape zero-copy",
-             S3_LCD_ROTATE_180 ? "panel mirror 180 + direct" : (PORTRAIT_MODE ? "matrix rotation" : "sync-vsync direct"));
+             PORTRAIT_MODE ? "portrait sw_rotate" : "landscape zero-copy",
+             PORTRAIT_MODE ? "partial render" : "dual-semaphore vsync sync");
 }
 
 bool lvgl_port_lock(int timeout_ms) {

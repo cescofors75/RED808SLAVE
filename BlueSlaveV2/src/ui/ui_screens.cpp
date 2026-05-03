@@ -11,6 +11,7 @@
 #include <Esp.h>
 #include <ArduinoJson.h>
 #include <math.h>
+#include <stdlib.h>
 
 extern void sendFilterUDP(int track, int fxType);
 // sendUDPCommand stubs — S3 is UART-only; calls compile but are no-ops
@@ -3420,7 +3421,7 @@ static void sd_free_file_userdata() {
     for (uint32_t i = 0; i < cnt; i++) {
         lv_obj_t* child = lv_obj_get_child(sd_file_list, i);
         void* ud = lv_obj_get_user_data(child);
-        if (ud) { lv_free(ud); lv_obj_set_user_data(child, NULL); }
+        if (ud) { free(ud); lv_obj_set_user_data(child, NULL); }
     }
 }
 
@@ -3508,7 +3509,7 @@ static void sd_refresh_filelist() {
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
 
         // Store entry name in user data (heap allocated, freed on lv_obj_clean)
-        char* name_copy = (char*)lv_malloc(strlen(name) + 2);
+        char* name_copy = (char*)malloc(strlen(name) + 2);
         if (name_copy) {
             size_t nlen3 = strlen(name);
             bool ud_is_mid = !is_dir && nlen3 > 4 && strcasecmp(name + nlen3 - 4, ".mid") == 0;

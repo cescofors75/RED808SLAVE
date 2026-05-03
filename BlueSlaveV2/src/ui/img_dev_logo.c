@@ -133,12 +133,10 @@ static const LV_ATTRIBUTE_MEM_ALIGN uint8_t dev_logo_map[] = {
 };
 
 const lv_img_dsc_t img_dev_logo = {
-  .header.magic = LV_IMAGE_HEADER_MAGIC,
-  .header.cf = LV_COLOR_FORMAT_RGB565,
-  .header.flags = 0,
+  .header.always_zero = 0,
   .header.w = 48,
   .header.h = 32,
-  .header.stride = 96,
   .data_size = 3072,
+  .header.cf = LV_IMG_CF_TRUE_COLOR,
   .data = dev_logo_map,
 };
