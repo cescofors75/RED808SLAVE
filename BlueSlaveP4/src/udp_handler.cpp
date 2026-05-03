@@ -52,6 +52,15 @@ static float clamp_float(float value, float lo, float hi) {
     return value;
 }
 
+static bool pattern_grid_has_data(void) {
+    for (int t = 0; t < 16; t++) {
+        for (int s = 0; s < 16; s++) {
+            if (p4.steps[t][s]) return true;
+        }
+    }
+    return false;
+}
+
 // =============================================================================
 // SEND HELPERS
 // =============================================================================
@@ -472,6 +481,8 @@ static void processJson(const char* json, int len) {
         int pat = clamp_int(doc["pattern"] | p4.current_pattern, 0, 15);
         p4.current_pattern = pat;
         uart_send_to_s3(MSG_SYSTEM, SYS_PATTERN, (uint8_t)pat);
+        // Ensure we always fetch the active pattern grid after state sync.
+        udp_send_get_pattern(pat);
 
         bool playing = doc["playing"] | p4.is_playing;
         p4.is_playing = playing;
@@ -560,37 +571,63 @@ static void processJson(const char* json, int len) {
         int pat = clamp_int(doc["pattern"] | p4.current_pattern, 0, 15);
         JsonArray data = doc["data"];
         if (data) {
-            // Check if incoming is all-empty
+            bool nestedRows = false;
+            if (!data.isNull() && data.size() > 0) {
+                nestedRows = data[0].is<JsonArray>();
+            }
+
+            // Check if incoming payload is all-empty (supports 2D and flat).
             bool incomingEmpty = true;
-            for (JsonArray row : data) {
-                for (JsonVariant val : row) {
+            if (nestedRows) {
+                for (JsonArray row : data) {
+                    for (JsonVariant val : row) {
+                        if (val.as<int>() != 0) { incomingEmpty = false; break; }
+                    }
+                    if (!incomingEmpty) break;
+                }
+            } else {
+                for (JsonVariant val : data) {
                     if (val.as<int>() != 0) { incomingEmpty = false; break; }
                 }
-                if (!incomingEmpty) break;
             }
+
             // If the incoming pattern is empty but we already have local data for
             // the same index, keep local (protects against master sync floods).
             if (incomingEmpty && pat == p4.current_pattern) {
-                bool localHasData = false;
-                for (int t = 0; t < 16 && !localHasData; t++)
-                    for (int s = 0; s < 16 && !localHasData; s++)
-                        if (p4.steps[t][s]) localHasData = true;
+                bool localHasData = pattern_grid_has_data();
                 if (localHasData) {
                     P4_LOG_PRINTF("[UDP] Skipping empty pattern_sync for pattern %d\n", pat + 1);
                     return;
                 }
             }
+
             p4.current_pattern = pat;
-            int track = 0;
-            for (JsonArray row : data) {
-                if (track >= 16) break;
-                int step = 0;
-                for (JsonVariant val : row) {
-                    if (step >= 16) break;
-                    p4.steps[track][step] = (val.as<int>() != 0);
-                    step++;
+
+            // Replace the local 16x16 view with incoming payload.
+            memset(p4.steps, 0, sizeof(p4.steps));
+
+            if (nestedRows) {
+                int track = 0;
+                for (JsonArray row : data) {
+                    if (track >= 16) break;
+                    int step = 0;
+                    for (JsonVariant val : row) {
+                        if (step >= 16) break;
+                        p4.steps[track][step] = (val.as<int>() != 0);
+                        step++;
+                    }
+                    track++;
                 }
-                track++;
+            } else {
+                // Flat payload fallback: track-major [t0s0..t0s15, t1s0..]
+                int idx = 0;
+                for (JsonVariant val : data) {
+                    if (idx >= 256) break;
+                    int track = idx / 16;
+                    int step  = idx % 16;
+                    p4.steps[track][step] = (val.as<int>() != 0);
+                    idx++;
+                }
             }
         } else {
             p4.current_pattern = pat;
@@ -699,6 +736,9 @@ static void processJson(const char* json, int len) {
         int idx = clamp_int(doc["index"] | doc["pattern"] | 0, 0, 15);
         if (idx != p4.current_pattern) {
             p4.current_pattern = idx;
+            udp_send_get_pattern(idx);
+        } else if (!pattern_grid_has_data()) {
+            // Refresh if we stayed on the same pattern but local grid is empty.
             udp_send_get_pattern(idx);
         }
     }
