@@ -361,6 +361,7 @@ static lv_obj_t* live_pad_btns[16] = {};
 static lv_obj_t* live_pad_labels[16] = {};
 static lv_obj_t* live_pad_num_labels[16] = {};
 static lv_obj_t* live_pad_state_labels[16] = {};
+static lv_obj_t* live_pad_inst_labels[16] = {};
 static lv_obj_t* live_pad_accent_strips[16] = {};
 static lv_obj_t* live_spectrum_bars[16] = {};  // spectrum bar per pad (bottom of pad)
 
@@ -368,6 +369,7 @@ static lv_obj_t* live_spectrum_bars[16] = {};  // spectrum bar per pad (bottom o
 static lv_obj_t* grid_play_btn = NULL;
 static lv_obj_t* grid_play_lbl = NULL;
 static lv_obj_t* grid_bpm_lbl = NULL;
+static lv_obj_t* grid_home_vol_lbl = NULL;
 static lv_obj_t* grid_pat_lbl = NULL;
 static lv_obj_t* grid_step_lbl = NULL;
 static lv_obj_t* grid_step_dots[16] = {};
@@ -381,6 +383,63 @@ static lv_obj_t* grid_mstr_lbl = NULL;
 static lv_obj_t* grid_aux_dot  = NULL;  // Aux (UART to ESP32-S3) link
 static lv_obj_t* grid_aux_lbl  = NULL;
 static lv_obj_t* grid_vol_lbl = NULL;
+static lv_obj_t* grid_pad_prev_btn = NULL;
+static lv_obj_t* grid_pad_next_btn = NULL;
+static lv_obj_t* grid_pad_lbl = NULL;
+static lv_obj_t* grid_inst_prev_btn = NULL;
+static lv_obj_t* grid_inst_next_btn = NULL;
+static lv_obj_t* grid_inst_lbl = NULL;
+
+static const char* PAD_INST_NAMES[8] = {
+    "Sampler", "808", "909", "505", "303", "WT", "FM2", "SH101"
+};
+static const char* PAD_INST_SHORT[8] = {
+    "SMP", "808", "909", "505", "303", "WT", "FM2", "SH1"
+};
+static uint8_t s_pad_inst_sel[16] = {0};
+static volatile uint8_t s_pad_inst_focus_pad = 0;
+
+static int8_t pad_inst_engine_code(uint8_t inst_idx) {
+    switch (inst_idx) {
+        case 0: return -1; // Sampler
+        case 1: return 0;  // 808
+        case 2: return 1;  // 909
+        case 3: return 2;  // 505
+        case 4: return 3;  // 303
+        case 5: return 4; // WT
+        case 6: return 6; // FM2
+        case 7: return 5; // SH101
+        default: return -1;
+    }
+}
+
+static void pad_inst_refresh_pad_badge(uint8_t pad) {
+    if (pad > 15 || !live_pad_inst_labels[pad]) return;
+    uint8_t inst = s_pad_inst_sel[pad];
+    if (inst > 7) inst = 0;
+    lv_label_set_text(live_pad_inst_labels[pad], PAD_INST_SHORT[inst]);
+}
+
+static void pad_inst_refresh_controls(void) {
+    uint8_t pad = s_pad_inst_focus_pad;
+    if (pad > 15) pad = 15;
+    uint8_t inst = s_pad_inst_sel[pad];
+    if (inst > 7) inst = 0;
+    if (grid_pad_lbl) lv_label_set_text_fmt(grid_pad_lbl, "PAD %02d", (int)pad + 1);
+    if (grid_inst_lbl) lv_label_set_text(grid_inst_lbl, PAD_INST_NAMES[inst]);
+}
+
+static void pad_inst_apply_to_master(uint8_t pad) {
+    if (pad > 15) return;
+    uint8_t inst = s_pad_inst_sel[pad];
+    if (inst > 7) inst = 0;
+    int8_t engine = pad_inst_engine_code(inst);
+    if (udp_wifi_connected() || udp_master_connected()) {
+        udp_send_set_track_engine(pad, engine);
+        // Audible feedback to confirm assignment.
+        udp_send_trigger(pad, 120);
+    }
+}
 
 // Sync Pads LEDs — pads illuminate automatically with sequencer
 static lv_obj_t* grid_sync_btn = NULL;
@@ -556,6 +615,46 @@ static void grid_theme_cb(lv_event_t* e) {
     uart_send_to_s3(MSG_TOUCH_CMD, TCMD_THEME_NEXT, (uint8_t)next);
 }
 
+static void grid_pad_prev_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    uint8_t pad = s_pad_inst_focus_pad;
+    pad = (pad == 0) ? 15 : (uint8_t)(pad - 1);
+    s_pad_inst_focus_pad = pad;
+    pad_inst_refresh_controls();
+}
+
+static void grid_pad_next_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    uint8_t pad = s_pad_inst_focus_pad;
+    pad = (pad >= 15) ? 0 : (uint8_t)(pad + 1);
+    s_pad_inst_focus_pad = pad;
+    pad_inst_refresh_controls();
+}
+
+static void grid_inst_prev_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    uint8_t pad = s_pad_inst_focus_pad;
+    if (pad > 15) pad = 15;
+    uint8_t inst = s_pad_inst_sel[pad];
+    inst = (inst == 0) ? 7 : (uint8_t)(inst - 1);
+    s_pad_inst_sel[pad] = inst;
+    pad_inst_refresh_pad_badge(pad);
+    pad_inst_refresh_controls();
+    pad_inst_apply_to_master(pad);
+}
+
+static void grid_inst_next_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    uint8_t pad = s_pad_inst_focus_pad;
+    if (pad > 15) pad = 15;
+    uint8_t inst = s_pad_inst_sel[pad];
+    inst = (inst >= 7) ? 0 : (uint8_t)(inst + 1);
+    s_pad_inst_sel[pad] = inst;
+    pad_inst_refresh_pad_badge(pad);
+    pad_inst_refresh_controls();
+    pad_inst_apply_to_master(pad);
+}
+
 // Helper: styled control button
 static lv_obj_t* create_ctrl_btn(lv_obj_t* parent, int x, int y, int w, int h,
                                   const char* text, lv_color_t border_color,
@@ -679,6 +778,12 @@ static void create_live_screen(void) {
         lv_obj_set_style_text_color(live_pad_state_labels[i], RED808_TEXT_DIM, 0);
         lv_obj_align(live_pad_state_labels[i], LV_ALIGN_TOP_RIGHT, -8, 9);
 
+        live_pad_inst_labels[i] = lv_label_create(live_pad_btns[i]);
+        lv_label_set_text(live_pad_inst_labels[i], PAD_INST_SHORT[s_pad_inst_sel[i] & 0x07]);
+        lv_obj_set_style_text_font(live_pad_inst_labels[i], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(live_pad_inst_labels[i], RED808_CYAN, 0);
+        lv_obj_align(live_pad_inst_labels[i], LV_ALIGN_BOTTOM_RIGHT, -8, -7);
+
         live_pad_labels[i] = lv_label_create(live_pad_btns[i]);
         lv_label_set_text(live_pad_labels[i], trackNames[i]);
         lv_obj_set_style_text_font(live_pad_labels[i], &lv_font_montserrat_28, 0);
@@ -725,9 +830,14 @@ static void create_live_screen(void) {
                          "PAT\n" LV_SYMBOL_RIGHT, RED808_WARNING, &lv_font_montserrat_20);
     lv_obj_add_event_cb(b, header_pattern_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
 
-    // [7,0] BPM display
-    create_info_cell(scr_live, COL_X(7), ROW_Y(0), CW, CH,
-                     "BPM", "120.0", RED808_ACCENT, &grid_bpm_lbl);
+    // [7,0] HOME cell — BPM + VOL together
+    lv_obj_t* home_cell = create_info_cell(scr_live, COL_X(7), ROW_Y(0), CW, CH,
+                                           "HOME", "120.0", RED808_ACCENT, &grid_bpm_lbl);
+    grid_home_vol_lbl = lv_label_create(home_cell);
+    lv_label_set_text(grid_home_vol_lbl, "VOL 75");
+    lv_obj_set_style_text_font(grid_home_vol_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(grid_home_vol_lbl, RED808_CYAN, 0);
+    lv_obj_align(grid_home_vol_lbl, LV_ALIGN_BOTTOM_MID, 0, -10);
 
     // --- Row 1: Screen Navigation ---
     // v2.6 — added PIANO as 4th nav (id=10). SYNC button moved to [7,2].
@@ -791,9 +901,77 @@ static void create_live_screen(void) {
         lv_obj_clear_flag(grid_step_dots[i], LV_OBJ_FLAG_CLICKABLE);
     }
 
-    // [6,3] Volume
-    create_info_cell(scr_live, COL_X(6), ROW_Y(3), CW, CH,
-                     "VOL", "75", RED808_ACCENT, &grid_vol_lbl);
+    // [6,3] Instrumentos PADS (casilla libre)
+    lv_obj_t* inst_panel = lv_obj_create(scr_live);
+    lv_obj_set_size(inst_panel, CW, CH);
+    lv_obj_set_pos(inst_panel, COL_X(6), ROW_Y(3));
+    lv_obj_set_style_radius(inst_panel, 14, 0);
+    lv_obj_set_style_bg_color(inst_panel, RED808_PANEL, 0);
+    lv_obj_set_style_bg_grad_color(inst_panel, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_grad_dir(inst_panel, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(inst_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(inst_panel, 1, 0);
+    lv_obj_set_style_border_color(inst_panel, RED808_BORDER, 0);
+    lv_obj_set_style_pad_all(inst_panel, 6, 0);
+    lv_obj_clear_flag(inst_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* inst_title = lv_label_create(inst_panel);
+    lv_label_set_text(inst_title, "PADS INST");
+    lv_obj_set_style_text_font(inst_title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(inst_title, RED808_TEXT_DIM, 0);
+    lv_obj_align(inst_title, LV_ALIGN_TOP_MID, 0, 0);
+
+    grid_pad_prev_btn = lv_btn_create(inst_panel);
+    lv_obj_set_size(grid_pad_prev_btn, 26, 24);
+    lv_obj_align(grid_pad_prev_btn, LV_ALIGN_TOP_LEFT, 2, 20);
+    apply_control_button_style(grid_pad_prev_btn, RED808_ACCENT2, false, 8);
+    lv_obj_t* pad_prev_lbl = lv_label_create(grid_pad_prev_btn);
+    lv_label_set_text(pad_prev_lbl, "<");
+    lv_obj_center(pad_prev_lbl);
+    lv_obj_add_event_cb(grid_pad_prev_btn, grid_pad_prev_cb, LV_EVENT_CLICKED, NULL);
+
+    grid_pad_next_btn = lv_btn_create(inst_panel);
+    lv_obj_set_size(grid_pad_next_btn, 26, 24);
+    lv_obj_align(grid_pad_next_btn, LV_ALIGN_TOP_RIGHT, -2, 20);
+    apply_control_button_style(grid_pad_next_btn, RED808_ACCENT2, false, 8);
+    lv_obj_t* pad_next_lbl = lv_label_create(grid_pad_next_btn);
+    lv_label_set_text(pad_next_lbl, ">");
+    lv_obj_center(pad_next_lbl);
+    lv_obj_add_event_cb(grid_pad_next_btn, grid_pad_next_cb, LV_EVENT_CLICKED, NULL);
+
+    grid_pad_lbl = lv_label_create(inst_panel);
+    lv_label_set_text(grid_pad_lbl, "PAD 01");
+    lv_obj_set_style_text_font(grid_pad_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(grid_pad_lbl, RED808_ACCENT, 0);
+    lv_obj_align(grid_pad_lbl, LV_ALIGN_TOP_MID, 0, 22);
+
+    grid_inst_lbl = lv_label_create(inst_panel);
+    lv_label_set_text(grid_inst_lbl, "Sampler");
+    lv_obj_set_style_text_font(grid_inst_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(grid_inst_lbl, RED808_CYAN, 0);
+    lv_obj_align(grid_inst_lbl, LV_ALIGN_TOP_MID, 0, 52);
+
+    grid_inst_prev_btn = lv_btn_create(inst_panel);
+    lv_obj_set_size(grid_inst_prev_btn, 48, 32);
+    lv_obj_align(grid_inst_prev_btn, LV_ALIGN_BOTTOM_LEFT, 2, -6);
+    apply_control_button_style(grid_inst_prev_btn, RED808_WARNING, false, 10);
+    lv_obj_t* inst_prev_lbl = lv_label_create(grid_inst_prev_btn);
+    lv_label_set_text(inst_prev_lbl, "PREV");
+    lv_obj_set_style_text_font(inst_prev_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_center(inst_prev_lbl);
+    lv_obj_add_event_cb(grid_inst_prev_btn, grid_inst_prev_cb, LV_EVENT_CLICKED, NULL);
+
+    grid_inst_next_btn = lv_btn_create(inst_panel);
+    lv_obj_set_size(grid_inst_next_btn, 48, 32);
+    lv_obj_align(grid_inst_next_btn, LV_ALIGN_BOTTOM_RIGHT, -2, -6);
+    apply_control_button_style(grid_inst_next_btn, RED808_SUCCESS, false, 10);
+    lv_obj_t* inst_next_lbl = lv_label_create(grid_inst_next_btn);
+    lv_label_set_text(inst_next_lbl, "NEXT");
+    lv_obj_set_style_text_font(inst_next_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_center(inst_next_lbl);
+    lv_obj_add_event_cb(grid_inst_next_btn, grid_inst_next_cb, LV_EVENT_CLICKED, NULL);
+
+    pad_inst_refresh_controls();
 
     // [7,3] Link status: MSTR (to Master via C6 WiFi) + AUX (to S3 via UART)
     lv_obj_t* link_ind = lv_obj_create(scr_live);
@@ -983,6 +1161,12 @@ static void update_live_screen(void) {
         lv_label_set_text_fmt(grid_bpm_lbl, "%d.%d", p4.bpm_int, p4.bpm_frac);
     }
 
+    static int gp_prev_home_vol = -1;
+    if (grid_home_vol_lbl && p4.master_volume != gp_prev_home_vol) {
+        gp_prev_home_vol = p4.master_volume;
+        lv_label_set_text_fmt(grid_home_vol_lbl, "VOL %d", p4.master_volume);
+    }
+
     // Pattern
     static int gp_prev_pat = -1;
     if (grid_pat_lbl && p4.current_pattern != gp_prev_pat) {
@@ -1055,13 +1239,6 @@ static void update_live_screen(void) {
         }
     } else {
         prev_16l_src = 255;
-    }
-
-    // Volume
-    static int gp_prev_vol = -1;
-    if (grid_vol_lbl && p4.master_volume != gp_prev_vol) {
-        gp_prev_vol = p4.master_volume;
-        lv_label_set_text_fmt(grid_vol_lbl, "%d", p4.master_volume);
     }
 
     // Spectrum bars — read from DSP task
@@ -4171,6 +4348,7 @@ static void ui_reload_themed_screens(void) {
     for (int i = 0; i < 16; i++) {
         live_pad_btns[i] = NULL; live_pad_labels[i] = NULL;
         live_pad_num_labels[i] = NULL; live_pad_state_labels[i] = NULL;
+        live_pad_inst_labels[i] = NULL;
         live_pad_accent_strips[i] = NULL;
         live_spectrum_bars[i] = NULL;
         grid_step_dots[i] = NULL;
@@ -4187,6 +4365,13 @@ static void ui_reload_themed_screens(void) {
     grid_mstr_dot = NULL; grid_mstr_lbl = NULL;
     grid_aux_dot  = NULL; grid_aux_lbl  = NULL;
     grid_vol_lbl = NULL; grid_sync_btn = NULL;
+    grid_home_vol_lbl = NULL;
+    grid_pad_prev_btn = NULL;
+    grid_pad_next_btn = NULL;
+    grid_pad_lbl = NULL;
+    grid_inst_prev_btn = NULL;
+    grid_inst_next_btn = NULL;
+    grid_inst_lbl = NULL;
     for (int i = 0; i < 3; i++) {
         fx_arcs[i] = NULL; fx_value_labels[i] = NULL;
         fx_name_labels[i] = NULL; fx_toggle_btns[i] = NULL;
@@ -4372,6 +4557,7 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
             } else {
                 s_16l_src_pad = (uint8_t)p;   // remember for future 16L
             }
+            s_pad_inst_focus_pad = (uint8_t)p;
             enqueue_pad_event(send_pad, send_vel);
             ui_pad_flash_start(p, vel);
 

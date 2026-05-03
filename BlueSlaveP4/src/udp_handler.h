@@ -32,6 +32,7 @@ void udp_send_set_volume(int value);
 void udp_send_set_seq_volume(int value);
 void udp_send_set_live_volume(int value);
 void udp_send_set_track_volume(int track, int volume);
+void udp_send_set_track_engine(int track, int engine);
 
 // FX commands — legacy filter
 void udp_send_set_filter(int type);

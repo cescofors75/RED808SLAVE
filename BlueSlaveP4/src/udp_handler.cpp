@@ -294,6 +294,18 @@ void udp_send_set_track_volume(int track, int volume) {
     sendJson(buf);
 }
 
+void udp_send_set_track_engine(int track, int engine) {
+    if (track < 0) track = 0;
+    if (track > 15) track = 15;
+    if (engine < -1) engine = -1;
+    if (engine > 6) engine = 6;
+    char buf[96];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"setTrackSynthEngine\",\"track\":%d,\"engine\":%d}",
+             track, engine);
+    sendJson(buf);
+}
+
 void udp_send_set_filter(int type) {
     char buf[64];
     snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilter\",\"type\":%d}", type);
