@@ -157,6 +157,18 @@ int uart_bridge_receive(void) {
                 lastLocalStepMs = millis();
                 lastLocalStepUs = micros();
                 count++;
+            } else if (pkt->type == MSG_SYSTEM && pkt->id == SYS_PATTERN) {
+                // Keep S3 sequencer pattern selection synced to P4/Master.
+                extern int currentPattern;
+                extern uint32_t patternUiRevision;
+                extern bool needsFullRedraw;
+                int pat = constrain((int)pkt->value, 0, Config::MAX_PATTERNS - 1);
+                if (currentPattern != pat) {
+                    currentPattern = pat;
+                    patternUiRevision++;
+                    needsFullRedraw = true;
+                }
+                count++;
             } else if (pkt->type == MSG_SYSTEM && pkt->id == SYS_VOLUME) {
                 extern int masterVolume;
                 masterVolume = constrain((int)pkt->value, 0, Config::MAX_VOLUME);

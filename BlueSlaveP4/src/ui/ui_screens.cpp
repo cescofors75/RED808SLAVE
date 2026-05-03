@@ -3315,6 +3315,10 @@ static void piano_keys24_btn_cb(lv_event_t* e) {
 
 static void piano_rec_btn_cb(lv_event_t* e) {
     LV_UNUSED(e);
+    static uint32_t s_last_p4_rec_toggle_ms = 0;
+    uint32_t now = millis();
+    if ((now - s_last_p4_rec_toggle_ms) < 280U) return;
+    s_last_p4_rec_toggle_ms = now;
     s_piano_rec_active = !s_piano_rec_active;
     if (s_piano_rec_active) {
         // v2.8 — fresh take: clear local mirror and rewind step cursor
@@ -3572,9 +3576,10 @@ static void create_piano_screen(void) {
     }
 
     /* v2.7 — REC toggle: sends melodyRecNote to master while active */
-    s_piano_rec_btn = piano_make_chip(scr_piano, 458, row_y, 86, 36, "○ REC");
+    s_piano_rec_btn = piano_make_chip(scr_piano, 458, row_y, 116, 44, "○ REC");
     s_piano_rec_lbl = lv_obj_get_child(s_piano_rec_btn, 0);
     lv_obj_add_event_cb(s_piano_rec_btn, piano_rec_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(s_piano_rec_btn, LV_OBJ_FLAG_PRESS_LOCK);
     if (s_piano_rec_active) {
         lv_obj_set_style_border_color(s_piano_rec_btn, lv_color_hex(0xFF3030), 0);
         lv_obj_set_style_border_width(s_piano_rec_btn, 3, 0);
@@ -3588,7 +3593,7 @@ static void create_piano_screen(void) {
     lv_label_set_text(s_piano_status_lbl, "—");
     lv_obj_set_style_text_font(s_piano_status_lbl, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(s_piano_status_lbl, RED808_ACCENT, 0);
-    lv_obj_set_pos(s_piano_status_lbl, 552, row_y + 8);
+    lv_obj_set_pos(s_piano_status_lbl, 592, row_y + 8);
 
     /* v2.8 — second control row: PAD-/+/ASSIGN for melody-to-pad bind */
     int row_y2 = 98;
@@ -4402,10 +4407,16 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
 
 void ui_update_current_screen(void) {
     unsigned long now = millis();
+    static unsigned long boot_enter_ms = 0;
 
     // Auto-navigate from boot to live when Master or optional S3 connects
-    if (active_screen == 0 && (p4.master_connected || p4.s3_connected)) {
-        ui_navigate_to(2);  // SCREEN_LIVE
+    if (active_screen == 0) {
+        if (boot_enter_ms == 0) boot_enter_ms = now;
+        if (p4.master_connected || p4.s3_connected || (now - boot_enter_ms) > 5000UL) {
+            ui_navigate_to(2);  // SCREEN_LIVE
+        }
+    } else {
+        boot_enter_ms = 0;
     }
 
     // Theme change — recreate all screens with new palette
@@ -4421,8 +4432,13 @@ void ui_update_current_screen(void) {
     // Navigate if S3 sends screen command
     static int prev_screen = -1;
     if (p4.current_screen != prev_screen) {
-        prev_screen = p4.current_screen;
-        ui_navigate_to(p4.current_screen);
+        int requested = p4.current_screen;
+        prev_screen = requested;
+        // Ignore remote BOOT requests once UI has left boot screen.
+        // S3 can transiently report SCREEN_BOOT during startup sync.
+        if (!(requested == 0 && active_screen != 0)) {
+            ui_navigate_to(requested);
+        }
     }
 
     ui_update_header();

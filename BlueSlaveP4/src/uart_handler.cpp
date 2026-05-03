@@ -312,8 +312,12 @@ static void process_basic(const UartBasicPacket* pkt) {
                     if (uart_restore_cached_pattern(val)) {
                         uart_send_pattern_to_s3(val, p4.steps);
                     }
-                    // Relay pattern selection to Master
-                    if (udp_wifi_connected()) udp_send_select_pattern(val);
+                    // Relay pattern selection to Master and request the full
+                    // pattern payload to guarantee both P4 and S3 load it.
+                    if (udp_wifi_connected()) {
+                        udp_send_select_pattern(val);
+                        udp_send_get_pattern(val);
+                    }
                     break;
                 case SYS_PLAY_STATE:
                     {

@@ -218,6 +218,7 @@ static void lvgl_task(void* arg) {
     while (true) {
         if (lvgl_port_lock(5)) {
             lv_timer_handler();
+            ui_update_current_screen();
             lvgl_port_unlock();
         }
         // 8ms (125Hz tick) lets pad flashes appear on the very next vsync

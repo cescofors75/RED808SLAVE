@@ -10,6 +10,7 @@
 #include "../sd_midi_loader.h"
 #include <Esp.h>
 #include <ArduinoJson.h>
+#include <stdlib.h>
 #include <math.h>
 
 extern void sendFilterUDP(int track, int fxType);
@@ -3420,7 +3421,7 @@ static void sd_free_file_userdata() {
     for (uint32_t i = 0; i < cnt; i++) {
         lv_obj_t* child = lv_obj_get_child(sd_file_list, i);
         void* ud = lv_obj_get_user_data(child);
-        if (ud) { lv_free(ud); lv_obj_set_user_data(child, NULL); }
+        if (ud) { free(ud); lv_obj_set_user_data(child, NULL); }
     }
 }
 
@@ -3508,7 +3509,7 @@ static void sd_refresh_filelist() {
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
 
         // Store entry name in user data (heap allocated, freed on lv_obj_clean)
-        char* name_copy = (char*)lv_malloc(strlen(name) + 2);
+        char* name_copy = (char*)malloc(strlen(name) + 2);
         if (name_copy) {
             size_t nlen3 = strlen(name);
             bool ud_is_mid = !is_dir && nlen3 > 4 && strcasecmp(name + nlen3 - 4, ".mid") == 0;
@@ -4935,6 +4936,10 @@ static void mel_rec_set_visual(bool on) {
 
 static void mel_rec_cb(lv_event_t* e) {
     (void)e;
+    static uint32_t s_last_mel_rec_toggle_ms = 0;
+    uint32_t now = millis();
+    if ((now - s_last_mel_rec_toggle_ms) < 280U) return;
+    s_last_mel_rec_toggle_ms = now;
     s_mel_recording = !s_mel_recording;
     s_mel_rec_step  = 0;
     mel_rec_set_visual(s_mel_recording);
@@ -4957,11 +4962,25 @@ bool melody_record_midi_note(uint8_t midi) {
         if (MEL_NOTE_PC[r] == pc) { row = r; break; }
     }
     if (row < 0) return false;
-    int col = s_mel_rec_step;
-    if (col < 0 || col >= 16) col = 0;
+    int col = -1;
+    // Quantize recording to the authoritative transport step when playing,
+    // so playback timing matches what was performed on P4.
+    if (isPlaying) {
+        col = currentStep % 16;
+        if (col < 0) col += 16;
+    } else {
+        // Fallback when transport is stopped: keep legacy free-run cursor.
+        col = s_mel_rec_step;
+        if (col < 0 || col >= 16) col = 0;
+    }
     s_mel_grid[col][row] = true;
     mel_redraw_cell(col, row);
-    s_mel_rec_step = (col + 1) % 16;
+    if (!isPlaying) {
+        s_mel_rec_step = (col + 1) % 16;
+    } else {
+        // Keep cursor coherent for UI/status when transport later stops.
+        s_mel_rec_step = col;
+    }
     // Auto-arm the visual REC indicator on first remote note so the user
     // sees that recording is happening.
     if (!s_mel_recording) {
@@ -5237,8 +5256,9 @@ void ui_create_melody_screen() {
                               lv_color_hex(0x00E5FF), mel_play_cb, NULL);
     mel_play_lbl = lv_obj_get_child(mel_play_btn, 0);
 
-    mel_rec_btn = make_chip(494, row2_y, 90, 38, "○ REC",
+    mel_rec_btn = make_chip(486, row2_y, 102, 44, "○ REC",
                              RED808_TEXT, mel_rec_cb, NULL);
+    lv_obj_add_flag(mel_rec_btn, LV_OBJ_FLAG_PRESS_LOCK);
     mel_rec_lbl = lv_obj_get_child(mel_rec_btn, 0);
     mel_rec_set_visual(s_mel_recording);
 
@@ -5544,6 +5564,10 @@ static void piano_keys24_cb(lv_event_t* e) {
 
 static void piano_rec_cb(lv_event_t* e) {
     (void)e;
+    static uint32_t s_last_piano_rec_toggle_ms = 0;
+    uint32_t now = millis();
+    if ((now - s_last_piano_rec_toggle_ms) < 280U) return;
+    s_last_piano_rec_toggle_ms = now;
     s_mel_recording = !s_mel_recording;
     if (s_mel_recording) {
         memset(s_mel_grid, 0, sizeof(s_mel_grid));
@@ -5617,9 +5641,10 @@ void ui_create_piano_screen() {
     s_piano_keys24_lbl = lv_obj_get_child(s_piano_keys24_btn, 0);
     lv_obj_add_event_cb(s_piano_keys24_btn, piano_keys24_cb, LV_EVENT_CLICKED, NULL);
 
-    s_piano_rec_btn = piano_make_chip(scr_piano, 372, y1, 86, 42, "REC", RED808_TEXT);
+    s_piano_rec_btn = piano_make_chip(scr_piano, 366, y1, 98, 46, "REC", RED808_TEXT);
     s_piano_rec_lbl = lv_obj_get_child(s_piano_rec_btn, 0);
     lv_obj_add_event_cb(s_piano_rec_btn, piano_rec_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(s_piano_rec_btn, LV_OBJ_FLAG_PRESS_LOCK);
 
     lv_obj_t* params = piano_make_chip(scr_piano, 474, y1, 104, 42, "PARAMS", lv_color_hex(0x00E5FF));
     lv_obj_add_event_cb(params, [](lv_event_t* e) {
