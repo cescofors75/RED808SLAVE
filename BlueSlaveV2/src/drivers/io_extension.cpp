@@ -49,12 +49,8 @@ void io_ext_backlight_set(uint8_t brightness) {
         io_ext_output(EXIO_BL, 0);
         return;
     }
-    if (brightness > 100) brightness = 100;
-    if (brightness >= 100) {
-        i2c_write_byte(IO_EXT_ADDR, CH32V003_PWM_REG, 0);
-        io_ext_output(EXIO_BL, 1);
-        return;
-    }
+    // Clamp to 97% max (Waveshare hardware limit)
+    if (brightness > 97) brightness = 97;
     // Invert: high input brightness = low PWM value
     uint8_t pwm_val = (uint8_t)((100 - brightness) * 2.55f);
     i2c_write_byte(IO_EXT_ADDR, CH32V003_PWM_REG, pwm_val);

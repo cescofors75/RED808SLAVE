@@ -27,14 +27,9 @@
 #define SCREEN_WIDTH   1024
 #define SCREEN_HEIGHT  600
 
-// Mounting/orientation: 1 = rotate S3 panel output 180 degrees and mirror GT911 touch mapping.
-#ifndef S3_LCD_ROTATE_180
-#define S3_LCD_ROTATE_180 1
-#endif
-
 // Portrait mode: 0 = landscape (1024x600), 1 = portrait (600x1024 via SW rotation)
 #ifndef PORTRAIT_MODE
-#define PORTRAIT_MODE  0
+#define PORTRAIT_MODE  1
 #endif
 
 #if PORTRAIT_MODE
@@ -109,7 +104,7 @@
 #endif
 
 #ifndef S3_LVGL_TASK_PERIOD_MS
-#define S3_LVGL_TASK_PERIOD_MS 8
+#define S3_LVGL_TASK_PERIOD_MS 16
 #endif
 
 // =============================================================================
@@ -148,9 +143,9 @@
 #define DFROBOT_ENCODER_COUNT  4    // 4 DFRobot ring-LED rotaries via PCA9548A
 #define DFROBOT_ENCODER_ADDR   0x54  // All encoders same addr, separated by hub
 // DFRobot #1 (CH2): BPM coarse      (button = reset to default BPM)
-// DFRobot #2 (CH3): FX Delay        (button = mute/unmute Delay)
-// DFRobot #3 (CH4): FX Reverb       (button = mute/unmute Reverb)
-// DFRobot #4 (CH5): FX Chorus       (button = mute/unmute Chorus)
+// DFRobot #2 (CH3): FX Flanger      (button = mute/unmute Flanger)
+// DFRobot #3 (CH4): FX Delay        (button = mute/unmute Delay)
+// DFRobot #4 (CH5): FX Reverb       (button = mute/unmute Reverb)
 
 // M5 Unit ByteButton (up to 2x via hub channels)
 #define BYTEBUTTON_COUNT       2
@@ -177,6 +172,13 @@
 #define SD_MOUNT_POINT "/sdcard"
 
 // =============================================================================
+// WiFi / UDP — S3 connects to Master directly (set to 0 when P4 handles WiFi)
+// =============================================================================
+#ifndef S3_WIFI_ENABLED
+#define S3_WIFI_ENABLED  0   // 0 = S3 is UART-only slave to P4, 1 = S3 has own WiFi
+#endif
+
+// =============================================================================
 // P4 bridge transport: 0 = UART1/Serial1 (RS485 connector), 1 = USB-C (Serial/HWCDC)
 // When USB bridge is enabled, binary protocol goes through the native USB-C port.
 // The P4 acts as USB Host on its OTG port and reads S3 as a CDC-ACM device.
@@ -184,6 +186,19 @@
 #ifndef P4_USB_BRIDGE
 #define P4_USB_BRIDGE  1
 #endif
+
+namespace WiFiConfig {
+    constexpr const char* SSID     = "RED808";
+    constexpr const char* PASSWORD = "red808esp32";
+    constexpr const char* MASTER_IP = "192.168.4.1";
+    constexpr uint16_t UDP_PORT    = 8888;
+    constexpr uint32_t TIMEOUT_MS  = 3000;
+    constexpr uint32_t RECONNECT_INTERVAL_MS       = 1500;
+    constexpr uint32_t RECONNECT_ATTEMPT_TIMEOUT_MS = 5000;
+    constexpr uint32_t DISCONNECT_GRACE_MS = 1500;
+    constexpr uint32_t MASTER_HELLO_RETRY_MS = 300;
+    constexpr uint32_t UDP_RECEIVE_MS = 20;  // relaxed — JSON parse is expensive
+}
 
 // =============================================================================
 // SEQUENCER
@@ -206,12 +221,12 @@ namespace Config {
     constexpr int DEFAULT_TRACK_VOLUME = 75;
 
     // Timing
-    constexpr uint32_t ENCODER_READ_MS    = 12;  // I2C encoders do not need 200Hz; frees bus/CPU for LVGL+touch
+    constexpr uint32_t ENCODER_READ_MS    = 5;   // 200Hz polling — fast encoder response
     constexpr uint32_t BUTTON_DEBOUNCE_MS = 25;
     constexpr uint32_t LED_FLASH_MS       = 100;
     constexpr uint32_t SCREEN_UPDATE_MS   = 12;  // ~83fps UI update — smoother step animation
     constexpr uint32_t UDP_CHECK_MS       = 30000;
-    constexpr uint32_t TOUCH_ENCODER_READ_MS = 30;  // slower encoder poll in touch-heavy screens to free I2C bus
+    constexpr uint32_t TOUCH_ENCODER_READ_MS = 20;  // slower encoder poll in touch-heavy screens to free I2C bus
     constexpr bool ENABLE_MICROTIMING = false;      // disable random jitter for tighter live/demo response
 
     // Touch tuning (Waveshare 7B). Fine tune offsets if hitboxes feel shifted.
@@ -222,7 +237,7 @@ namespace Config {
     constexpr int TOUCH_Y_OFFSET = 0;
     constexpr int TOUCH_X_SCALE_PCT = 100;
     constexpr int TOUCH_Y_SCALE_PCT = 100;
-    constexpr int TOUCH_JITTER_PX = 1;
+    constexpr int TOUCH_JITTER_PX = 3;
     constexpr uint8_t LIVE_PAD_HIT_MARGIN_PCT = 10;   // adaptive pad hit expansion
     constexpr uint8_t LIVE_PAD_HIT_MARGIN_MIN = 6;
     constexpr uint8_t LIVE_PAD_HIT_MARGIN_MAX = 24;
