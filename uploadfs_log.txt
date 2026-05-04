@@ -1,0 +1,1 @@
+UnknownEnvNamesError: Unknown environment names 'redmaster-s3-r8n16'. Valid names are 'esp32s3, esp32s3_debug'
