@@ -844,7 +844,7 @@ static void menu_btn_cb(lv_event_t* e) {
         case 6: nav_to(SCREEN_SETTINGS, scr_settings); break;
         case 7: nav_to(SCREEN_PIANO, scr_piano); break;
         case 8: nav_to(SCREEN_MELODY, scr_melody); break;  // v2.6 — piano roll
-        case 9: nav_to(SCREEN_PIANO_PARAMS, scr_piano_params); break;  // v2.7 — synth params
+        case 9: nav_to(SCREEN_DIAGNOSTICS, scr_diagnostics); break;
     }
 }
 
@@ -865,14 +865,14 @@ void ui_create_menu_screen() {
         LV_SYMBOL_HOME "\nSETTINGS",
         LV_SYMBOL_AUDIO "\nPIANO",
         LV_SYMBOL_PLAY "\nMELODY",   // v2.6 — piano roll editor
-        LV_SYMBOL_SETTINGS "\nPIANO\nPARAMS"  // v2.7 — synth editor
+        LV_SYMBOL_EYE_OPEN "\nSTATUS\nI2C/P4"
     };
     const lv_color_t menu_colors[] = {
         RED808_ACCENT,   RED808_INFO,     RED808_SUCCESS,
         RED808_CYAN,     RED808_ACCENT2,  RED808_ERROR,
         lv_color_hex(0xFF8C00), lv_color_hex(0x00E5FF),
         lv_color_hex(0xFF1493),                   // MELODY: deep pink
-        lv_color_hex(0x00E5FF)                    // PIANO PARAMS: cyan brillante
+        RED808_INFO                               // STATUS: diagnostics
     };
     static const int menu_count = 10;  // botones activos
     static const int menu_total = 10;
@@ -928,15 +928,13 @@ void ui_create_menu_screen() {
             lv_obj_set_style_text_opa(lbl, LV_OPA_50, 0);
             lv_obj_center(lbl);
         } else {
-            // P4-style: dark surface + neon colored border + outer glow outline
+            // P4-style: dark surface + neon colored border (without outer outline)
             apply_stable_button_style(btn, RED808_SURFACE, menu_colors[i]);
             lv_obj_set_style_bg_grad_color(btn, lv_color_mix(menu_colors[i], RED808_BG, 205), 0);
             lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_VER, 0);
             lv_obj_set_style_border_width(btn, 2, 0);
-            lv_obj_set_style_outline_width(btn, 3, 0);
-            lv_obj_set_style_outline_color(btn, menu_colors[i], 0);
-            lv_obj_set_style_outline_opa(btn, LV_OPA_50, 0);
-            lv_obj_set_style_outline_pad(btn, 2, 0);
+            lv_obj_set_style_outline_width(btn, 0, 0);
+            lv_obj_set_style_outline_opa(btn, LV_OPA_TRANSP, 0);
             lv_obj_set_style_shadow_width(btn, 16, 0);
             lv_obj_set_style_shadow_color(btn, menu_colors[i], 0);
             lv_obj_set_style_shadow_opa(btn, (lv_opa_t)105, 0);
@@ -1187,10 +1185,8 @@ void ui_create_live_screen() {
         lv_obj_set_style_radius(pad, 14, 0);
         lv_obj_set_style_border_width(pad, 3, 0);
         lv_obj_set_style_border_color(pad, inst_colors[i], 0);
-        lv_obj_set_style_outline_width(pad, 3, 0);
-        lv_obj_set_style_outline_color(pad, inst_colors[i], 0);
-        lv_obj_set_style_outline_opa(pad, LV_OPA_60, 0);
-        lv_obj_set_style_outline_pad(pad, 2, 0);
+        lv_obj_set_style_outline_width(pad, 0, 0);
+        lv_obj_set_style_outline_opa(pad, LV_OPA_TRANSP, 0);
         lv_obj_set_style_shadow_width(pad, 0, 0);
         lv_obj_set_style_shadow_opa(pad, LV_OPA_TRANSP, 0);
         lv_obj_set_style_pad_all(pad, 0, 0);
@@ -1355,14 +1351,13 @@ void ui_update_live_pads() {
         bool active = (state_mask & (1UL << pad)) != 0;
 
         if (active) {
-            // === NEON HIT — filled pad + thick bright border + outline glow ===
+            // === NEON HIT — filled pad + thick bright border ===
             lv_obj_set_style_bg_color(live_pads[pad], inst_colors[pad], 0);
             lv_obj_set_style_bg_opa(live_pads[pad], LV_OPA_70, 0);
             lv_obj_set_style_border_width(live_pads[pad], 5, 0);
             lv_obj_set_style_border_color(live_pads[pad], lv_color_white(), 0);
-            lv_obj_set_style_outline_width(live_pads[pad], 5, 0);
-            lv_obj_set_style_outline_color(live_pads[pad], inst_colors[pad], 0);
-            lv_obj_set_style_outline_opa(live_pads[pad], LV_OPA_COVER, 0);
+            lv_obj_set_style_outline_width(live_pads[pad], 0, 0);
+            lv_obj_set_style_outline_opa(live_pads[pad], LV_OPA_TRANSP, 0);
             lv_obj_set_style_shadow_width(live_pads[pad], 0, 0);
             lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_TRANSP, 0);
             if (live_pad_names[pad])
@@ -1373,9 +1368,8 @@ void ui_update_live_pads() {
             lv_obj_set_style_bg_opa(live_pads[pad], LV_OPA_90, 0);
             lv_obj_set_style_border_width(live_pads[pad], 3, 0);
             lv_obj_set_style_border_color(live_pads[pad], inst_colors[pad], 0);
-            lv_obj_set_style_outline_width(live_pads[pad], 3, 0);
-            lv_obj_set_style_outline_color(live_pads[pad], inst_colors[pad], 0);
-            lv_obj_set_style_outline_opa(live_pads[pad], LV_OPA_60, 0);
+            lv_obj_set_style_outline_width(live_pads[pad], 0, 0);
+            lv_obj_set_style_outline_opa(live_pads[pad], LV_OPA_TRANSP, 0);
             lv_obj_set_style_shadow_width(live_pads[pad], 0, 0);
             lv_obj_set_style_shadow_opa(live_pads[pad], LV_OPA_TRANSP, 0);
             if (live_pad_names[pad])
@@ -1397,7 +1391,7 @@ static void seq_step_cb(lv_event_t* e) {
     if (abs_s >= Config::MAX_STEPS) return;
     selectedTrack = track;
     patterns[currentPattern].steps[track][abs_s] = !patterns[currentPattern].steps[track][abs_s];
-    patternUiRevision++;
+    patternUiRevision += 1;
     bool active = patterns[currentPattern].steps[track][abs_s];
     lv_obj_set_style_bg_color((lv_obj_t*)lv_event_get_target(e),
         active ? inst_colors[track] : RED808_SURFACE, 0);
@@ -2541,31 +2535,6 @@ void ui_create_settings_screen() {
     lv_obj_set_style_bg_color(scr_settings, RED808_BG, 0);
     ui_create_header(scr_settings);
 
-    lv_obj_t* status_btn = lv_btn_create(scr_settings);
-#if PORTRAIT_MODE
-    lv_obj_set_size(status_btn, 128, 44);
-    lv_obj_set_pos(status_btn, UI_W - 148, 10);
-#else
-    lv_obj_set_size(status_btn, 140, 40);
-    lv_obj_set_pos(status_btn, UI_W - 170, 10);
-#endif
-    lv_obj_set_style_radius(status_btn, 8, 0);
-    lv_obj_set_style_bg_color(status_btn, RED808_SURFACE, 0);
-    lv_obj_set_style_bg_opa(status_btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(status_btn, 1, 0);
-    lv_obj_set_style_border_color(status_btn, RED808_INFO, 0);
-    lv_obj_set_style_shadow_width(status_btn, 0, 0);
-    lv_obj_clear_flag(status_btn, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t* status_lbl = lv_label_create(status_btn);
-    lv_label_set_text(status_lbl, LV_SYMBOL_EYE_OPEN " STATUS");
-    lv_obj_set_style_text_font(status_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(status_lbl, RED808_INFO, 0);
-    lv_obj_center(status_lbl);
-    lv_obj_add_event_cb(status_btn, [](lv_event_t* e) {
-        (void)e;
-        nav_to(SCREEN_DIAGNOSTICS, scr_diagnostics);
-    }, LV_EVENT_CLICKED, NULL);
-
     // ── USB CONNECTION INFO ──
     lv_obj_t* usb_card = lv_obj_create(scr_settings);
 #if PORTRAIT_MODE
@@ -2597,6 +2566,31 @@ void ui_create_settings_screen() {
     lv_obj_set_style_text_color(usb_info, RED808_TEXT_DIM, 0);
     lv_obj_set_pos(usb_info, 20, 36);
     lv_obj_set_style_text_line_space(usb_info, 8, 0);
+
+    lv_obj_t* status_btn = lv_btn_create(usb_card);
+#if PORTRAIT_MODE
+    lv_obj_set_size(status_btn, 190, 44);
+    lv_obj_set_pos(status_btn, UI_W - 260, 58);
+#else
+    lv_obj_set_size(status_btn, 210, 48);
+    lv_obj_set_pos(status_btn, 730, 24);
+#endif
+    lv_obj_set_style_radius(status_btn, 8, 0);
+    lv_obj_set_style_bg_color(status_btn, RED808_INFO, 0);
+    lv_obj_set_style_bg_opa(status_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(status_btn, 2, 0);
+    lv_obj_set_style_border_color(status_btn, lv_color_white(), 0);
+    lv_obj_set_style_shadow_width(status_btn, 0, 0);
+    lv_obj_clear_flag(status_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t* status_lbl = lv_label_create(status_btn);
+    lv_label_set_text(status_lbl, LV_SYMBOL_EYE_OPEN " I2C/P4 STATUS");
+    lv_obj_set_style_text_font(status_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(status_lbl, RED808_BG, 0);
+    lv_obj_center(status_lbl);
+    lv_obj_add_event_cb(status_btn, [](lv_event_t* e) {
+        (void)e;
+        nav_to(SCREEN_DIAGNOSTICS, scr_diagnostics);
+    }, LV_EVENT_CLICKED, NULL);
 
     // ── THEME SELECTOR Section ──
     // Statics to allow refresh without screen rebuild
@@ -2742,6 +2736,8 @@ void ui_create_settings_screen() {
     extern lv_obj_t** ui_theme_checks_ptr;
     ui_theme_btns_ptr   = s_theme_btns;
     ui_theme_checks_ptr = s_theme_checks;
+
+    lv_obj_move_foreground(status_btn);
 }
 
 // ============================================================================
@@ -2940,17 +2936,21 @@ void ui_update_diagnostics() {
     // Row metadata parallel to DIAG_META — status flag + protocol string.
     // Protocol strings describe where each device lives (bus/address/channel).
     struct DiagRowRuntime { bool val; const char* proto; };
-    char proto_m5_1[24], proto_m5_2[24];
-    char proto_bb_1[24], proto_bb_2[24];
+    char proto_m5_1[32], proto_m5_2[32];
+    char proto_bb_1[32], proto_bb_2[32];
     char proto_dfenc[24];
-    snprintf(proto_m5_1, sizeof(proto_m5_1), "I2C hub ch%d",
-             (m5HubChannel[0] >= 0) ? m5HubChannel[0] : 0);
-    snprintf(proto_m5_2, sizeof(proto_m5_2), "I2C hub ch%d",
-             (m5HubChannel[1] >= 0) ? m5HubChannel[1] : 0);
-    snprintf(proto_bb_1, sizeof(proto_bb_1), "I2C 0x47 ch%d",
-             (byteButtonHubChannel[0] >= 0) ? byteButtonHubChannel[0] : 0);
-    snprintf(proto_bb_2, sizeof(proto_bb_2), "I2C 0x47 ch%d",
-             (byteButtonHubChannel[1] >= 0) ? byteButtonHubChannel[1] : 0);
+    int m5ch1 = (m5HubChannel[0] >= 0) ? m5HubChannel[0] : M5_ENCODER1_HUB_CH;
+    int m5ch2 = (m5HubChannel[1] >= 0) ? m5HubChannel[1] : M5_ENCODER2_HUB_CH;
+    int bbch1 = (byteButtonHubChannel[0] >= 0) ? byteButtonHubChannel[0] : BYTEBUTTON1_HUB_CH;
+    int bbch2 = (byteButtonHubChannel[1] >= 0) ? byteButtonHubChannel[1] : BYTEBUTTON2_HUB_CH;
+    snprintf(proto_m5_1, sizeof(proto_m5_1), "0x41 ch%d %s", m5ch1,
+             (i2cHubKnownMask[m5ch1] & I2C_DEVBIT_M5_ROTATE8) ? "ACK" : "--");
+    snprintf(proto_m5_2, sizeof(proto_m5_2), "0x41 ch%d %s", m5ch2,
+             (i2cHubKnownMask[m5ch2] & I2C_DEVBIT_M5_ROTATE8) ? "ACK" : "--");
+    snprintf(proto_bb_1, sizeof(proto_bb_1), "0x47 ch%d %s", bbch1,
+             (i2cHubKnownMask[bbch1] & I2C_DEVBIT_BYTEBUTTON) ? "ACK" : "--");
+    snprintf(proto_bb_2, sizeof(proto_bb_2), "0x47 ch%d %s", bbch2,
+             (i2cHubKnownMask[bbch2] & I2C_DEVBIT_BYTEBUTTON) ? "ACK" : "--");
     snprintf(proto_dfenc, sizeof(proto_dfenc), "I2C 4x (%d/4)", dfEncCount);
 
     DiagRowRuntime rows[DIAG_ROWS] = {

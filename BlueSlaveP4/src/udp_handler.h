@@ -53,6 +53,7 @@ void udp_send_solo(int track, bool soloed);
 void udp_send_synth_note_on_ex(uint8_t engine, uint8_t note, uint8_t velocity,
                                 bool accent, bool slide);
 void udp_send_synth_note_off(uint8_t engine, uint8_t track);
+void udp_send_synth303_note_off(void);
 
 // Synth parameter editor
 void udp_send_synth_param(uint8_t engine, uint8_t instrument, uint8_t paramId, float value);

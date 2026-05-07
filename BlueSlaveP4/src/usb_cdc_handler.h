@@ -28,3 +28,6 @@ size_t usb_cdc_write(const uint8_t* data, size_t len);
 // Get diagnostic string for USB CDC state (for UART-DBG)
 // Returns: "init=X conn=X dev=X open=X disc=X last_err=X"
 const char* usb_cdc_status_str(void);
+
+// Compact counters for visible UI diagnostics.
+void usb_cdc_get_diag(int* detected, int* connects, int* disconnects, int* attempts);

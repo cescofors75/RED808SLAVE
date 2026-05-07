@@ -11,6 +11,7 @@
 #include "../mem_midi_loader.h"
 #include "config.h"
 #include <Arduino.h>
+#include <SD_MMC.h>
 #include <atomic>
 #include <math.h>
 
@@ -205,6 +206,10 @@ static lv_obj_t* create_header_button(lv_obj_t* parent, int x, int y, int w, int
     return btn;
 }
 
+static void seq_pattern_modal_show(int pattern);
+static void seq_pattern_modal_hide(void);
+static void seq_pattern_modal_mark_loaded(void);
+
 static void header_play_cb(lv_event_t* e) {
     LV_UNUSED(e);
     // Debounce — LVGL can double-fire on a sloppy tap, causing visible
@@ -231,10 +236,14 @@ static void header_play_cb(lv_event_t* e) {
 static void header_clear_track_isolation(void) {
     if (!udp_wifi_connected()) return;
     for (int track = 0; track < 16; track++) {
-        p4.track_solo[track] = false;
+        bool was_solo  = p4.track_solo[track];
+        bool was_muted = p4.track_muted[track];
+        p4.track_solo[track]  = false;
         p4.track_muted[track] = false;
-        udp_send_solo(track, false);
-        udp_send_mute(track, false);
+        // Only send UDP if state was actually non-zero — avoids flooding
+        // the socket buffer with 32 no-op packets before selectPattern.
+        if (was_solo)  udp_send_solo(track, false);
+        if (was_muted) udp_send_mute(track, false);
     }
 }
 
@@ -245,12 +254,26 @@ static void header_pattern_cb(lv_event_t* e) {
     if (next_pattern >= Config::MAX_PATTERNS) next_pattern = 0;
 
     p4.current_pattern = next_pattern;
-    uart_restore_cached_pattern((uint8_t)next_pattern);
-    header_clear_track_isolation();
-    if (udp_wifi_connected()) {
-        udp_send_select_pattern(next_pattern);
-        udp_send_get_pattern(next_pattern);
+    ui_sequencer_sync_from_current_pattern();
+    if ((active_screen == 3 || lv_scr_act() == scr_sequencer) &&
+            (udp_wifi_connected() || udp_master_connected())) {
+        seq_pattern_modal_show(next_pattern);
+    } else {
+        seq_pattern_modal_hide();
     }
+#if !P4_STANDALONE_MASTER_ONLY
+    // Avoid overwriting the selected pattern with stale S3 cache while
+    // UDP master sync is active.
+    if (!udp_wifi_connected() && !udp_master_connected()) {
+        uart_restore_cached_pattern((uint8_t)next_pattern);
+    }
+#endif
+    header_clear_track_isolation();
+    // Always push selection/request to Master; sendJson() already no-ops when
+    // UDP is not started, and this avoids stale UI transport flags blocking
+    // pattern changes.
+    udp_send_select_pattern(next_pattern);
+    udp_send_get_pattern(next_pattern);
     if (p4.s3_connected) {
         // S3 owns local/demo patterns. Ask it to push the selected grid back
         // through MSG_PATTERN_PUSH only when the slot has real local data.
@@ -364,6 +387,13 @@ static lv_obj_t* live_pad_state_labels[16] = {};
 static lv_obj_t* live_pad_inst_labels[16] = {};
 static lv_obj_t* live_pad_accent_strips[16] = {};
 static lv_obj_t* live_spectrum_bars[16] = {};  // spectrum bar per pad (bottom of pad)
+static lv_obj_t* live_home_panels[16] = {};
+static int       live_home_panel_count = 0;
+
+// Pad layout mode: 0=16 normal, 1=16 FS, 2=8 FS, 3=4 FS, 4=2 FS, 5=1 FS
+static int        s_pad_mode      = 0;
+static lv_obj_t*  s_pad_back_btn  = NULL;
+static lv_obj_t*  s_pad_mode_modal = NULL;
 
 // Right-side control widgets (dynamic updates)
 static lv_obj_t* grid_play_btn = NULL;
@@ -389,6 +419,12 @@ static lv_obj_t* grid_pad_lbl = NULL;
 static lv_obj_t* grid_inst_prev_btn = NULL;
 static lv_obj_t* grid_inst_next_btn = NULL;
 static lv_obj_t* grid_inst_lbl = NULL;
+static lv_obj_t* grid_inst_edit_btn = NULL;
+static lv_obj_t* s_pad_inst_modal = NULL;
+static lv_obj_t* s_pad_inst_modal_pad_lbl = NULL;
+static lv_obj_t* s_pad_inst_modal_inst_lbl = NULL;
+static lv_obj_t* s_pad_inst_modal_pad_btns[16] = {};
+static lv_obj_t* s_pad_inst_modal_inst_btns[8] = {};
 
 static const char* PAD_INST_NAMES[8] = {
     "Sampler", "808", "909", "505", "303", "WT", "FM2", "SH101"
@@ -436,8 +472,10 @@ static void pad_inst_apply_to_master(uint8_t pad) {
     int8_t engine = pad_inst_engine_code(inst);
     if (udp_wifi_connected() || udp_master_connected()) {
         udp_send_set_track_engine(pad, engine);
-        // Audible feedback to confirm assignment.
-        udp_send_trigger(pad, 120);
+        // Audible feedback to confirm assignment. Hand the trigger over to the
+        // pad queue so the melodic note-off scheduler also runs (avoids 303
+        // hanging after the assignment-confirmation tap).
+        enqueue_pad_event(pad, 110);
     }
 }
 
@@ -615,6 +653,23 @@ static void grid_theme_cb(lv_event_t* e) {
     uart_send_to_s3(MSG_TOUCH_CMD, TCMD_THEME_NEXT, (uint8_t)next);
 }
 
+static void grid_master_vol_step_cb(lv_event_t* e) {
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    int next = constrain((int)p4.master_volume + delta, 0, Config::MAX_VOLUME);
+    if (next == p4.master_volume) return;
+    p4.master_volume = (uint8_t)next;
+    if (udp_wifi_connected() || udp_master_connected()) udp_send_set_volume(next);
+}
+
+static void grid_bpm_step_cb(lv_event_t* e) {
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    int next = constrain((int)p4.bpm_int + delta, 40, 240);
+    if (next == p4.bpm_int) return;
+    p4.bpm_int = (uint16_t)next;
+    p4.bpm_frac = 0;
+    if (udp_wifi_connected() || udp_master_connected()) udp_send_tempo((float)next);
+}
+
 static void grid_pad_prev_cb(lv_event_t* e) {
     LV_UNUSED(e);
     uint8_t pad = s_pad_inst_focus_pad;
@@ -653,6 +708,209 @@ static void grid_inst_next_cb(lv_event_t* e) {
     pad_inst_refresh_pad_badge(pad);
     pad_inst_refresh_controls();
     pad_inst_apply_to_master(pad);
+}
+
+static void pad_inst_modal_refresh(void) {
+    uint8_t pad = s_pad_inst_focus_pad;
+    if (pad > 15) pad = 15;
+    uint8_t inst = s_pad_inst_sel[pad];
+    if (inst > 7) inst = 0;
+    if (s_pad_inst_modal_pad_lbl)
+        lv_label_set_text_fmt(s_pad_inst_modal_pad_lbl, "PAD %02d", (int)pad + 1);
+    if (s_pad_inst_modal_inst_lbl)
+        lv_label_set_text(s_pad_inst_modal_inst_lbl, PAD_INST_NAMES[inst]);
+    for (int i = 0; i < 16; i++) {
+        lv_obj_t* btn = s_pad_inst_modal_pad_btns[i];
+        if (!btn) continue;
+        bool active = (i == (int)pad);
+        lv_obj_set_style_bg_color(btn, active ? RED808_ACCENT2 : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(btn, active ? RED808_CYAN : RED808_BORDER, 0);
+        lv_obj_set_style_bg_opa(btn, active ? LV_OPA_COVER : LV_OPA_80, 0);
+        lv_obj_set_style_border_width(btn, active ? 2 : 1, 0);
+    }
+    for (int i = 0; i < 8; i++) {
+        lv_obj_t* btn = s_pad_inst_modal_inst_btns[i];
+        if (!btn) continue;
+        bool active = (i == (int)inst);
+        lv_obj_set_style_bg_color(btn, active ? RED808_ACCENT : RED808_SURFACE, 0);
+        lv_obj_set_style_border_color(btn, active ? RED808_CYAN : RED808_BORDER, 0);
+        lv_obj_set_style_bg_opa(btn, active ? LV_OPA_COVER : LV_OPA_80, 0);
+        lv_obj_set_style_border_width(btn, active ? 2 : 1, 0);
+    }
+}
+
+static void pad_inst_modal_close_cb(lv_event_t* e) {
+    if (e && lv_event_get_target(e) != lv_event_get_current_target(e)) return;
+    if (s_pad_inst_modal) {
+        lv_obj_del(s_pad_inst_modal);
+        s_pad_inst_modal = NULL;
+        s_pad_inst_modal_pad_lbl = NULL;
+        s_pad_inst_modal_inst_lbl = NULL;
+        for (int i = 0; i < 16; i++) s_pad_inst_modal_pad_btns[i] = NULL;
+        for (int i = 0; i < 8; i++) s_pad_inst_modal_inst_btns[i] = NULL;
+    }
+}
+
+static void pad_inst_modal_pick_pad_cb(lv_event_t* e) {
+    int pad = (int)(intptr_t)lv_event_get_user_data(e);
+    if (pad < 0 || pad > 15) return;
+    s_pad_inst_focus_pad = (uint8_t)pad;
+    pad_inst_refresh_controls();
+    pad_inst_modal_refresh();
+}
+
+static void pad_inst_modal_pad_cb(lv_event_t* e) {
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    uint8_t pad = s_pad_inst_focus_pad;
+    pad = (uint8_t)((pad + delta + 16) % 16);
+    s_pad_inst_focus_pad = pad;
+    pad_inst_refresh_controls();
+    pad_inst_modal_refresh();
+}
+
+static void pad_inst_modal_inst_cb(lv_event_t* e) {
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    uint8_t pad = s_pad_inst_focus_pad;
+    if (pad > 15) pad = 15;
+    uint8_t inst = s_pad_inst_sel[pad];
+    inst = (uint8_t)((inst + delta + 8) % 8);
+    s_pad_inst_sel[pad] = inst;
+    pad_inst_refresh_pad_badge(pad);
+    pad_inst_refresh_controls();
+    pad_inst_apply_to_master(pad);
+    pad_inst_modal_refresh();
+}
+
+static void pad_inst_modal_pick_inst_cb(lv_event_t* e) {
+    int inst = (int)(intptr_t)lv_event_get_user_data(e);
+    if (inst < 0 || inst > 7) return;
+    uint8_t pad = s_pad_inst_focus_pad;
+    if (pad > 15) pad = 15;
+    s_pad_inst_sel[pad] = (uint8_t)inst;
+    pad_inst_refresh_pad_badge(pad);
+    pad_inst_refresh_controls();
+    pad_inst_apply_to_master(pad);
+    pad_inst_modal_refresh();
+}
+
+static void grid_pad_inst_popup_cb(lv_event_t* e) {
+    if (lv_event_get_target(e) != lv_event_get_current_target(e)) return;
+    if (s_pad_inst_modal) {
+        pad_inst_modal_close_cb(NULL);
+        return;
+    }
+
+    s_pad_inst_modal = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(s_pad_inst_modal, LV_HOR_RES, LV_VER_RES);
+    lv_obj_set_style_bg_color(s_pad_inst_modal, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_pad_inst_modal, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(s_pad_inst_modal, 0, 0);
+    lv_obj_set_style_pad_all(s_pad_inst_modal, 0, 0);
+    lv_obj_clear_flag(s_pad_inst_modal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_pad_inst_modal, pad_inst_modal_close_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* card = lv_obj_create(s_pad_inst_modal);
+    lv_obj_set_size(card, 560, 360);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, RED808_PANEL, 0);
+    lv_obj_set_style_bg_grad_color(card, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(card, 2, 0);
+    lv_obj_set_style_border_color(card, RED808_CYAN, 0);
+    lv_obj_set_style_radius(card, 18, 0);
+    lv_obj_set_style_pad_all(card, 14, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t* title = lv_label_create(card);
+    lv_label_set_text(title, "PAD INSTRUMENT SELECT");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_color(title, RED808_CYAN, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+
+    lv_obj_t* sub = lv_label_create(card);
+    lv_label_set_text(sub, "Seleccion directa por instrumento");
+    lv_obj_set_style_text_font(sub, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(sub, RED808_TEXT_DIM, 0);
+    lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, 32);
+
+    s_pad_inst_modal_pad_lbl = lv_label_create(card);
+    lv_obj_set_style_text_font(s_pad_inst_modal_pad_lbl, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(s_pad_inst_modal_pad_lbl, RED808_ACCENT, 0);
+    lv_obj_align(s_pad_inst_modal_pad_lbl, LV_ALIGN_TOP_MID, 0, 64);
+
+    s_pad_inst_modal_inst_lbl = lv_label_create(card);
+    lv_obj_set_style_text_font(s_pad_inst_modal_inst_lbl, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(s_pad_inst_modal_inst_lbl, RED808_TEXT, 0);
+    lv_obj_align(s_pad_inst_modal_inst_lbl, LV_ALIGN_TOP_MID, 0, 98);
+
+    const int pad_grid_x0 = 32;
+    const int pad_grid_y0 = 138;
+    const int pad_btn_w = 56;
+    const int pad_btn_h = 30;
+    const int pad_gap_x = 8;
+    const int pad_gap_y = 8;
+    for (int i = 0; i < 16; i++) {
+        lv_obj_t* pb = lv_btn_create(card);
+        s_pad_inst_modal_pad_btns[i] = pb;
+        int col = i % 4;
+        int row = i / 4;
+        lv_obj_set_size(pb, pad_btn_w, pad_btn_h);
+        lv_obj_set_pos(pb, pad_grid_x0 + col * (pad_btn_w + pad_gap_x), pad_grid_y0 + row * (pad_btn_h + pad_gap_y));
+        apply_control_button_style(pb, RED808_BORDER, false, 8);
+        lv_obj_t* pl = lv_label_create(pb);
+        lv_label_set_text_fmt(pl, "%02d", i + 1);
+        lv_obj_set_style_text_font(pl, &lv_font_montserrat_12, 0);
+        lv_obj_center(pl);
+        lv_obj_add_event_cb(pb, pad_inst_modal_pick_pad_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    }
+
+    lv_obj_t* pad_hdr = lv_label_create(card);
+    lv_label_set_text(pad_hdr, "PAD");
+    lv_obj_set_style_text_font(pad_hdr, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(pad_hdr, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(pad_hdr, pad_grid_x0, pad_grid_y0 - 20);
+
+    const int grid_x0 = 302;
+    const int grid_y0 = 138;
+    const int grid_cols = 4;
+    const int btn_w = 104;
+    const int btn_h = 38;
+    const int gap_x = 8;
+    const int gap_y = 8;
+
+    lv_obj_t* inst_hdr = lv_label_create(card);
+    lv_label_set_text(inst_hdr, "INSTRUMENT");
+    lv_obj_set_style_text_font(inst_hdr, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(inst_hdr, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(inst_hdr, grid_x0, grid_y0 - 20);
+
+    for (int i = 0; i < 8; i++) {
+        lv_obj_t* ib = lv_btn_create(card);
+        s_pad_inst_modal_inst_btns[i] = ib;
+        int col = i % grid_cols;
+        int row = i / grid_cols;
+        lv_obj_set_size(ib, btn_w, btn_h);
+        lv_obj_set_pos(ib, grid_x0 + col * (btn_w + gap_x), grid_y0 + row * (btn_h + gap_y));
+        apply_control_button_style(ib, RED808_BORDER, false, 10);
+        lv_obj_t* il = lv_label_create(ib);
+        lv_label_set_text(il, PAD_INST_NAMES[i]);
+        lv_obj_set_style_text_font(il, &lv_font_montserrat_14, 0);
+        lv_obj_center(il);
+        lv_obj_add_event_cb(ib, pad_inst_modal_pick_inst_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    }
+
+    lv_obj_t* close_btn = lv_btn_create(card);
+    lv_obj_set_size(close_btn, 120, 40);
+    lv_obj_align(close_btn, LV_ALIGN_BOTTOM_MID, 0, -18);
+    apply_control_button_style(close_btn, RED808_BORDER, false, 10);
+    lv_obj_t* close_lbl = lv_label_create(close_btn);
+    lv_label_set_text(close_lbl, "CERRAR");
+    lv_obj_center(close_lbl);
+    lv_obj_add_event_cb(close_btn, pad_inst_modal_close_cb, LV_EVENT_CLICKED, NULL);
+
+    pad_inst_modal_refresh();
 }
 
 // Helper: styled control button
@@ -714,6 +972,108 @@ static lv_obj_t* create_info_cell(lv_obj_t* parent, int x, int y, int w, int h,
     return panel;
 }
 
+// =============================================================================
+// PAD LAYOUT — resize/reposition live_pad_btns for 6 display modes
+// =============================================================================
+static void apply_pad_layout(int mode) {
+    s_pad_mode = mode;
+    const int M = 8, G = 4, SCR_W = 1024, SCR_H = 600;
+    int cols, count, pw, ph;
+    switch (mode) {
+        default:
+        case 0: cols=4; count=16; pw=122;                ph=143;                break;
+        case 1: cols=4; count=16; pw=(SCR_W-2*M-3*G)/4;  ph=(SCR_H-2*M-3*G)/4; break;
+        case 2: cols=4; count=8;  pw=(SCR_W-2*M-3*G)/4;  ph=(SCR_H-2*M-1*G)/2; break;
+        case 3: cols=2; count=4;  pw=(SCR_W-2*M-1*G)/2;  ph=(SCR_H-2*M-1*G)/2; break;
+        case 4: cols=2; count=2;  pw=(SCR_W-2*M-1*G)/2;  ph=(SCR_H-2*M);        break;
+        case 5: cols=1; count=1;  pw=(SCR_W-2*M);         ph=(SCR_H-2*M);        break;
+    }
+
+    bool fullscreen = (mode != 0);
+    for (int i = 0; i < live_home_panel_count; i++) {
+        if (!live_home_panels[i]) continue;
+        if (fullscreen) lv_obj_add_flag(live_home_panels[i], LV_OBJ_FLAG_HIDDEN);
+        else            lv_obj_clear_flag(live_home_panels[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    for (int i = 0; i < 16; i++) {
+        if (!live_pad_btns[i]) continue;
+        if (i < count) {
+            int c = i % cols, r = i / cols;
+            lv_obj_set_size(live_pad_btns[i], pw, ph);
+            lv_obj_set_pos(live_pad_btns[i], M + c*(pw+G), M + r*(ph+G));
+            lv_obj_clear_flag(live_pad_btns[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(live_pad_btns[i]);
+        } else {
+            lv_obj_add_flag(live_pad_btns[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_pad_back_btn) {
+        if (mode == 0) lv_obj_add_flag(s_pad_back_btn, LV_OBJ_FLAG_HIDDEN);
+        else { lv_obj_clear_flag(s_pad_back_btn, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(s_pad_back_btn); }
+    }
+}
+
+static void pad_mode_select_cb(lv_event_t* e) {
+    int mode = (int)(intptr_t)lv_event_get_user_data(e);
+    if (s_pad_mode_modal) { lv_obj_del(s_pad_mode_modal); s_pad_mode_modal = NULL; }
+    apply_pad_layout(mode);
+    if (lv_scr_act() != scr_live) ui_navigate_to(2);
+}
+
+static void grid_pad_mode_cb(lv_event_t* e) {
+    if (s_pad_mode_modal) { lv_obj_del(s_pad_mode_modal); s_pad_mode_modal = NULL; return; }
+
+    s_pad_mode_modal = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(s_pad_mode_modal, LV_HOR_RES, LV_VER_RES);
+    lv_obj_set_pos(s_pad_mode_modal, 0, 0);
+    lv_obj_set_style_bg_color(s_pad_mode_modal, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_pad_mode_modal, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(s_pad_mode_modal, 0, 0);
+    lv_obj_set_style_radius(s_pad_mode_modal, 0, 0);
+    lv_obj_set_style_pad_all(s_pad_mode_modal, 0, 0);
+    lv_obj_clear_flag(s_pad_mode_modal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_pad_mode_modal, [](lv_event_t*){
+        if (s_pad_mode_modal) { lv_obj_del(s_pad_mode_modal); s_pad_mode_modal = NULL; }
+    }, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* card = lv_obj_create(s_pad_mode_modal);
+    lv_obj_set_size(card, 380, 380);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, RED808_PANEL, 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(card, RED808_ACCENT2, 0);
+    lv_obj_set_style_border_width(card, 2, 0);
+    lv_obj_set_style_radius(card, 16, 0);
+    lv_obj_set_style_pad_all(card, 14, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* title = lv_label_create(card);
+    lv_label_set_text(title, "MODO PADS");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(title, RED808_ACCENT2, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+
+    static const char* mode_labels[] = {
+        "16 PADS", "16 PADS  FULLSCREEN",
+        "8 PADS  FULLSCREEN", "4 PADS  FULLSCREEN",
+        "2 PADS  FULLSCREEN", "1 PAD  FULLSCREEN"
+    };
+    for (int i = 0; i < 6; i++) {
+        bool sel = (i == s_pad_mode);
+        lv_obj_t* btn = lv_btn_create(card);
+        lv_obj_set_size(btn, 330, 42);
+        lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 32 + i*46);
+        apply_control_button_style(btn, sel ? RED808_ACCENT2 : RED808_SURFACE, sel, 10);
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, mode_labels[i]);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(lbl, RED808_TEXT, 0);
+        lv_obj_center(lbl);
+        lv_obj_add_event_cb(btn, pad_mode_select_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    }
+}
+
 static void create_live_screen(void) {
     scr_live = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_live, RED808_BG, 0);
@@ -734,6 +1094,8 @@ static void create_live_screen(void) {
     lv_obj_set_style_border_width(sep, 0, 0);
     lv_obj_set_style_radius(sep, 1, 0);
     lv_obj_clear_flag(sep, LV_OBJ_FLAG_SCROLLABLE);
+    live_home_panel_count = 0;
+    live_home_panels[live_home_panel_count++] = sep;
 
     // === LEFT 4×4: Drum Pads (Neon Ring Style) ===
     for (int i = 0; i < 16; i++) {
@@ -812,6 +1174,7 @@ static void create_live_screen(void) {
     apply_control_button_style(grid_play_btn, RED808_ACCENT2, true, 12);
     lv_obj_set_style_bg_color(grid_play_btn, RED808_ACCENT, 0);
     lv_obj_add_event_cb(grid_play_btn, header_play_cb, LV_EVENT_CLICKED, NULL);
+    live_home_panels[live_home_panel_count++] = grid_play_btn;
     grid_play_lbl = lv_label_create(grid_play_btn);
     lv_label_set_text(grid_play_lbl, LV_SYMBOL_PLAY "\nPLAY");
     lv_obj_set_style_text_font(grid_play_lbl, &lv_font_montserrat_22, 0);
@@ -829,15 +1192,18 @@ static void create_live_screen(void) {
     b = create_ctrl_btn(scr_live, COL_X(6), ROW_Y(0), CW, CH,
                          "PAT\n" LV_SYMBOL_RIGHT, RED808_WARNING, &lv_font_montserrat_20);
     lv_obj_add_event_cb(b, header_pattern_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
+    live_home_panels[live_home_panel_count++] = b;
+    live_home_panels[live_home_panel_count++] = b;
 
-    // [7,0] HOME cell — BPM + VOL together
+    // [7,0] Home status cell — pattern + link health
     lv_obj_t* home_cell = create_info_cell(scr_live, COL_X(7), ROW_Y(0), CW, CH,
-                                           "HOME", "120.0", RED808_ACCENT, &grid_bpm_lbl);
+                                           "STATUS", "P01", RED808_WARNING, &grid_bpm_lbl);
     grid_home_vol_lbl = lv_label_create(home_cell);
-    lv_label_set_text(grid_home_vol_lbl, "VOL 75");
-    lv_obj_set_style_text_font(grid_home_vol_lbl, &lv_font_montserrat_16, 0);
+    lv_label_set_text(grid_home_vol_lbl, "MSTR --  AUX --");
+    lv_obj_set_style_text_font(grid_home_vol_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(grid_home_vol_lbl, RED808_CYAN, 0);
     lv_obj_align(grid_home_vol_lbl, LV_ALIGN_BOTTOM_MID, 0, -10);
+    live_home_panels[live_home_panel_count++] = home_cell;
 
     // --- Row 1: Screen Navigation ---
     // v2.6 — added PIANO as 4th nav (id=10). SYNC button moved to [7,2].
@@ -848,6 +1214,7 @@ static void create_live_screen(void) {
         b = create_ctrl_btn(scr_live, COL_X(4 + i), ROW_Y(1), CW, CH,
                              nav_texts[i], nav_colors[i], &lv_font_montserrat_20);
         lv_obj_add_event_cb(b, grid_nav_cb, LV_EVENT_CLICKED, (void*)(intptr_t)nav_screens[i]);
+        live_home_panels[live_home_panel_count++] = b;
     }
 
     // --- Row 2: System ---
@@ -855,19 +1222,22 @@ static void create_live_screen(void) {
     b = create_ctrl_btn(scr_live, COL_X(4), ROW_Y(2), CW, CH,
                          LV_SYMBOL_DRIVE "\nSD", RED808_CYAN, &lv_font_montserrat_18);
     lv_obj_add_event_cb(b, grid_nav_cb, LV_EVENT_CLICKED, (void*)(intptr_t)9);
+    live_home_panels[live_home_panel_count++] = b;
 
     // [5,2] THEME
     b = create_ctrl_btn(scr_live, COL_X(5), ROW_Y(2), CW, CH,
                          "THEME\n" LV_SYMBOL_RIGHT, RED808_ACCENT2, &lv_font_montserrat_18);
     lv_obj_add_event_cb(b, grid_theme_cb, LV_EVENT_CLICKED, NULL);
+    live_home_panels[live_home_panel_count++] = b;
 
-    // [6,2] Piano synth parameters — replaces NOTE REPEAT on the home grid.
+    // [6,2] PAD MODE — layout selector (was PIANO PARAMS)
     grid_nr_btn = create_ctrl_btn(scr_live, COL_X(6), ROW_Y(2), CW, CH,
-                                  "PIANO\nPARAMS", RED808_CYAN,
+                                  "PAD\nMODE", RED808_ACCENT2,
                                   &lv_font_montserrat_18);
-    lv_obj_set_style_border_color(grid_nr_btn, RED808_CYAN, 0);
+    lv_obj_set_style_border_color(grid_nr_btn, RED808_ACCENT2, 0);
     grid_nr_lbl = lv_obj_get_child(grid_nr_btn, 0);
-    lv_obj_add_event_cb(grid_nr_btn, grid_nav_cb, LV_EVENT_CLICKED, (void*)(intptr_t)11);
+    lv_obj_add_event_cb(grid_nr_btn, grid_pad_mode_cb, LV_EVENT_CLICKED, NULL);
+    live_home_panels[live_home_panel_count++] = grid_nr_btn;
 
     // [7,2] SYNC PADS toggle — flash pads in sync with sequencer steps.
     // Replaces the old "16 LVL" cell (was unused / placeholder).
@@ -878,21 +1248,98 @@ static void create_live_screen(void) {
     lv_obj_set_style_border_color(grid_sync_btn,
         sync_pads_active ? RED808_CYAN : RED808_BORDER, 0);
     lv_obj_add_event_cb(grid_sync_btn, grid_sync_cb, LV_EVENT_CLICKED, NULL);
+    live_home_panels[live_home_panel_count++] = grid_sync_btn;
     grid_16l_btn = NULL;
     grid_16l_lbl = NULL;
 
     // --- Row 3: Info Displays ---
-    // [4,3] Pattern
-    create_info_cell(scr_live, COL_X(4), ROW_Y(3), CW, CH,
-                     "PATTERN", "P01", RED808_WARNING, &grid_pat_lbl);
+    // [4,3] MASTER volume control
+    lv_obj_t* vol_panel = lv_obj_create(scr_live);
+    lv_obj_set_size(vol_panel, CW, CH);
+    lv_obj_set_pos(vol_panel, COL_X(4), ROW_Y(3));
+    lv_obj_set_style_radius(vol_panel, 14, 0);
+    lv_obj_set_style_bg_color(vol_panel, RED808_PANEL, 0);
+    lv_obj_set_style_bg_grad_color(vol_panel, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_grad_dir(vol_panel, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(vol_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(vol_panel, 1, 0);
+    lv_obj_set_style_border_color(vol_panel, RED808_BORDER, 0);
+    lv_obj_set_style_pad_all(vol_panel, 6, 0);
+    lv_obj_clear_flag(vol_panel, LV_OBJ_FLAG_SCROLLABLE);
+    live_home_panels[live_home_panel_count++] = vol_panel;
 
-    // [5,3] Step
-    lv_obj_t* step_panel = create_info_cell(scr_live, COL_X(5), ROW_Y(3), CW, CH,
-                                           "STEP", "--", RED808_CYAN, &grid_step_lbl);
+    lv_obj_t* vol_title = lv_label_create(vol_panel);
+    lv_label_set_text(vol_title, "MASTER VOL");
+    lv_obj_set_style_text_font(vol_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(vol_title, RED808_TEXT_DIM, 0);
+    lv_obj_align(vol_title, LV_ALIGN_TOP_MID, 0, 2);
+
+    lv_obj_t* vol_minus = lv_btn_create(vol_panel);
+    lv_obj_set_size(vol_minus, 50, 40);
+    lv_obj_set_pos(vol_minus, 8, CH - 48);
+    apply_control_button_style(vol_minus, RED808_WARNING, false, 10);
+    lv_obj_t* vol_minus_lbl = lv_label_create(vol_minus);
+    lv_label_set_text(vol_minus_lbl, "-");
+    lv_obj_set_style_text_font(vol_minus_lbl, &lv_font_montserrat_24, 0);
+    lv_obj_center(vol_minus_lbl);
+    lv_obj_add_event_cb(vol_minus, grid_master_vol_step_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+
+    lv_obj_t* vol_plus = lv_btn_create(vol_panel);
+    lv_obj_set_size(vol_plus, 50, 40);
+    lv_obj_set_pos(vol_plus, CW - 58, CH - 48);
+    apply_control_button_style(vol_plus, RED808_SUCCESS, false, 10);
+    lv_obj_t* vol_plus_lbl = lv_label_create(vol_plus);
+    lv_label_set_text(vol_plus_lbl, "+");
+    lv_obj_set_style_text_font(vol_plus_lbl, &lv_font_montserrat_24, 0);
+    lv_obj_center(vol_plus_lbl);
+    lv_obj_add_event_cb(vol_plus, grid_master_vol_step_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
+
+    grid_vol_lbl = lv_label_create(vol_panel);
+    lv_label_set_text(grid_vol_lbl, "75");
+    lv_obj_set_style_text_font(grid_vol_lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(grid_vol_lbl, RED808_ACCENT, 0);
+    lv_obj_align(grid_vol_lbl, LV_ALIGN_CENTER, 0, -12);
+
+    // [5,3] STEP ACTIVO + mini secuencer
+    lv_obj_t* step_panel = lv_obj_create(scr_live);
+    lv_obj_set_size(step_panel, CW, CH);
+    lv_obj_set_pos(step_panel, COL_X(5), ROW_Y(3));
+    lv_obj_set_style_radius(step_panel, 14, 0);
+    lv_obj_set_style_bg_color(step_panel, RED808_PANEL, 0);
+    lv_obj_set_style_bg_grad_color(step_panel, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_grad_dir(step_panel, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(step_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(step_panel, 1, 0);
+    lv_obj_set_style_border_color(step_panel, RED808_BORDER, 0);
+    lv_obj_set_style_pad_all(step_panel, 6, 0);
+    lv_obj_clear_flag(step_panel, LV_OBJ_FLAG_SCROLLABLE);
+    live_home_panels[live_home_panel_count++] = step_panel;
+
+    lv_obj_t* step_title = lv_label_create(step_panel);
+    lv_label_set_text(step_title, "STEP ACTIVO");
+    lv_obj_set_style_text_font(step_title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(step_title, RED808_TEXT_DIM, 0);
+    lv_obj_align(step_title, LV_ALIGN_TOP_MID, 0, 2);
+
+    grid_step_lbl = lv_label_create(step_panel);
+    lv_label_set_text(grid_step_lbl, "--");
+    lv_obj_set_style_text_font(grid_step_lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(grid_step_lbl, RED808_CYAN, 0);
+    lv_obj_align(grid_step_lbl, LV_ALIGN_TOP_MID, 0, 20);
+
+    const int step_dot_cols = 8;
+    const int step_dot_size = 9;
+    const int step_dot_gap_x = 13;
+    const int step_dot_gap_y = 14;
+    const int step_grid_w = (step_dot_cols - 1) * step_dot_gap_x + step_dot_size;
+    const int step_start_x = (CW - step_grid_w) / 2;
+    const int step_start_y = 74;
     for (int i = 0; i < 16; i++) {
         grid_step_dots[i] = lv_obj_create(step_panel);
-        lv_obj_set_size(grid_step_dots[i], 8, 8);
-        lv_obj_set_pos(grid_step_dots[i], 17 + (i % 8) * 12, 106 + (i / 8) * 14);
+        lv_obj_set_size(grid_step_dots[i], step_dot_size, step_dot_size);
+        lv_obj_set_pos(grid_step_dots[i],
+                       step_start_x + (i % step_dot_cols) * step_dot_gap_x,
+                       step_start_y + (i / step_dot_cols) * step_dot_gap_y);
         lv_obj_set_style_radius(grid_step_dots[i], 4, 0);
         lv_obj_set_style_bg_color(grid_step_dots[i], RED808_BORDER, 0);
         lv_obj_set_style_bg_opa(grid_step_dots[i], LV_OPA_COVER, 0);
@@ -912,110 +1359,103 @@ static void create_live_screen(void) {
     lv_obj_set_style_bg_opa(inst_panel, LV_OPA_90, 0);
     lv_obj_set_style_border_width(inst_panel, 1, 0);
     lv_obj_set_style_border_color(inst_panel, RED808_BORDER, 0);
-    lv_obj_set_style_pad_all(inst_panel, 6, 0);
+    lv_obj_set_style_pad_all(inst_panel, 8, 0);
     lv_obj_clear_flag(inst_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(inst_panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(inst_panel, grid_pad_inst_popup_cb, LV_EVENT_CLICKED, NULL);
+    live_home_panels[live_home_panel_count++] = inst_panel;
 
     lv_obj_t* inst_title = lv_label_create(inst_panel);
-    lv_label_set_text(inst_title, "PADS INST");
-    lv_obj_set_style_text_font(inst_title, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(inst_title, RED808_TEXT_DIM, 0);
-    lv_obj_align(inst_title, LV_ALIGN_TOP_MID, 0, 0);
+    lv_label_set_text(inst_title, "PAD INSTRUMENT");
+    lv_obj_set_style_text_font(inst_title, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(inst_title, RED808_CYAN, 0);
+    lv_obj_align(inst_title, LV_ALIGN_TOP_MID, 0, 12);
 
-    grid_pad_prev_btn = lv_btn_create(inst_panel);
-    lv_obj_set_size(grid_pad_prev_btn, 26, 24);
-    lv_obj_align(grid_pad_prev_btn, LV_ALIGN_TOP_LEFT, 2, 20);
-    apply_control_button_style(grid_pad_prev_btn, RED808_ACCENT2, false, 8);
-    lv_obj_t* pad_prev_lbl = lv_label_create(grid_pad_prev_btn);
-    lv_label_set_text(pad_prev_lbl, "<");
-    lv_obj_center(pad_prev_lbl);
-    lv_obj_add_event_cb(grid_pad_prev_btn, grid_pad_prev_cb, LV_EVENT_CLICKED, NULL);
-
-    grid_pad_next_btn = lv_btn_create(inst_panel);
-    lv_obj_set_size(grid_pad_next_btn, 26, 24);
-    lv_obj_align(grid_pad_next_btn, LV_ALIGN_TOP_RIGHT, -2, 20);
-    apply_control_button_style(grid_pad_next_btn, RED808_ACCENT2, false, 8);
-    lv_obj_t* pad_next_lbl = lv_label_create(grid_pad_next_btn);
-    lv_label_set_text(pad_next_lbl, ">");
-    lv_obj_center(pad_next_lbl);
-    lv_obj_add_event_cb(grid_pad_next_btn, grid_pad_next_cb, LV_EVENT_CLICKED, NULL);
-
-    grid_pad_lbl = lv_label_create(inst_panel);
-    lv_label_set_text(grid_pad_lbl, "PAD 01");
-    lv_obj_set_style_text_font(grid_pad_lbl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(grid_pad_lbl, RED808_ACCENT, 0);
-    lv_obj_align(grid_pad_lbl, LV_ALIGN_TOP_MID, 0, 22);
+    grid_pad_prev_btn = NULL;
+    grid_pad_next_btn = NULL;
+    grid_pad_lbl = NULL;
+    grid_inst_prev_btn = NULL;
+    grid_inst_next_btn = NULL;
 
     grid_inst_lbl = lv_label_create(inst_panel);
-    lv_label_set_text(grid_inst_lbl, "Sampler");
+    lv_label_set_text(grid_inst_lbl, "TOCA PARA ABRIR");
     lv_obj_set_style_text_font(grid_inst_lbl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(grid_inst_lbl, RED808_CYAN, 0);
-    lv_obj_align(grid_inst_lbl, LV_ALIGN_TOP_MID, 0, 52);
+    lv_obj_set_style_text_color(grid_inst_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_align(grid_inst_lbl, LV_ALIGN_CENTER, 0, -2);
 
-    grid_inst_prev_btn = lv_btn_create(inst_panel);
-    lv_obj_set_size(grid_inst_prev_btn, 48, 32);
-    lv_obj_align(grid_inst_prev_btn, LV_ALIGN_BOTTOM_LEFT, 2, -6);
-    apply_control_button_style(grid_inst_prev_btn, RED808_WARNING, false, 10);
-    lv_obj_t* inst_prev_lbl = lv_label_create(grid_inst_prev_btn);
-    lv_label_set_text(inst_prev_lbl, "PREV");
-    lv_obj_set_style_text_font(inst_prev_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_center(inst_prev_lbl);
-    lv_obj_add_event_cb(grid_inst_prev_btn, grid_inst_prev_cb, LV_EVENT_CLICKED, NULL);
-
-    grid_inst_next_btn = lv_btn_create(inst_panel);
-    lv_obj_set_size(grid_inst_next_btn, 48, 32);
-    lv_obj_align(grid_inst_next_btn, LV_ALIGN_BOTTOM_RIGHT, -2, -6);
-    apply_control_button_style(grid_inst_next_btn, RED808_SUCCESS, false, 10);
-    lv_obj_t* inst_next_lbl = lv_label_create(grid_inst_next_btn);
-    lv_label_set_text(inst_next_lbl, "NEXT");
-    lv_obj_set_style_text_font(inst_next_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_center(inst_next_lbl);
-    lv_obj_add_event_cb(grid_inst_next_btn, grid_inst_next_cb, LV_EVENT_CLICKED, NULL);
+    grid_inst_edit_btn = lv_btn_create(inst_panel);
+    lv_obj_set_size(grid_inst_edit_btn, CW - 18, 40);
+    lv_obj_align(grid_inst_edit_btn, LV_ALIGN_BOTTOM_MID, 0, -10);
+    apply_control_button_style(grid_inst_edit_btn, RED808_CYAN, false, 10);
+    lv_obj_t* edit_lbl = lv_label_create(grid_inst_edit_btn);
+    lv_label_set_text(edit_lbl, "PAD INSTRUMENT");
+    lv_obj_set_style_text_font(edit_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_center(edit_lbl);
+    lv_obj_add_event_cb(grid_inst_edit_btn, grid_pad_inst_popup_cb, LV_EVENT_CLICKED, NULL);
 
     pad_inst_refresh_controls();
 
-    // [7,3] Link status: MSTR (to Master via C6 WiFi) + AUX (to S3 via UART)
-    lv_obj_t* link_ind = lv_obj_create(scr_live);
-    lv_obj_set_size(link_ind, CW, CH);
-    lv_obj_set_pos(link_ind, COL_X(7), ROW_Y(3));
-    lv_obj_set_style_radius(link_ind, 14, 0);
-    lv_obj_set_style_bg_color(link_ind, RED808_SURFACE, 0);
-    lv_obj_set_style_bg_opa(link_ind, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(link_ind, 2, 0);
-    lv_obj_set_style_border_color(link_ind, RED808_BORDER, 0);
-    lv_obj_set_style_pad_all(link_ind, 6, 0);
-    lv_obj_clear_flag(link_ind, LV_OBJ_FLAG_SCROLLABLE);
+    // [7,3] BPM control
+    lv_obj_t* bpm_panel = lv_obj_create(scr_live);
+    lv_obj_set_size(bpm_panel, CW, CH);
+    lv_obj_set_pos(bpm_panel, COL_X(7), ROW_Y(3));
+    lv_obj_set_style_radius(bpm_panel, 14, 0);
+    lv_obj_set_style_bg_color(bpm_panel, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_grad_color(bpm_panel, RED808_PANEL, 0);
+    lv_obj_set_style_bg_grad_dir(bpm_panel, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(bpm_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(bpm_panel, 2, 0);
+    lv_obj_set_style_border_color(bpm_panel, RED808_BORDER, 0);
+    lv_obj_set_style_pad_all(bpm_panel, 6, 0);
+    lv_obj_clear_flag(bpm_panel, LV_OBJ_FLAG_SCROLLABLE);
+    live_home_panels[live_home_panel_count++] = bpm_panel;
 
-    // ── Row A: MSTR (top half) ──────────────────────────────────────────
-    grid_mstr_dot = lv_obj_create(link_ind);
-    lv_obj_set_size(grid_mstr_dot, 14, 14);
-    lv_obj_align(grid_mstr_dot, LV_ALIGN_LEFT_MID, 0, -18);
-    lv_obj_set_style_radius(grid_mstr_dot, 7, 0);
-    lv_obj_set_style_bg_color(grid_mstr_dot, RED808_TEXT_DIM, 0);
-    lv_obj_set_style_bg_opa(grid_mstr_dot, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(grid_mstr_dot, 0, 0);
-    lv_obj_clear_flag(grid_mstr_dot, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t* bpm_title = lv_label_create(bpm_panel);
+    lv_label_set_text(bpm_title, "BPM");
+    lv_obj_set_style_text_font(bpm_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(bpm_title, RED808_TEXT_DIM, 0);
+    lv_obj_align(bpm_title, LV_ALIGN_TOP_MID, 0, 2);
 
-    grid_mstr_lbl = lv_label_create(link_ind);
-    lv_label_set_text(grid_mstr_lbl, "MSTR --");
-    lv_obj_set_style_text_font(grid_mstr_lbl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(grid_mstr_lbl, RED808_TEXT_DIM, 0);
-    lv_obj_align(grid_mstr_lbl, LV_ALIGN_LEFT_MID, 22, -18);
+    lv_obj_t* bpm_minus = lv_btn_create(bpm_panel);
+    lv_obj_set_size(bpm_minus, 50, 40);
+    lv_obj_set_pos(bpm_minus, 8, CH - 48);
+    apply_control_button_style(bpm_minus, RED808_WARNING, false, 10);
+    lv_obj_t* bpm_minus_lbl = lv_label_create(bpm_minus);
+    lv_label_set_text(bpm_minus_lbl, "-");
+    lv_obj_set_style_text_font(bpm_minus_lbl, &lv_font_montserrat_24, 0);
+    lv_obj_center(bpm_minus_lbl);
+    lv_obj_add_event_cb(bpm_minus, grid_bpm_step_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
 
-    // ── Row B: AUX  (bottom half) ───────────────────────────────────────
-    grid_aux_dot = lv_obj_create(link_ind);
-    lv_obj_set_size(grid_aux_dot, 14, 14);
-    lv_obj_align(grid_aux_dot, LV_ALIGN_LEFT_MID, 0, 18);
-    lv_obj_set_style_radius(grid_aux_dot, 7, 0);
-    lv_obj_set_style_bg_color(grid_aux_dot, RED808_TEXT_DIM, 0);
-    lv_obj_set_style_bg_opa(grid_aux_dot, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(grid_aux_dot, 0, 0);
-    lv_obj_clear_flag(grid_aux_dot, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t* bpm_plus = lv_btn_create(bpm_panel);
+    lv_obj_set_size(bpm_plus, 50, 40);
+    lv_obj_set_pos(bpm_plus, CW - 58, CH - 48);
+    apply_control_button_style(bpm_plus, RED808_SUCCESS, false, 10);
+    lv_obj_t* bpm_plus_lbl = lv_label_create(bpm_plus);
+    lv_label_set_text(bpm_plus_lbl, "+");
+    lv_obj_set_style_text_font(bpm_plus_lbl, &lv_font_montserrat_24, 0);
+    lv_obj_center(bpm_plus_lbl);
+    lv_obj_add_event_cb(bpm_plus, grid_bpm_step_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
 
-    grid_aux_lbl = lv_label_create(link_ind);
-    lv_label_set_text(grid_aux_lbl, "AUX --");
-    lv_obj_set_style_text_font(grid_aux_lbl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(grid_aux_lbl, RED808_TEXT_DIM, 0);
-    lv_obj_align(grid_aux_lbl, LV_ALIGN_LEFT_MID, 22, 18);
+    grid_pat_lbl = lv_label_create(bpm_panel);
+    lv_label_set_text(grid_pat_lbl, "120");
+    lv_obj_set_style_text_font(grid_pat_lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(grid_pat_lbl, RED808_CYAN, 0);
+    lv_obj_align(grid_pat_lbl, LV_ALIGN_CENTER, 0, -12);
+
+    // Floating back button — shown only in FS pad modes (mode 1-5)
+    s_pad_back_btn = lv_btn_create(scr_live);
+    lv_obj_set_size(s_pad_back_btn, 72, 36);
+    lv_obj_set_pos(s_pad_back_btn, 1024 - 8 - 72, 8);
+    apply_control_button_style(s_pad_back_btn, RED808_BORDER, true, 8);
+    lv_obj_set_style_bg_color(s_pad_back_btn, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_opa(s_pad_back_btn, LV_OPA_90, 0);
+    lv_obj_t* back_lbl2 = lv_label_create(s_pad_back_btn);
+    lv_label_set_text(back_lbl2, LV_SYMBOL_HOME);
+    lv_obj_set_style_text_font(back_lbl2, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(back_lbl2, RED808_TEXT, 0);
+    lv_obj_center(back_lbl2);
+    lv_obj_add_flag(s_pad_back_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(s_pad_back_btn, [](lv_event_t*){ apply_pad_layout(0); }, LV_EVENT_CLICKED, NULL);
 
     #undef COL_X
     #undef ROW_Y
@@ -1124,9 +1564,6 @@ static void update_live_screen(void) {
             } else if (muted) {
                 lv_label_set_text(live_pad_state_labels[i], "MUTE");
                 lv_obj_set_style_text_color(live_pad_state_labels[i], RED808_ERROR, 0);
-            } else if (step_lit) {
-                lv_label_set_text(live_pad_state_labels[i], "STEP");
-                lv_obj_set_style_text_color(live_pad_state_labels[i], RED808_SUCCESS, 0);
             } else {
                 lv_label_set_text(live_pad_state_labels[i], "");
             }
@@ -1153,25 +1590,37 @@ static void update_live_screen(void) {
             p4.is_playing ? RED808_CYAN : RED808_ACCENT2, 0);
     }
 
-    // BPM
-    static int gp_prev_bpm = -1, gp_prev_frac = -1;
-    if (grid_bpm_lbl && (p4.bpm_int != gp_prev_bpm || p4.bpm_frac != gp_prev_frac)) {
-        gp_prev_bpm = p4.bpm_int;
-        gp_prev_frac = p4.bpm_frac;
-        lv_label_set_text_fmt(grid_bpm_lbl, "%d.%d", p4.bpm_int, p4.bpm_frac);
+    // Top status cell: pattern + link state (MSTR/AUX)
+    static int gp_prev_pat_top = -1;
+    if (grid_bpm_lbl && p4.current_pattern != gp_prev_pat_top) {
+        gp_prev_pat_top = p4.current_pattern;
+        lv_label_set_text_fmt(grid_bpm_lbl, "P%02d", p4.current_pattern + 1);
     }
 
-    static int gp_prev_home_vol = -1;
-    if (grid_home_vol_lbl && p4.master_volume != gp_prev_home_vol) {
-        gp_prev_home_vol = p4.master_volume;
-        lv_label_set_text_fmt(grid_home_vol_lbl, "VOL %d", p4.master_volume);
+    static int8_t gp_prev_mstr_top = -1;
+    static int8_t gp_prev_aux_top = -1;
+    bool mstr_on = p4.master_connected;
+    bool aux_on  = p4.s3_connected;
+    if (grid_home_vol_lbl && ((int8_t)mstr_on != gp_prev_mstr_top || (int8_t)aux_on != gp_prev_aux_top)) {
+        gp_prev_mstr_top = (int8_t)mstr_on;
+        gp_prev_aux_top = (int8_t)aux_on;
+        lv_label_set_text_fmt(grid_home_vol_lbl, "MSTR %s  AUX %s",
+                              mstr_on ? "OK" : "--", aux_on ? "OK" : "--");
+        lv_obj_set_style_text_color(grid_home_vol_lbl,
+            (mstr_on && aux_on) ? RED808_SUCCESS : (mstr_on || aux_on) ? RED808_CYAN : RED808_TEXT_DIM, 0);
     }
 
-    // Pattern
-    static int gp_prev_pat = -1;
-    if (grid_pat_lbl && p4.current_pattern != gp_prev_pat) {
-        gp_prev_pat = p4.current_pattern;
-        lv_label_set_text_fmt(grid_pat_lbl, "P%02d", p4.current_pattern + 1);
+    // Dedicated HOME controls labels
+    static int gp_prev_home_master = -1;
+    if (grid_vol_lbl && p4.master_volume != gp_prev_home_master) {
+        gp_prev_home_master = p4.master_volume;
+        lv_label_set_text_fmt(grid_vol_lbl, "%d", p4.master_volume);
+    }
+
+    static int gp_prev_home_bpm = -1;
+    if (grid_pat_lbl && p4.bpm_int != gp_prev_home_bpm) {
+        gp_prev_home_bpm = p4.bpm_int;
+        lv_label_set_text_fmt(grid_pat_lbl, "%d", p4.bpm_int);
     }
 
     // Step — only show the running step while playing; show "--" when paused
@@ -1205,27 +1654,6 @@ static void update_live_screen(void) {
             lv_obj_set_style_bg_color(grid_step_dots[i], active_dot ? RED808_WARNING : (has_hits ? RED808_CYAN : RED808_BORDER), 0);
             lv_obj_set_style_bg_opa(grid_step_dots[i], active_dot ? LV_OPA_COVER : (has_hits ? LV_OPA_70 : LV_OPA_40), 0);
         }
-    }
-
-    // Link-status indicators (edge-triggered so LVGL only redraws on change).
-    // MSTR = UDP link to Master (over ESP32-C6 AP); AUX = UART link to S3.
-    static int8_t prev_mstr = -1;
-    static int8_t prev_aux  = -1;
-    bool mstr_on = p4.master_connected;
-    bool aux_on  = p4.s3_connected;
-    if ((int8_t)mstr_on != prev_mstr && grid_mstr_dot && grid_mstr_lbl) {
-        prev_mstr = mstr_on;
-        lv_color_t c = mstr_on ? RED808_SUCCESS : RED808_TEXT_DIM;
-        lv_obj_set_style_bg_color(grid_mstr_dot, c, 0);
-        lv_obj_set_style_text_color(grid_mstr_lbl, c, 0);
-        lv_label_set_text(grid_mstr_lbl, mstr_on ? "MSTR OK" : "MSTR --");
-    }
-    if ((int8_t)aux_on != prev_aux && grid_aux_dot && grid_aux_lbl) {
-        prev_aux = aux_on;
-        lv_color_t c = aux_on ? RED808_INFO : RED808_TEXT_DIM;
-        lv_obj_set_style_bg_color(grid_aux_dot, c, 0);
-        lv_obj_set_style_text_color(grid_aux_lbl, c, 0);
-        lv_label_set_text(grid_aux_lbl, aux_on ? "AUX OK" : "AUX --");
     }
 
     // 16 Levels source pad label tracking — keeps the right-side button in
@@ -1278,9 +1706,10 @@ static lv_obj_t* fx_toggle_btns[6] = {};  // ON/OFF toggle per FX
 static lv_obj_t* fx_pct_ring[6]    = {};  // outer glow ring (decorative)
 static lv_obj_t* fx_page_dot[2]    = {};  // page indicator dots
 static lv_obj_t* fx_page_lbl       = NULL;
+static bool s_fx_ui_syncing = false;
 
 // FX metadata (page × 3)
-static const char*    fx_names[6]  = {"CHORUS","DELAY","REVERB","DRIVE","CUTOFF","RESONANCE"};
+static const char*    fx_names[6]  = {"FLANGER","DELAY","REVERB","DRIVE","CUTOFF","RESONANCE"};
 static const uint32_t fx_colors[6] = {0x58A6FF, 0xB58BFF, 0x39D2C0,
                                        0xFF6B35, 0xFFD700, 0xFF8F5A};
 static const char*    fx_src[6]    = {"ENC 1","ENC 2","ENC 3","POT","POT","POT"};
@@ -1305,6 +1734,31 @@ static void fx_toggle_cb(lv_event_t* e) {
             else if (pot_idx == 1) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
             else udp_send_fx_pot(2, p4.pot_value[2], p4.pot_muted[2]);
         }
+    }
+}
+
+static void fx_arc_cb(lv_event_t* e) {
+    if (s_fx_ui_syncing) return;
+    int cell = (int)(intptr_t)lv_event_get_user_data(e);
+    if (cell < 0 || cell > 5) return;
+    lv_obj_t* arc = (lv_obj_t*)lv_event_get_target(e);
+    int val = lv_arc_get_value(arc);
+
+    if (cell < 3) {
+        p4.enc_value[cell] = (uint8_t)val;
+        if (udp_wifi_connected()) udp_send_fx_enc(cell, p4.enc_value[cell], p4.enc_muted[cell]);
+        return;
+    }
+
+    if (cell == 3) {
+        p4.pot_value[3] = (uint8_t)val;
+        if (udp_wifi_connected()) udp_send_fx_pot(0, p4.pot_value[3], p4.pot_muted[0]);
+    } else if (cell == 4) {
+        p4.pot_value[1] = (uint8_t)val;
+        if (udp_wifi_connected()) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
+    } else {
+        p4.pot_value[2] = (uint8_t)val;
+        if (udp_wifi_connected()) udp_send_fx_pot(2, p4.pot_value[2], p4.pot_muted[2]);
     }
 }
 
@@ -1346,7 +1800,7 @@ static void create_fx_screen(void) {
     lv_obj_set_style_text_color(title, RED808_ACCENT, 0);
     lv_obj_set_pos(title, 60, 10);
 
-    // ── 3 FX cards (single page: Flanger, Delay, Reverb) ──
+    // ── 6 FX cards over 2 pages (3 visible per page) ──
     // Canvas: 1024×600, title row ~50px
     const int CARD_Y   = 50;
     const int CARD_H   = LCD_V_RES - CARD_Y - 8;   // ~542px
@@ -1357,14 +1811,16 @@ static void create_fx_screen(void) {
     // Arc size: make it large and centered
     const int ARC_SIZE = constrain(CARD_W - 40, 200, 290);  // ~290px
 
-    for (int cell = 0; cell < 3; cell++) {
+    for (int cell = 0; cell < 6; cell++) {
 
-        int x = MARGIN + cell * (CARD_W + CARD_GAP);
+        int slot = cell % 3;
+        int x = MARGIN + slot * (CARD_W + CARD_GAP);
 
         // Card container
         lv_obj_t* card = lv_obj_create(scr_fx);
         lv_obj_set_size(card, CARD_W, CARD_H);
         lv_obj_set_pos(card, x, CARD_Y);
+        if (cell >= 3) lv_obj_add_flag(card, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
         // Themed card background
         lv_obj_set_style_bg_color(card, RED808_SURFACE, 0);
@@ -1384,9 +1840,10 @@ static void create_fx_screen(void) {
         lv_obj_set_style_pad_all(card, 0, 0);
         lv_obj_set_style_bg_color(card, lv_color_hex(fx_colors[cell]), LV_STATE_PRESSED);
         lv_obj_set_style_bg_opa(card, (lv_opa_t)216, LV_STATE_PRESSED);
-        // Make card clickable for toggle
-        lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(card, fx_toggle_cb, LV_EVENT_CLICKED, (void*)(intptr_t)cell);
+        // Card is just a visual container; toggle is on its dedicated button
+        // (see ON/OFF below). Otherwise the arc drag bubbled up into a card
+        // click and silently muted the FX.
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_CLICKABLE);
 
         // FX Name — top center, neon style
         fx_name_labels[cell] = lv_label_create(card);
@@ -1414,8 +1871,7 @@ static void create_fx_screen(void) {
         lv_arc_set_bg_angles(fx_arcs[cell], 0, 270);
         lv_arc_set_range(fx_arcs[cell], 0, 127);
         lv_arc_set_value(fx_arcs[cell], 0);
-        lv_obj_clear_flag(fx_arcs[cell], LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_remove_style(fx_arcs[cell], NULL, LV_PART_KNOB);
+        lv_obj_add_event_cb(fx_arcs[cell], fx_arc_cb, LV_EVENT_VALUE_CHANGED, (void*)(intptr_t)cell);
         // Track (background ring) — dim, theme-aware
         lv_obj_set_style_arc_width(fx_arcs[cell], 14, LV_PART_MAIN);
         lv_obj_set_style_arc_color(fx_arcs[cell], RED808_BORDER, LV_PART_MAIN);
@@ -1423,6 +1879,13 @@ static void create_fx_screen(void) {
         // Indicator (filled arc) — neon glow
         lv_obj_set_style_arc_width(fx_arcs[cell], 20, LV_PART_INDICATOR);
         lv_obj_set_style_arc_color(fx_arcs[cell], lv_color_hex(fx_colors[cell]), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(fx_arcs[cell], lv_color_white(), LV_PART_KNOB);
+        lv_obj_set_style_bg_opa(fx_arcs[cell], LV_OPA_COVER, LV_PART_KNOB);
+        lv_obj_set_style_pad_all(fx_arcs[cell], 5, LV_PART_KNOB);
+        lv_obj_set_style_radius(fx_arcs[cell], LV_RADIUS_CIRCLE, LV_PART_KNOB);
+        lv_obj_set_style_shadow_color(fx_arcs[cell], lv_color_hex(fx_colors[cell]), LV_PART_KNOB);
+        lv_obj_set_style_shadow_width(fx_arcs[cell], 10, LV_PART_KNOB);
+        lv_obj_set_style_shadow_opa(fx_arcs[cell], LV_OPA_50, LV_PART_KNOB);
 
         // Value label — center of arc (big neon number)
         fx_value_labels[cell] = lv_label_create(card);
@@ -1451,12 +1914,58 @@ static void create_fx_screen(void) {
         lv_obj_set_style_shadow_width(fx_toggle_btns[cell], 12, 0);
         lv_obj_set_style_shadow_color(fx_toggle_btns[cell], lv_color_hex(fx_colors[cell]), 0);
         lv_obj_set_style_shadow_opa(fx_toggle_btns[cell], LV_OPA_40, 0);
-        lv_obj_clear_flag(fx_toggle_btns[cell], LV_OBJ_FLAG_CLICKABLE);  // card handles click
+        lv_obj_add_flag(fx_toggle_btns[cell], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(fx_toggle_btns[cell], fx_toggle_cb, LV_EVENT_CLICKED, (void*)(intptr_t)cell);
         lv_obj_t* tog_lbl = lv_label_create(fx_toggle_btns[cell]);
         lv_label_set_text(tog_lbl, "ON");
         lv_obj_set_style_text_font(tog_lbl, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(tog_lbl, lv_color_hex(fx_colors[cell]), 0);
         lv_obj_center(tog_lbl);
+    }
+
+    // Page controls
+    const int page_ctrl_y = 46;
+    const int page_ctrl_w = 46;
+    const int page_ctrl_gap = 6;
+    const int page_lbl_w = 46;
+    const int page_dots_w = 22;
+    const int page_group_w = page_ctrl_w * 2 + page_ctrl_gap + page_lbl_w + 12 + page_dots_w;
+    const int page_group_x = LCD_H_RES - 24 - page_group_w;
+
+    lv_obj_t* prev_btn = lv_btn_create(scr_fx);
+    lv_obj_set_size(prev_btn, 46, 34);
+    lv_obj_set_pos(prev_btn, page_group_x, page_ctrl_y);
+    apply_control_button_style(prev_btn, RED808_CYAN, false, 8);
+    lv_obj_t* prev_lbl = lv_label_create(prev_btn);
+    lv_label_set_text(prev_lbl, LV_SYMBOL_LEFT);
+    lv_obj_center(prev_lbl);
+    lv_obj_add_event_cb(prev_btn, fx_page_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+
+    lv_obj_t* next_btn = lv_btn_create(scr_fx);
+    lv_obj_set_size(next_btn, 46, 34);
+    lv_obj_set_pos(next_btn, page_group_x + page_ctrl_w + page_ctrl_gap, page_ctrl_y);
+    apply_control_button_style(next_btn, RED808_CYAN, false, 8);
+    lv_obj_t* next_lbl = lv_label_create(next_btn);
+    lv_label_set_text(next_lbl, LV_SYMBOL_RIGHT);
+    lv_obj_center(next_lbl);
+    lv_obj_add_event_cb(next_btn, fx_page_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
+
+    fx_page_lbl = lv_label_create(scr_fx);
+    lv_label_set_text(fx_page_lbl, "1 / 2");
+    lv_obj_set_style_text_font(fx_page_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(fx_page_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(fx_page_lbl, page_group_x + page_ctrl_w * 2 + page_ctrl_gap * 2, 54);
+
+    for (int p = 0; p < 2; p++) {
+        fx_page_dot[p] = lv_obj_create(scr_fx);
+        lv_obj_set_size(fx_page_dot[p], 8, 8);
+        lv_obj_set_pos(fx_page_dot[p], page_group_x + page_ctrl_w * 2 + page_ctrl_gap * 2 + page_lbl_w + 6 + p * 14, 60);
+        lv_obj_set_style_radius(fx_page_dot[p], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(fx_page_dot[p], RED808_CYAN, 0);
+        lv_obj_set_style_bg_opa(fx_page_dot[p], p == 0 ? LV_OPA_COVER : LV_OPA_30, 0);
+        lv_obj_set_style_border_width(fx_page_dot[p], 0, 0);
+        lv_obj_clear_flag(fx_page_dot[p], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(fx_page_dot[p], LV_OBJ_FLAG_CLICKABLE);
     }
 }
 
@@ -1486,8 +1995,10 @@ static void update_fx_screen(void) {
 
         int pct = (int)((float)display_val / 127.0f * 100.0f + 0.5f);
 
+        s_fx_ui_syncing = true;
         if (fx_arcs[cell])
             lv_arc_set_value(fx_arcs[cell], display_val);
+        s_fx_ui_syncing = false;
 
         if (fx_value_labels[cell])
             lv_label_set_text_fmt(fx_value_labels[cell], "%d", pct);
@@ -1540,6 +2051,7 @@ static int        seq_step_x[16]        = {};  // precomputed step column X
 static bool       seq_raw_grid[16][64]  = {};   // up to 4 bars of raw steps
 static int        seq_raw_len           = 16;   // 16/32/48/64
 static int        seq_page              = 0;    // 0..3
+static bool       seq_force_refresh_cells = false; // force full cell repaint on next update_sequencer_screen
 static lv_obj_t*  seq_page_btns[4]      = {};
 static lv_obj_t*  seq_page_lbls[4]      = {};
 static bool       seq_groove_base[16][16] = {};
@@ -1551,6 +2063,13 @@ static lv_obj_t*  seq_hdr_pat_lbl       = NULL;
 static lv_obj_t*  seq_ctrl_lbl          = NULL;
 static int        seq_ctrl_swing        = 50;
 static int        seq_ctrl_drive        = 0;
+static lv_obj_t*  seq_pattern_modal     = NULL;
+static lv_obj_t*  seq_pattern_modal_lbl = NULL;
+static lv_obj_t*  seq_pattern_modal_spin = NULL;
+static int        seq_pattern_wait_pat  = -1;
+static uint32_t   seq_pattern_wait_ms   = 0;
+static bool       seq_pattern_waiting   = false;
+static uint32_t   seq_pattern_payload_revision = 0;
 
 // Last-loaded MIDI info — kept so the info button in the sequencer header
 // can re-open the summary modal on demand.
@@ -1567,6 +2086,71 @@ static void seq_copy_page_to_p4(int page);
 static void show_midi_load_summary(const char* title, int slot,
                                    int steps, int raw_len, float bpm,
                                    int tracks_used);
+
+static void seq_pattern_modal_hide(void) {
+    if (!seq_pattern_modal) return;
+    lv_obj_del(seq_pattern_modal);
+    seq_pattern_modal = NULL;
+    seq_pattern_modal_lbl = NULL;
+    seq_pattern_modal_spin = NULL;
+    seq_pattern_wait_pat = -1;
+    seq_pattern_wait_ms = 0;
+    seq_pattern_waiting = false;
+}
+
+static void seq_pattern_modal_show(int pattern) {
+    seq_pattern_modal_hide();
+    if (!scr_sequencer) return;
+
+    seq_pattern_modal = lv_obj_create(scr_sequencer);
+    lv_obj_set_size(seq_pattern_modal, 330, 120);
+    lv_obj_align(seq_pattern_modal, LV_ALIGN_TOP_RIGHT, -16, 48);
+    lv_obj_set_style_radius(seq_pattern_modal, 14, 0);
+    lv_obj_set_style_bg_color(seq_pattern_modal, RED808_PANEL, 0);
+    lv_obj_set_style_bg_grad_color(seq_pattern_modal, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_grad_dir(seq_pattern_modal, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(seq_pattern_modal, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(seq_pattern_modal, 2, 0);
+    lv_obj_set_style_border_color(seq_pattern_modal, RED808_CYAN, 0);
+    lv_obj_set_style_pad_all(seq_pattern_modal, 10, 0);
+    lv_obj_clear_flag(seq_pattern_modal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(seq_pattern_modal, LV_OBJ_FLAG_CLICKABLE);
+
+    seq_pattern_modal_spin = lv_spinner_create(seq_pattern_modal, 1000, 60);
+    lv_obj_set_size(seq_pattern_modal_spin, 32, 32);
+    lv_obj_align(seq_pattern_modal_spin, LV_ALIGN_LEFT_MID, 6, 0);
+    lv_obj_set_style_arc_color(seq_pattern_modal_spin, RED808_CYAN, LV_PART_INDICATOR);
+
+    lv_obj_t* t = lv_label_create(seq_pattern_modal);
+    lv_label_set_text_fmt(t, "CARGANDO P%02d", pattern + 1);
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(t, RED808_ACCENT, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, 50, 8);
+
+    seq_pattern_modal_lbl = lv_label_create(seq_pattern_modal);
+    lv_label_set_text(seq_pattern_modal_lbl, "Esperando pattern_sync...");
+    lv_obj_set_style_text_font(seq_pattern_modal_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(seq_pattern_modal_lbl, RED808_TEXT_DIM, 0);
+    lv_obj_align(seq_pattern_modal_lbl, LV_ALIGN_TOP_LEFT, 50, 40);
+
+    seq_pattern_wait_pat = pattern;
+    seq_pattern_wait_ms = millis();
+    seq_pattern_waiting = true;
+}
+
+static void seq_pattern_modal_mark_loaded(void) {
+    if (!seq_pattern_modal) return;
+    if (seq_pattern_modal_spin) {
+        lv_obj_add_flag(seq_pattern_modal_spin, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (seq_pattern_modal_lbl) {
+        lv_label_set_text(seq_pattern_modal_lbl, "Pattern cargado");
+        lv_obj_set_style_text_color(seq_pattern_modal_lbl, RED808_SUCCESS, 0);
+    }
+    lv_obj_set_style_border_color(seq_pattern_modal, RED808_SUCCESS, 0);
+    seq_pattern_waiting = false;
+    seq_pattern_wait_ms = millis();
+}
 
 // Layout — landscape 1024×600 (LCD native, LVGL canvas)
 static const int SEQ_RULER_Y    = 44;   // ruler starts below header
@@ -1819,6 +2403,46 @@ static void seq_install_raw_and_show_page0(int raw_len) {
     seq_page = 0;
     seq_copy_page_to_p4(0);
     seq_apply_page_styles();
+}
+
+void ui_sequencer_sync_from_current_pattern(void) {
+    seq_raw_len = 16;
+    seq_page = 0;
+    seq_groove_base_valid = false;
+    for (int t = 0; t < 16; t++) {
+        for (int s = 0; s < 16; s++) {
+            seq_raw_grid[t][s] = false;
+            p4.steps[t][s] = false;
+        }
+        for (int s = 16; s < 64; s++) {
+            seq_raw_grid[t][s] = false;
+        }
+    }
+    seq_force_refresh_cells = true;
+    seq_apply_page_styles();
+    if (!(udp_wifi_connected() || udp_master_connected())) {
+        seq_pattern_modal_hide();
+    }
+}
+
+void ui_sequencer_load_external_pattern(const bool steps[16][64], int raw_len) {
+    seq_raw_len = (raw_len < 16) ? 16 : (raw_len > 64 ? 64 : raw_len);
+    seq_page = 0;
+    seq_groove_base_valid = false;
+    for (int t = 0; t < 16; t++) {
+        for (int s = 0; s < 64; s++) {
+            seq_raw_grid[t][s] = (s < seq_raw_len) ? steps[t][s] : false;
+        }
+        for (int s = 0; s < 16; s++) {
+            p4.steps[t][s] = seq_raw_grid[t][s];
+        }
+    }
+    seq_force_refresh_cells = true;  // force full cell repaint — prev_cell_key may be stale
+    seq_apply_page_styles();
+    seq_pattern_payload_revision++;
+    if (seq_pattern_waiting || seq_pattern_modal) {
+        seq_pattern_modal_mark_loaded();
+    }
 }
 
 static void create_sequencer_screen(void) {
@@ -2103,6 +2727,54 @@ static void create_sequencer_screen(void) {
 static void update_sequencer_screen(void) {
     int step = p4.current_step;
     bool playing = p4.is_playing;
+    unsigned long now = millis();
+    static uint32_t seq_pattern_wait_rev = 0;
+
+    if (seq_pattern_waiting && seq_pattern_wait_rev == 0) {
+        seq_pattern_wait_rev = seq_pattern_payload_revision;
+    }
+
+    // Pattern loading modal lifecycle: waiting -> loaded or timeout.
+    if (seq_pattern_modal) {
+        if (seq_pattern_waiting) {
+            if (seq_pattern_payload_revision != seq_pattern_wait_rev) {
+                seq_pattern_modal_mark_loaded();
+                seq_pattern_wait_rev = 0;
+            } else if ((now - seq_pattern_wait_ms) > 1800) {
+                if (seq_pattern_modal_spin) {
+                    lv_obj_add_flag(seq_pattern_modal_spin, LV_OBJ_FLAG_HIDDEN);
+                }
+                if (seq_pattern_modal_lbl) {
+                    lv_label_set_text(seq_pattern_modal_lbl, "Timeout: no llego pattern_sync");
+                    lv_obj_set_style_text_color(seq_pattern_modal_lbl, RED808_ERROR, 0);
+                }
+                lv_obj_set_style_border_color(seq_pattern_modal, RED808_ERROR, 0);
+                seq_pattern_waiting = false;
+                seq_pattern_wait_ms = now;
+                seq_pattern_wait_rev = 0;
+            }
+        } else if ((now - seq_pattern_wait_ms) > 700) {
+            seq_pattern_modal_hide();
+            seq_pattern_wait_rev = 0;
+        }
+    }
+
+    // Recovery probe: re-request current pattern only when we changed
+    // pattern locally and have not yet received a payload for it. This
+    // avoids hammering the master when the new pattern is genuinely empty.
+    static unsigned long last_probe_ms      = 0;
+    static int           last_probe_pattern = -1;
+    static uint32_t      last_probe_rev     = 0;
+    if (last_probe_pattern != p4.current_pattern) {
+        last_probe_pattern = p4.current_pattern;
+        last_probe_rev     = seq_pattern_payload_revision;
+        last_probe_ms      = now - 400;  // probe almost immediately
+    }
+    if (seq_pattern_payload_revision == last_probe_rev &&
+        (now - last_probe_ms >= 500)) {
+        last_probe_ms = now;
+        udp_send_get_pattern(p4.current_pattern);
+    }
 
     // ── Dirty tracking state (persistent across calls) ──
     // Cell visual key: bit2=active, bit1=is_cur(col), bit0=muted
@@ -2120,6 +2792,12 @@ static void update_sequencer_screen(void) {
     // Theme change invalidates all color-dependent styles
     if (currentTheme != prev_seq_theme) {
         prev_seq_theme = currentTheme;
+        memset(prev_cell_key, 0xFF, sizeof(prev_cell_key));
+        memset(prev_trk_key,  0xFF, sizeof(prev_trk_key));
+    }
+    // External pattern loaded: force full cell repaint regardless of dirty state
+    if (seq_force_refresh_cells) {
+        seq_force_refresh_cells = false;
         memset(prev_cell_key, 0xFF, sizeof(prev_cell_key));
         memset(prev_trk_key,  0xFF, sizeof(prev_trk_key));
     }
@@ -2293,6 +2971,41 @@ static lv_obj_t* vol_labels[16] = {};
 static lv_obj_t* vol_name_labels[16] = {};
 static lv_obj_t* vol_mute_dots[16] = {};
 static lv_obj_t* vol_strip_panels[16] = {};
+static lv_obj_t* mix_master_slider = NULL;
+static lv_obj_t* mix_seq_slider = NULL;
+static lv_obj_t* mix_live_slider = NULL;
+static lv_obj_t* mix_bpm_slider = NULL;
+static lv_obj_t* mix_master_lbl = NULL;
+static lv_obj_t* mix_seq_lbl = NULL;
+static lv_obj_t* mix_live_lbl = NULL;
+static lv_obj_t* mix_bpm_lbl = NULL;
+
+static void mix_global_slider_cb(lv_event_t* e) {
+    int which = (int)(intptr_t)lv_event_get_user_data(e);
+    lv_obj_t* slider = (lv_obj_t*)lv_event_get_target(e);
+    int val = lv_slider_get_value(slider);
+    switch (which) {
+        case 0:
+            p4.master_volume = val;
+            udp_send_set_volume(val);
+            break;
+        case 1:
+            p4.seq_volume = val;
+            udp_send_set_seq_volume(val);
+            break;
+        case 2:
+            p4.live_volume = val;
+            udp_send_set_live_volume(val);
+            break;
+        case 3:
+            p4.bpm_int = val;
+            p4.bpm_frac = 0;
+            udp_send_tempo((float)val);
+            break;
+        default:
+            break;
+    }
+}
 
 static void vol_slider_cb(lv_event_t* e) {
     int trk = (int)(intptr_t)lv_event_get_user_data(e);
@@ -2320,12 +3033,58 @@ static void create_volumes_screen(void) {
     lv_obj_set_style_text_color(title, RED808_TEXT_DIM, 0);
     lv_obj_set_pos(title, 60, 10);
 
+    // Global controls row (focused): MAIN + BPM only
+    const int global_y = 30;
+    const int slider_w = 320;
+    const int slider_gap = 80;
+    const int label_w = 110;
+    const int block_w = label_w + slider_w + 70;
+    const int global_x = (LCD_H_RES - (2 * block_w + slider_gap)) / 2;
+    struct GlobalCtl { const char* name; int value; int max; lv_obj_t** slider; lv_obj_t** label; };
+    GlobalCtl globals[] = {
+        {"MAIN", p4.master_volume, Config::MAX_VOLUME, &mix_master_slider, &mix_master_lbl},
+        {"BPM",  p4.bpm_int,       240,                &mix_bpm_slider,    &mix_bpm_lbl},
+    };
+    mix_seq_slider = NULL;
+    mix_seq_lbl = NULL;
+    mix_live_slider = NULL;
+    mix_live_lbl = NULL;
+    for (int i = 0; i < 2; i++) {
+        int x = global_x + i * (block_w + slider_gap);
+        lv_obj_t* name = lv_label_create(scr_volumes);
+        lv_label_set_text(name, globals[i].name);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(name, i == 1 ? RED808_ACCENT : RED808_CYAN, 0);
+        lv_obj_set_pos(name, x, global_y);
+
+        *globals[i].label = lv_label_create(scr_volumes);
+        lv_label_set_text_fmt(*globals[i].label, "%d", globals[i].value);
+        lv_obj_set_style_text_font(*globals[i].label, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(*globals[i].label, RED808_TEXT, 0);
+        lv_obj_set_pos(*globals[i].label, x + label_w + slider_w + 10, global_y + 10);
+
+        *globals[i].slider = lv_slider_create(scr_volumes);
+        lv_obj_set_size(*globals[i].slider, slider_w, 18);
+        lv_obj_set_pos(*globals[i].slider, x + label_w, global_y + 16);
+        lv_slider_set_range(*globals[i].slider, i == 1 ? 40 : 0, globals[i].max);
+        lv_slider_set_value(*globals[i].slider, globals[i].value, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(*globals[i].slider, lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(*globals[i].slider, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(*globals[i].slider, i == 1 ? RED808_ACCENT : RED808_CYAN, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(*globals[i].slider, LV_OPA_COVER, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(*globals[i].slider, lv_color_white(), LV_PART_KNOB);
+        lv_obj_set_style_bg_opa(*globals[i].slider, LV_OPA_COVER, LV_PART_KNOB);
+        lv_obj_set_style_pad_all(*globals[i].slider, 10, LV_PART_KNOB);
+        lv_obj_set_style_radius(*globals[i].slider, LV_RADIUS_CIRCLE, LV_PART_KNOB);
+        lv_obj_add_event_cb(*globals[i].slider, mix_global_slider_cb, LV_EVENT_VALUE_CHANGED, (void*)(intptr_t)(i == 0 ? 0 : 3));
+    }
+
     // Single row of 16 strips filling the full display width
     int margin = 10;
     int gap    = 4;
     int total_w = LW - 2 * margin;
     int strip_w = (total_w - 15 * gap) / 16;   // ~56px each
-    int y_top   = 50;
+    int y_top   = 100;
     int y_bottom = LH - 8;
     int strip_h  = y_bottom - y_top;            // ~508px
     int name_h   = 14;
@@ -2425,6 +3184,20 @@ static void update_volumes_screen(void) {
                                    -1, -1, -1, -1, -1, -1, -1, -1};
     static bool prev_muted[16] = {};
     static bool prev_init = false;
+    static int prev_master = -1;
+    static int prev_bpm = -1;
+
+    if (mix_master_slider && p4.master_volume != prev_master) {
+        prev_master = p4.master_volume;
+        lv_slider_set_value(mix_master_slider, p4.master_volume, LV_ANIM_OFF);
+        if (mix_master_lbl) lv_label_set_text_fmt(mix_master_lbl, "%d", p4.master_volume);
+    }
+    if (mix_bpm_slider && p4.bpm_int != prev_bpm) {
+        prev_bpm = p4.bpm_int;
+        lv_slider_set_value(mix_bpm_slider, p4.bpm_int, LV_ANIM_OFF);
+        if (mix_bpm_lbl) lv_label_set_text_fmt(mix_bpm_lbl, "%d", p4.bpm_int);
+    }
+
     for (int i = 0; i < 16; i++) {
         bool volume_changed = p4.track_volume[i] != prev_volume[i];
         bool mute_changed = !prev_init || p4.track_muted[i] != prev_muted[i];
@@ -2462,7 +3235,7 @@ static void update_volumes_screen(void) {
 }
 
 // =============================================================================
-// SD CARD SCREEN — Remote browse S3's SD card via UART
+// SD CARD SCREEN — browse P4 local SD card or P4 internal MEM MIDI storage
 // =============================================================================
 
 // SD screen widgets
@@ -2495,22 +3268,154 @@ static void sd_refresh_ui(void);
 static void sd_switch_panel_mode(bool midi_mode);
 static void sd_midi_pat_btn_cb(lv_event_t* e);
 static void sd_midi_load_btn_cb(lv_event_t* e);
+static void sd_refresh_source(void);
 static void show_midi_load_summary(const char* title, int slot,
                                    int steps, int raw_len, float bpm,
                                    int tracks_used);
 
-// ── MEM MIDI source (P4 SPIFFS /mid/*.mid) ──────────────────────────────────
-// sd_source: 0 = SD (remote via S3), 1 = MEM (P4 internal flash)
+// ── Sources: 0 = P4 local SD, 1 = MEM MIDI in P4 SPIFFS ─────────────────────
 static int        sd_source            = 0;
 static lv_obj_t*  sd_src_sd_btn        = NULL;
 static lv_obj_t*  sd_src_mem_btn       = NULL;
 static char       sd_mem_files[64][48] = {};
 static int        sd_mem_count         = 0;
 static int        sd_mem_selected      = -1;
+static bool       sd_local_mounted     = false;
+
+static const char* sd_basename(const char* path) {
+    const char* base = strrchr(path, '/');
+    return base ? base + 1 : path;
+}
+
+static bool sd_local_try_mount(void) {
+    if (sd_local_mounted) return true;
+    if (SD_MMC.begin("/sdcard", false, false)) {
+        sd_local_mounted = true;
+        return true;
+    }
+    SD_MMC.end();
+    if (SD_MMC.begin("/sdcard", true, false)) {
+        sd_local_mounted = true;
+        return true;
+    }
+    sd_local_mounted = false;
+    return false;
+}
+
+static void sd_local_reset_selection(void) {
+    p4sd.selected_file[0] = '\0';
+    p4sd.selected_is_midi = false;
+    p4sd.midi_load_result = -2;
+}
+
+static void sd_local_refresh_listing(bool reset_selection) {
+    if (reset_selection) sd_local_reset_selection();
+    p4sd.entry_count = 0;
+    p4sd.list_complete = false;
+
+    if (!sd_local_try_mount()) {
+        p4sd.mounted = false;
+        if (p4sd.path[0] == '\0') strcpy(p4sd.path, "/");
+        p4sd.list_complete = true;
+        p4sd.needs_refresh = true;
+        return;
+    }
+
+    p4sd.mounted = true;
+    if (p4sd.path[0] == '\0') strcpy(p4sd.path, "/");
+
+    File dir = SD_MMC.open(p4sd.path);
+    if (!dir || !dir.isDirectory()) {
+        strcpy(p4sd.path, "/");
+        dir = SD_MMC.open("/");
+    }
+    if (!dir || !dir.isDirectory()) {
+        p4sd.mounted = false;
+        p4sd.list_complete = true;
+        p4sd.needs_refresh = true;
+        return;
+    }
+
+    File entry = dir.openNextFile();
+    while (entry && p4sd.entry_count < P4_SD_MAX_ENTRIES) {
+        const char* base = sd_basename(entry.name());
+        bool is_dir = entry.isDirectory();
+        if (base[0] == '\0' || base[0] == '.') {
+            entry.close();
+            entry = dir.openNextFile();
+            continue;
+        }
+        bool is_midi = false;
+        if (!is_dir) {
+            size_t nlen = strlen(base);
+            bool is_wav = (nlen > 4 && strcasecmp(base + nlen - 4, ".wav") == 0);
+            is_midi = (nlen > 4 && strcasecmp(base + nlen - 4, ".mid") == 0);
+            if (!is_wav && !is_midi) {
+                entry.close();
+                entry = dir.openNextFile();
+                continue;
+            }
+        }
+        P4SdEntry& out = p4sd.entries[p4sd.entry_count++];
+        strncpy(out.name, base, sizeof(out.name) - 1);
+        out.name[sizeof(out.name) - 1] = '\0';
+        out.is_dir = is_dir;
+        out.is_midi = is_midi;
+        entry.close();
+        entry = dir.openNextFile();
+    }
+    dir.close();
+    p4sd.list_complete = true;
+    p4sd.needs_refresh = true;
+}
+
+static void sd_local_select(int idx) {
+    if (idx < 0 || idx >= p4sd.entry_count) return;
+    const P4SdEntry& entry = p4sd.entries[idx];
+    if (entry.is_dir) {
+        char next_path[128];
+        if (strcmp(p4sd.path, "/") == 0) {
+            snprintf(next_path, sizeof(next_path), "/%s", entry.name);
+        } else {
+            snprintf(next_path, sizeof(next_path), "%s/%s", p4sd.path, entry.name);
+        }
+        strncpy(p4sd.path, next_path, sizeof(p4sd.path) - 1);
+        p4sd.path[sizeof(p4sd.path) - 1] = '\0';
+        sd_local_refresh_listing(true);
+    } else {
+        strncpy(p4sd.selected_file, entry.name, sizeof(p4sd.selected_file) - 1);
+        p4sd.selected_file[sizeof(p4sd.selected_file) - 1] = '\0';
+        p4sd.selected_is_midi = entry.is_midi;
+        p4sd.midi_load_result = -2;
+        p4sd.needs_refresh = true;
+    }
+}
+
+static void sd_local_back(void) {
+    if (strcmp(p4sd.path, "/") == 0 || p4sd.path[0] == '\0') {
+        sd_local_refresh_listing(true);
+        return;
+    }
+    char* last = strrchr(p4sd.path, '/');
+    if (last && last != p4sd.path) *last = '\0';
+    else strcpy(p4sd.path, "/");
+    sd_local_refresh_listing(true);
+}
 
 static void sd_mem_refresh_list(void) {
     sd_mem_count = mem_midi::list_midi_files("/mid", sd_mem_files, 64);
     if (sd_mem_selected >= sd_mem_count) sd_mem_selected = -1;
+}
+
+static void sd_refresh_source(void) {
+    if (sd_source == 1) {
+        sd_mem_refresh_list();
+        sd_switch_panel_mode(true);
+    } else {
+        if (p4sd.path[0] == '\0') strcpy(p4sd.path, "/");
+        sd_local_refresh_listing(false);
+    }
+    sd_refresh_ui();
 }
 
 static void sd_mem_file_btn_cb(lv_event_t* e) {
@@ -2535,7 +3440,9 @@ static void sd_source_btn_cb(lv_event_t* e) {
         sd_mem_refresh_list();
         sd_switch_panel_mode(true);   // MEM is MIDI-only
     } else {
-        sd_switch_panel_mode(false);  // default SD view
+        if (p4sd.path[0] == '\0') strcpy(p4sd.path, "/");
+        sd_local_refresh_listing(true);
+        sd_switch_panel_mode(false);  // default local SD view
     }
     if (sd_src_sd_btn) {
         lv_obj_set_style_bg_color(sd_src_sd_btn,
@@ -2582,14 +3489,14 @@ static void sd_file_btn_cb(lv_event_t* e) {
             p4sd.midi_load_result = -2;
         }
     }
-    uart_send_sd_select((uint8_t)idx);
+    sd_local_select(idx);
 }
 
 static void sd_back_btn_cb(lv_event_t* e) {
     (void)e;
     p4sd.selected_is_midi = false;
     sd_switch_panel_mode(false);
-    uart_send_sd_back();
+    sd_local_back();
 }
 
 static void sd_pad_btn_cb(lv_event_t* e) {
@@ -2769,16 +3676,68 @@ static void sd_midi_load_btn_cb(lv_event_t* e) {
         return;
     }
 
-    // SD branch — delegate to S3 over UART (existing path).
+    // Local SD branch — parse from P4 SD_MMC and stage directly to Master.
     if (p4sd.selected_file[0] == '\0') return;
-    if (sd_midi_status_lbl) lv_label_set_text(sd_midi_status_lbl, "Loading MIDI...");
-    uart_send_sd_load_midi((uint8_t)sd_midi_target_slot);
+    if (sd_midi_status_lbl) {
+        lv_label_set_text(sd_midi_status_lbl, "Loading SD MIDI...");
+        lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_WARNING, 0);
+    }
+    char path[192];
+    if (strcmp(p4sd.path, "/") == 0)
+        snprintf(path, sizeof(path), "/%s", p4sd.selected_file);
+    else
+        snprintf(path, sizeof(path), "%s/%s", p4sd.path, p4sd.selected_file);
+
+    char name[16];
+    int steps_found = 0, raw_len = 0;
+    float bpm = 0;
+    bool ok = mem_midi::load_pattern_raw_from_fs(SD_MMC, path, seq_raw_grid,
+                                                 name, sizeof(name),
+                                                 &steps_found, &bpm, &raw_len,
+                                                 sd_midi_import_mode);
+    if (!ok) {
+        if (sd_midi_status_lbl) {
+            lv_label_set_text(sd_midi_status_lbl, "SD MIDI parse failed");
+            lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_ACCENT, 0);
+        }
+        return;
+    }
+
+    p4.current_pattern = sd_midi_target_slot;
+    seq_install_raw_and_show_page0(raw_len);
+
+    if (sd_midi_status_lbl) {
+        char buf[64];
+        snprintf(buf, sizeof(buf),
+            "Loaded SD -> Pat %02d (%d hits, %d bars)",
+            sd_midi_target_slot + 1, steps_found, raw_len / 16);
+        lv_label_set_text(sd_midi_status_lbl, buf);
+        lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_SUCCESS, 0);
+    }
+    if (bpm >= 40.0f && bpm <= 240.0f) {
+        p4.bpm_int  = (int)bpm;
+        p4.bpm_frac = (int)((bpm - p4.bpm_int) * 10);
+        uart_lock_tempo(3000);
+        if (ui_use_udp_transport()) udp_send_tempo(bpm);
+    }
+    int tracks_used = 0;
+    for (int t = 0; t < 16; t++)
+        for (int s = 0; s < raw_len; s++)
+            if (seq_raw_grid[t][s]) { tracks_used++; break; }
+    show_midi_load_summary(p4sd.selected_file,
+                           sd_midi_target_slot + 1,
+                           steps_found, raw_len, bpm, tracks_used);
 }
 
 static void sd_load_btn_cb(lv_event_t* e) {
     (void)e;
     if (p4sd.selected_file[0] == '\0') return;
+    if (p4sd.selected_is_midi) return;
     uart_send_sd_load((uint8_t)p4sd.selected_pad);
+    if (sd_status_lbl) {
+        lv_label_set_text_fmt(sd_status_lbl, "LOAD PAD %02d...", p4sd.selected_pad + 1);
+        lv_obj_set_style_text_color(sd_status_lbl, RED808_CYAN, 0);
+    }
 }
 
 static void sd_refresh_ui(void) {
@@ -2836,7 +3795,7 @@ static void sd_refresh_ui(void) {
         return;
     }
 
-    // ── SD branch (remote via S3) ───────────────────────────────────────
+    // ── SD branch (local P4 SD_MMC) ─────────────────────────────────────
     // Update status
     if (sd_status_lbl) {
         lv_label_set_text(sd_status_lbl, p4sd.mounted ? "READY" : "NO SD CARD");
@@ -2855,10 +3814,7 @@ static void sd_refresh_ui(void) {
     }
     // Enable/disable LOAD button
     if (sd_load_btn) {
-        if (p4sd.selected_file[0] && !p4sd.selected_is_midi)
-            lv_obj_clear_state(sd_load_btn, LV_STATE_DISABLED);
-        else
-            lv_obj_add_state(sd_load_btn, LV_STATE_DISABLED);
+        lv_obj_add_state(sd_load_btn, LV_STATE_DISABLED);
     }
     if (sd_midi_load_btn) {
         if (p4sd.selected_file[0] && p4sd.selected_is_midi)
@@ -2866,48 +3822,6 @@ static void sd_refresh_ui(void) {
         else
             lv_obj_add_state(sd_midi_load_btn, LV_STATE_DISABLED);
     }
-    // MIDI status: update label from midi_load_result set by uart_handler
-    if (sd_midi_status_lbl && p4sd.selected_is_midi) {
-        int8_t r = p4sd.midi_load_result;
-        if (r == -1) {
-            lv_label_set_text(sd_midi_status_lbl, "Loading MIDI...");
-            lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_WARNING, 0);
-        } else if (r == 0x7F) {
-            lv_label_set_text(sd_midi_status_lbl, "MIDI parse failed");
-            lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_ACCENT, 0);
-        } else if (r >= 0) {
-            char buf[32];
-            snprintf(buf, sizeof(buf), "Loaded \u2192 Pat %02d", r + 1);
-            lv_label_set_text(sd_midi_status_lbl, buf);
-            lv_obj_set_style_text_color(sd_midi_status_lbl, RED808_SUCCESS, 0);
-        }
-    }
-
-    // ── Trigger summary modal on SD-load success transition ──
-    // The SD path delegates parsing to S3; the pattern + BPM arrive via
-    // separate UART/UDP messages. When midi_load_result transitions from
-    // "in-progress" to a valid slot we show the same modal as the MEM
-    // path, counting hits from the already-applied p4.steps.
-    {
-        static int8_t s_prev_midi_load_result = -2;
-        int8_t r = p4sd.midi_load_result;
-        if (p4sd.selected_is_midi && r >= 0 && r < 16 &&
-            s_prev_midi_load_result != r) {
-            int hits = 0, tracks_used = 0;
-            for (int t = 0; t < 16; t++) {
-                bool used = false;
-                for (int s = 0; s < 16; s++) {
-                    if (p4.steps[t][s]) { hits++; used = true; }
-                }
-                if (used) tracks_used++;
-            }
-            float bpm = p4.bpm_int + p4.bpm_frac * 0.1f;
-            show_midi_load_summary(p4sd.selected_file, r + 1,
-                                   hits, 16, bpm, tracks_used);
-        }
-        s_prev_midi_load_result = r;
-    }
-
     if (!p4sd.mounted) {
         lv_obj_t* lbl = lv_label_create(sd_file_list);
         lv_label_set_text(lbl, "SD NOT MOUNTED");
@@ -3356,6 +4270,10 @@ static lv_obj_t* s_piano_rec_btn          = NULL;  // v2.7
 static lv_obj_t* s_piano_rec_lbl          = NULL;  // v2.7
 static lv_obj_t* s_piano_pad_lbl          = NULL;  // v2.8
 
+// Forward declarations for melody grid (defined after key handlers)
+static void piano_grid_refresh_cell(int col, int row);
+static void piano_grid_refresh_all(void);
+
 static inline bool piano_pc_is_black(uint8_t pc) {
     return (pc == 1) || (pc == 3) || (pc == 6) || (pc == 8) || (pc == 10);
 }
@@ -3406,6 +4324,7 @@ static void piano_send_on(uint8_t midi_note) {
             int col = s_piano_rec_step;
             if (col < 0 || col >= 16) col = 0;
             s_piano_rec_grid[col][row] = true;
+            piano_grid_refresh_cell(col, row);
             s_piano_rec_step = (col + 1) % 16;
         }
     }
@@ -3501,6 +4420,7 @@ static void piano_rec_btn_cb(lv_event_t* e) {
         // v2.8 — fresh take: clear local mirror and rewind step cursor
         memset(s_piano_rec_grid, 0, sizeof(s_piano_rec_grid));
         s_piano_rec_step = 0;
+        piano_grid_refresh_all();
     }
     // v2.9 — tell master so all slaves mirror REC state and grid clear
     if (ui_use_udp_transport()) {
@@ -3533,6 +4453,202 @@ static void piano_pad_btn_cb(lv_event_t* e) {
     if (ui_use_udp_transport()) udp_send_melody_set_pad((uint8_t)s_piano_assign_pad);
     // v2.9 — sync directly to S3 melody screen via UART (4 campos completos)
     piano_uart_broadcast_state();
+}
+
+// =============================================================================
+// PIANO MELODY GRID — 16 steps × 12 pitch-classes editor with preview
+// (P3/P4 Prioridad 4: visual partitura, edición, presets, play, BPM/velocity)
+// =============================================================================
+static lv_obj_t* s_piano_grid_container = NULL;
+static lv_obj_t* s_piano_grid_btns[16][12] = {{NULL}};
+static lv_obj_t* s_piano_play_btn = NULL;
+static lv_obj_t* s_piano_play_lbl = NULL;
+static lv_obj_t* s_piano_bpm_lbl = NULL;
+static lv_obj_t* s_piano_vel_lbl = NULL;
+static bool      s_piano_play_active   = false;
+static int       s_piano_play_step     = 0;
+static uint32_t  s_piano_play_next_ms  = 0;
+static uint32_t  s_piano_play_off_due_ms = 0;
+static int       s_piano_play_held_note = -1;
+static uint8_t   s_piano_velocity      = 100;
+static float     s_piano_bpm           = 120.0f;
+
+// Row 0 = B (top), Row 11 = C (bottom). Matches existing recording mapping.
+static const uint8_t PIANO_ROW_TO_PC[12] = {11,10,9,8,7,6,5,4,3,2,1,0};
+
+static void piano_grid_refresh_cell(int col, int row) {
+    if (col < 0 || col >= 16 || row < 0 || row >= 12) return;
+    lv_obj_t* b = s_piano_grid_btns[col][row];
+    if (!b) return;
+    bool on      = s_piano_rec_grid[col][row];
+    bool playing = (s_piano_play_active && col == s_piano_play_step);
+    bool black   = piano_pc_is_black(PIANO_ROW_TO_PC[row]);
+    uint32_t color;
+    if (on && playing)       color = 0xFFD000;       // yellow — note + playhead
+    else if (on)             color = 0x00E5FF;       // cyan — armed note
+    else if (playing)        color = 0x303030;       // dim grey — playhead
+    else                     color = black ? 0x101820 : 0x222A30;
+    lv_obj_set_style_bg_color(b, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(b, on ? LV_OPA_COVER : (playing ? LV_OPA_70 : LV_OPA_60), 0);
+}
+
+static void piano_grid_refresh_all(void) {
+    for (int c = 0; c < 16; c++)
+        for (int r = 0; r < 12; r++)
+            piano_grid_refresh_cell(c, r);
+}
+
+void piano_grid_visual_refresh_external(void) {
+    piano_grid_refresh_all();
+}
+
+static void piano_grid_cell_cb(lv_event_t* e) {
+    int packed = (int)(intptr_t)lv_event_get_user_data(e);
+    int col = (packed >> 8) & 0xFF;
+    int row = packed & 0xFF;
+    if (col < 0 || col >= 16 || row < 0 || row >= 12) return;
+    s_piano_rec_grid[col][row] = !s_piano_rec_grid[col][row];
+    piano_grid_refresh_cell(col, row);
+}
+
+static void piano_grid_clear(void) {
+    memset(s_piano_rec_grid, 0, sizeof(s_piano_rec_grid));
+    s_piano_rec_step = 0;
+    piano_grid_refresh_all();
+}
+
+static void piano_apply_preset(int idx) {
+    memset(s_piano_rec_grid, 0, sizeof(s_piano_rec_grid));
+    // (col, pc) pairs. pc 0=C ... 11=B.
+    static const uint8_t PRESET_BASS[][2] = {
+        {0,9},{2,9},{4,9},{6,12 % 12},{8,9},{10,7},{12,9},{14,7}
+    };
+    static const uint8_t PRESET_ARP[][2] = {
+        {0,0},{2,4},{4,7},{6,0},{8,4},{10,7},{12,0},{14,7}
+    };
+    static const uint8_t PRESET_SCALE[][2] = {
+        {0,0},{1,2},{2,4},{3,5},{4,7},{5,9},{6,11},{7,0},
+        {8,11},{9,9},{10,7},{11,5},{12,4},{13,2},{14,0},{15,7}
+    };
+    const uint8_t (*p)[2] = NULL;
+    int len = 0;
+    switch (idx) {
+        case 0: p = PRESET_BASS;  len = sizeof(PRESET_BASS)/2;  break;
+        case 1: p = PRESET_ARP;   len = sizeof(PRESET_ARP)/2;   break;
+        case 2: p = PRESET_SCALE; len = sizeof(PRESET_SCALE)/2; break;
+        default: return;
+    }
+    for (int i = 0; i < len; i++) {
+        int col = p[i][0];
+        int pc  = p[i][1] % 12;
+        for (int r = 0; r < 12; r++) {
+            if (PIANO_ROW_TO_PC[r] == (uint8_t)pc) {
+                if (col >= 0 && col < 16) s_piano_rec_grid[col][r] = true;
+                break;
+            }
+        }
+    }
+    piano_grid_refresh_all();
+}
+
+static void piano_preset_btn_cb(lv_event_t* e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    piano_apply_preset(idx);
+}
+
+static void piano_clear_btn_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    piano_grid_clear();
+    if (ui_use_udp_transport()) udp_send_melody_clear();
+}
+
+static void piano_play_step_off(void) {
+    if (s_piano_play_held_note < 0) return;
+    if (ui_use_udp_transport()) {
+        if (PIANO_ENGINES[s_piano_engine_idx] == 3) {
+            udp_send_synth303_note_off();
+        } else {
+            udp_send_synth_note_off(PIANO_ENGINES[s_piano_engine_idx], 0);
+        }
+    }
+    s_piano_play_held_note = -1;
+}
+
+static void piano_play_btn_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    s_piano_play_active     = !s_piano_play_active;
+    s_piano_play_step       = -1;   // first tick advances to 0
+    s_piano_play_next_ms    = millis();
+    s_piano_play_off_due_ms = 0;
+    piano_play_step_off();
+    if (s_piano_play_lbl)
+        lv_label_set_text(s_piano_play_lbl, s_piano_play_active ? "■ STOP" : "▶ PLAY");
+    if (s_piano_play_btn) {
+        lv_obj_set_style_border_color(s_piano_play_btn,
+            s_piano_play_active ? lv_color_hex(0x7CFF6B) : RED808_BORDER, 0);
+        lv_obj_set_style_border_width(s_piano_play_btn, s_piano_play_active ? 3 : 1, 0);
+    }
+    if (!s_piano_play_active) piano_grid_refresh_all();
+}
+
+static void piano_bpm_btn_cb(lv_event_t* e) {
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    int v = (int)(s_piano_bpm + 0.5f) + delta;
+    if (v < 40)  v = 40;
+    if (v > 240) v = 240;
+    s_piano_bpm = (float)v;
+    if (s_piano_bpm_lbl) lv_label_set_text_fmt(s_piano_bpm_lbl, "BPM %d", v);
+    if (ui_use_udp_transport()) udp_send_tempo(s_piano_bpm);
+}
+
+static void piano_vel_btn_cb(lv_event_t* e) {
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    int v = (int)s_piano_velocity + delta * 10;
+    if (v < 10)  v = 10;
+    if (v > 127) v = 127;
+    s_piano_velocity = (uint8_t)v;
+    if (s_piano_vel_lbl) lv_label_set_text_fmt(s_piano_vel_lbl, "VEL %d", v);
+}
+
+void update_piano_screen(void) {
+    if (!s_piano_play_active) return;
+    uint32_t now = millis();
+    uint32_t step_ms = (uint32_t)(60000.0f / s_piano_bpm / 4.0f); // 16th note
+    if (step_ms < 30) step_ms = 30;
+
+    // Note-off scheduling for the currently held note
+    if (s_piano_play_held_note >= 0 && now >= s_piano_play_off_due_ms) {
+        piano_play_step_off();
+    }
+
+    if ((int32_t)(now - s_piano_play_next_ms) < 0) return;
+    int prev = s_piano_play_step;
+    int next = (prev + 1);
+    if (next < 0 || next >= 16) next = 0;
+    s_piano_play_step = next;
+
+    if (prev >= 0 && prev < 16)
+        for (int r = 0; r < 12; r++) piano_grid_refresh_cell(prev, r);
+    for (int r = 0; r < 12; r++) piano_grid_refresh_cell(next, r);
+
+    // Fire the lowest-row hit cell for this step (mono playback)
+    for (int r = 11; r >= 0; r--) {
+        if (s_piano_rec_grid[next][r]) {
+            int pc = PIANO_ROW_TO_PC[r];
+            int midi = s_piano_octave * 12 + pc + 12;
+            if (midi < 0)   midi = 0;
+            if (midi > 127) midi = 127;
+            piano_play_step_off();
+            if (ui_use_udp_transport()) {
+                udp_send_synth_note_on_ex(PIANO_ENGINES[s_piano_engine_idx],
+                                          (uint8_t)midi, s_piano_velocity, false, false);
+            }
+            s_piano_play_held_note   = midi;
+            s_piano_play_off_due_ms  = now + (step_ms * 4 / 5);
+            break;
+        }
+    }
+    s_piano_play_next_ms = now + step_ms;
 }
 
 // v2.8 — push the locally recorded grid to master as a melodyAssign packet
@@ -3772,29 +4888,123 @@ static void create_piano_screen(void) {
     lv_obj_set_style_text_color(s_piano_status_lbl, RED808_ACCENT, 0);
     lv_obj_set_pos(s_piano_status_lbl, 592, row_y + 8);
 
-    /* v2.8 — second control row: PAD-/+/ASSIGN for melody-to-pad bind */
-    int row_y2 = 98;
-    lv_obj_t* pad_minus = piano_make_chip(scr_piano, 12, row_y2, 70, 36, "PAD-");
+    /* v2.8/v2.9 — compact melody row: pad assign + presets + transport */
+    int row_y2 = 104;
+    int x_cursor = 12;
+    lv_obj_t* pad_minus = piano_make_chip(scr_piano, x_cursor, row_y2, 54, 36, "PAD-");
     lv_obj_set_style_border_color(pad_minus, lv_color_hex(0xFF1493), 0);
     lv_obj_add_event_cb(pad_minus, piano_pad_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+    x_cursor += 54 + 4;
     s_piano_pad_lbl = lv_label_create(scr_piano);
     lv_label_set_text_fmt(s_piano_pad_lbl, "PAD %d", s_piano_assign_pad + 1);
-    lv_obj_set_style_text_font(s_piano_pad_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(s_piano_pad_lbl, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(s_piano_pad_lbl, lv_color_hex(0xFF1493), 0);
-    lv_obj_set_pos(s_piano_pad_lbl, 92, row_y2 + 8);
-    lv_obj_t* pad_plus = piano_make_chip(scr_piano, 168, row_y2, 70, 36, "PAD+");
+    lv_obj_set_pos(s_piano_pad_lbl, x_cursor, row_y2 + 9);
+    x_cursor += 70 + 4;
+    lv_obj_t* pad_plus = piano_make_chip(scr_piano, x_cursor, row_y2, 54, 36, "PAD+");
     lv_obj_set_style_border_color(pad_plus, lv_color_hex(0xFF1493), 0);
     lv_obj_add_event_cb(pad_plus, piano_pad_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)+1);
+    x_cursor += 54 + 6;
     {
-        lv_obj_t* assign = piano_make_chip(scr_piano, 250, row_y2, 140, 36, "→ ASSIGN");
+        lv_obj_t* assign = piano_make_chip(scr_piano, x_cursor, row_y2, 90, 36, "ASSIGN");
         lv_obj_set_style_border_color(assign, lv_color_hex(0xFF1493), 0);
         lv_obj_t* l = lv_obj_get_child(assign, 0);
         if (l) lv_obj_set_style_text_color(l, lv_color_hex(0xFF1493), 0);
         lv_obj_add_event_cb(assign, piano_assign_btn_cb, LV_EVENT_CLICKED, NULL);
     }
+    x_cursor += 90 + 10;
 
-    /* Keys area (full width below controls) */
-    int keys_y = 144;
+    /* Presets, clear, play, BPM and velocity live in the same row. */
+    {
+        struct PresetCfg { const char* lbl; int idx; uint32_t color; };
+        const PresetCfg presets[3] = {
+            { "BASS",  0, 0xFFE066 },
+            { "ARP",   1, 0x7CFF6B },
+            { "SCALE", 2, 0x00E5FF },
+        };
+        for (int i = 0; i < 3; i++) {
+            lv_obj_t* b = piano_make_chip(scr_piano, x_cursor, row_y2, 64, 36, presets[i].lbl);
+            lv_obj_set_style_border_color(b, lv_color_hex(presets[i].color), 0);
+            lv_obj_t* l = lv_obj_get_child(b, 0);
+            if (l) lv_obj_set_style_text_color(l, lv_color_hex(presets[i].color), 0);
+            lv_obj_add_event_cb(b, piano_preset_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)presets[i].idx);
+            x_cursor += 64 + 4;
+        }
+        lv_obj_t* clr = piano_make_chip(scr_piano, x_cursor, row_y2, 64, 36, "CLEAR");
+        lv_obj_set_style_border_color(clr, lv_color_hex(0xFF6060), 0);
+        lv_obj_add_event_cb(clr, piano_clear_btn_cb, LV_EVENT_CLICKED, NULL);
+        x_cursor += 64 + 8;
+
+        s_piano_play_btn = piano_make_chip(scr_piano, x_cursor, row_y2, 84, 36, "PLAY");
+        s_piano_play_lbl = lv_obj_get_child(s_piano_play_btn, 0);
+        lv_obj_set_style_border_color(s_piano_play_btn, lv_color_hex(0x7CFF6B), 0);
+        if (s_piano_play_lbl) lv_obj_set_style_text_color(s_piano_play_lbl, lv_color_hex(0x7CFF6B), 0);
+        lv_obj_add_event_cb(s_piano_play_btn, piano_play_btn_cb, LV_EVENT_CLICKED, NULL);
+        x_cursor += 84 + 8;
+
+        lv_obj_t* vm = piano_make_chip(scr_piano, x_cursor, row_y2, 42, 36, "V-");
+        lv_obj_add_event_cb(vm, piano_vel_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+        x_cursor += 42 + 4;
+        s_piano_vel_lbl = lv_label_create(scr_piano);
+        lv_label_set_text_fmt(s_piano_vel_lbl, "VEL %d", (int)s_piano_velocity);
+        lv_obj_set_style_text_font(s_piano_vel_lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(s_piano_vel_lbl, RED808_TEXT, 0);
+        lv_obj_set_pos(s_piano_vel_lbl, x_cursor, row_y2 + 9);
+        x_cursor += 70 + 4;
+        lv_obj_t* vp = piano_make_chip(scr_piano, x_cursor, row_y2, 42, 36, "V+");
+        lv_obj_add_event_cb(vp, piano_vel_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)+1);
+        x_cursor += 42 + 8;
+
+        lv_obj_t* bm = piano_make_chip(scr_piano, x_cursor, row_y2, 42, 36, "B-");
+        lv_obj_add_event_cb(bm, piano_bpm_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+        x_cursor += 42 + 4;
+        s_piano_bpm_lbl = lv_label_create(scr_piano);
+        lv_label_set_text_fmt(s_piano_bpm_lbl, "BPM %d", (int)s_piano_bpm);
+        lv_obj_set_style_text_font(s_piano_bpm_lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(s_piano_bpm_lbl, RED808_TEXT, 0);
+        lv_obj_set_pos(s_piano_bpm_lbl, x_cursor, row_y2 + 9);
+        x_cursor += 78 + 4;
+        lv_obj_t* bp = piano_make_chip(scr_piano, x_cursor, row_y2, 42, 36, "B+");
+        lv_obj_add_event_cb(bp, piano_bpm_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)+1);
+    }
+
+    /* Melody grid container: 16 cols × 12 rows pitch grid */
+    int grid_y = 148;
+    int grid_h = 184;
+    s_piano_grid_container = lv_obj_create(scr_piano);
+    lv_obj_set_pos(s_piano_grid_container, 0, grid_y);
+    lv_obj_set_size(s_piano_grid_container, W, grid_h);
+    lv_obj_set_style_bg_color(s_piano_grid_container, RED808_PANEL, 0);
+    lv_obj_set_style_bg_opa(s_piano_grid_container, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_piano_grid_container, 0, 0);
+    lv_obj_set_style_pad_all(s_piano_grid_container, 0, 0);
+    lv_obj_clear_flag(s_piano_grid_container, LV_OBJ_FLAG_SCROLLABLE);
+    {
+        int gx0 = 8;
+        int gy0 = 4;
+        int gw  = W - 16;
+        int gh  = grid_h - 8;
+        int cw  = gw / 16;
+        int ch  = gh / 12;
+        for (int c = 0; c < 16; c++) {
+            for (int r = 0; r < 12; r++) {
+                lv_obj_t* cell = lv_btn_create(s_piano_grid_container);
+                lv_obj_set_pos(cell, gx0 + c * cw + 1, gy0 + r * ch + 1);
+                lv_obj_set_size(cell, cw - 2, ch - 2);
+                lv_obj_set_style_radius(cell, 3, 0);
+                lv_obj_set_style_border_width(cell, 1, 0);
+                lv_obj_set_style_border_color(cell, RED808_BORDER, 0);
+                lv_obj_set_style_shadow_width(cell, 0, 0);
+                int packed = (c << 8) | r;
+                lv_obj_add_event_cb(cell, piano_grid_cell_cb, LV_EVENT_CLICKED, (void*)(intptr_t)packed);
+                s_piano_grid_btns[c][r] = cell;
+            }
+        }
+        piano_grid_refresh_all();
+    }
+
+    /* Keys area (bottom half) */
+    int keys_y = grid_y + grid_h + 8;
     int keys_h = H - keys_y - 8;
     s_piano_keys_container = lv_obj_create(scr_piano);
     lv_obj_set_pos(s_piano_keys_container, 0, keys_y);
@@ -4372,6 +5582,11 @@ static void ui_reload_themed_screens(void) {
     grid_inst_prev_btn = NULL;
     grid_inst_next_btn = NULL;
     grid_inst_lbl = NULL;
+    grid_inst_edit_btn = NULL;
+    s_pad_inst_modal = NULL;
+    s_pad_inst_modal_pad_lbl = NULL;
+    s_pad_inst_modal_inst_lbl = NULL;
+    for (int i = 0; i < 8; i++) s_pad_inst_modal_inst_btns[i] = NULL;
     for (int i = 0; i < 3; i++) {
         fx_arcs[i] = NULL; fx_value_labels[i] = NULL;
         fx_name_labels[i] = NULL; fx_toggle_btns[i] = NULL;
@@ -4392,6 +5607,12 @@ static void ui_reload_themed_screens(void) {
     seq_status_pat_lbl = NULL;
     seq_status_bpm_lbl = NULL;
     seq_ctrl_lbl = NULL;
+    seq_pattern_modal = NULL;
+    seq_pattern_modal_lbl = NULL;
+    seq_pattern_modal_spin = NULL;
+    seq_pattern_wait_pat = -1;
+    seq_pattern_wait_ms = 0;
+    seq_pattern_waiting = false;
     for (int i = 0; i < 16; i++) {
         vol_sliders[i] = NULL; vol_labels[i] = NULL;
         vol_name_labels[i] = NULL; vol_mute_dots[i] = NULL;
@@ -4450,11 +5671,24 @@ void ui_navigate_to(int screen_id) {
     };
     int count = sizeof(targets) / sizeof(targets[0]);
     if (screen_id >= 0 && screen_id < count && targets[screen_id]) {
+        // Before leaving, stop all active synths to prevent stuck notes
+        // Note-off for all synth engines (Daisy, TB-303, etc.)
+        if (udp_wifi_connected()) {
+            for (int eng = 0; eng < 7; eng++) {
+                udp_send_synth_note_off(eng, 0);  // engine, track=0
+            }
+        }
+        
         lv_scr_load_anim(targets[screen_id], LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, false);
         prev_active_screen = active_screen;
         active_screen = screen_id;
-        // Request SD listing when entering SD screen
-        if (screen_id == 9) uart_send_sd_mount();
+        if (screen_id == 3) {
+            // Entering sequencer: enforce fresh pattern pull from Master.
+            udp_send_select_pattern(p4.current_pattern);
+            udp_send_get_pattern(p4.current_pattern);
+        }
+        // Refresh current storage source when entering SD screen
+        if (screen_id == 9) sd_refresh_source();
     }
     // Enable/disable direct touch bypass for live pads
     g_live_screen_active.store(screen_id == 2, std::memory_order_release);
@@ -4463,7 +5697,14 @@ void ui_navigate_to(int screen_id) {
 // =============================================================================
 // PAD QUEUE DRAIN — called from loop() on Core 1 (outside LVGL mutex)
 // =============================================================================
+// Pending note-off for melodic engines (303/WT/FM2/SH101) so a pad-tap does
+// not leave the synth voice ringing forever. Index by pad 0..15.
+static uint32_t s_pad_noteoff_at[16]    = {0};
+static int8_t   s_pad_noteoff_engine[16] = {-1, -1, -1, -1, -1, -1, -1, -1,
+                                           -1, -1, -1, -1, -1, -1, -1, -1};
+
 void ui_process_pad_queue(void) {
+    uint32_t now_ms = millis();
     uint8_t t = s_pad_qt.load(std::memory_order_relaxed);
     uint8_t h = s_pad_qh.load(std::memory_order_acquire);
     while (t != h) {
@@ -4480,12 +5721,38 @@ void ui_process_pad_queue(void) {
         // Then send UDP to master with MPC-style velocity
         if (p4.wifi_connected || p4.master_connected) {
             udp_send_trigger(pad, velocity);
+            // Schedule synth note-off for melodic engines so 303/WT/FM2/SH101
+            // don't get stuck after a tap. Drum samples (engine -1, 0, 1, 2)
+            // already self-terminate.
+            if (pad < 16) {
+                int8_t engine = pad_inst_engine_code(s_pad_inst_sel[pad]);
+                if (engine >= 3 && engine <= 6) {
+                    s_pad_noteoff_engine[pad] = engine;
+                    s_pad_noteoff_at[pad]     = now_ms + 220;
+                }
+            }
         }
         // Mirror to legacy binary flash timer so screens that still read
         // p4.pad_flash_until (e.g. sequencer sync highlight) keep working.
         p4.pad_flash_until[pad] = millis() + 80;
     }
     s_pad_qt.store(t, std::memory_order_relaxed);
+
+    // Drain pending melodic note-offs.
+    for (int pad = 0; pad < 16; pad++) {
+        if (!s_pad_noteoff_at[pad]) continue;
+        if ((int32_t)(now_ms - s_pad_noteoff_at[pad]) < 0) continue;
+        int8_t engine = s_pad_noteoff_engine[pad];
+        s_pad_noteoff_at[pad]     = 0;
+        s_pad_noteoff_engine[pad] = -1;
+        if (!(p4.wifi_connected || p4.master_connected)) continue;
+        if (engine == 3) {
+            // 303 is a single-voice mono synth on master
+            udp_send_synth303_note_off();
+        } else if (engine >= 0 && engine <= 6) {
+            udp_send_synth_note_off((uint8_t)engine, (uint8_t)pad);
+        }
+    }
 }
 
 // =============================================================================
@@ -4501,6 +5768,21 @@ static constexpr int LIVE_SY = 147;
 
 int ui_pad_from_xy(uint16_t x, uint16_t y) {
     if (!g_live_screen_active.load(std::memory_order_acquire)) return -1;
+    // Dynamic hit-test against current pad geometry (PAD MODE aware).
+    for (int i = 0; i < 16; i++) {
+        lv_obj_t* b = live_pad_btns[i];
+        if (!b) continue;
+        if (lv_obj_has_flag(b, LV_OBJ_FLAG_HIDDEN)) continue;
+        lv_coord_t px = lv_obj_get_x(b);
+        lv_coord_t py = lv_obj_get_y(b);
+        lv_coord_t pw = lv_obj_get_width(b);
+        lv_coord_t ph = lv_obj_get_height(b);
+        if ((int)x >= px && (int)x < (px + pw) && (int)y >= py && (int)y < (py + ph)) {
+            return i;
+        }
+    }
+
+    // Legacy fallback geometry (default 4x4 layout)
     if (x < LIVE_M || x >= (LIVE_M + 4 * LIVE_SX)) return -1;
     if (y < LIVE_M || y >= (LIVE_M + 4 * LIVE_SY)) return -1;
     int col  = (x - LIVE_M) / LIVE_SX;
@@ -4525,8 +5807,20 @@ static inline uint8_t ui_live_pad_velocity(void) {
 // =============================================================================
 void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
     (void)velocity;
+    static bool prev_live_active = true;
 
     if (!g_live_screen_active.load(std::memory_order_acquire)) {
+        // Leaving LIVE screen: release all held pads to Master so they don't sustain
+        if (prev_live_active) {  // only on transition OUT of LIVE
+            // Send all-notes-off to Master
+            if (udp_wifi_connected()) {
+                for (int eng = 0; eng < 7; eng++) {
+                    udp_send_synth_note_off(eng, 0);
+                }
+            }
+            prev_live_active = false;
+        }
+        
         // Clear state so we don't fire phantom repeats when leaving LIVE
         for (int p = 0; p < 16; p++) {
             s_pad_held[p] = false;
@@ -4534,6 +5828,10 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
         }
         return;
     }
+    
+    // Entering LIVE screen: reset transition flag
+    // Entering/in LIVE screen: reset transition flag for next time we leave
+    prev_live_active = true;
 
     unsigned long now = millis();
     unsigned long nr_interval = ui_nr_interval_ms();    // 0 if NR off
@@ -4645,6 +5943,7 @@ void ui_update_current_screen(void) {
     else if (active == scr_sequencer) update_sequencer_screen();
     else if (active == scr_fx) update_fx_screen();
     else if (active == scr_volumes) update_volumes_screen();
+    else if (active == scr_piano) update_piano_screen();
     else if (active == scr_sdcard && p4sd.needs_refresh) {
         p4sd.needs_refresh = false;
         sd_refresh_ui();

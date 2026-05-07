@@ -44,7 +44,7 @@
 // =============================================================================
 // ENCODER IDs (MSG_ENCODER, Byte 2)
 // =============================================================================
-#define ENC_FLANGER     0x00    // FX lane 0 — Chorus mix 0-127 (legacy name)
+#define ENC_FLANGER     0x00    // FX lane 0 — Flanger mix 0-127
 #define ENC_DELAY       0x01    // FX lane 1 — Delay mix 0-127
 #define ENC_REVERB      0x02    // FX lane 2 — Reverb mix 0-127
 #define ENC_BPM         0x03    // DFRobot encoder #1 — BPM (delta)

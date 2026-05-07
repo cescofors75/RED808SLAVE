@@ -36,6 +36,11 @@ static RxParser s_uart_rx = {{0}, 0};
 static RxParser s_usb_rx = {{0}, 0};
 #endif
 
+// Link source tracking for robust AUX status and TX routing.
+// 0 = UART, 1 = USB CDC, -1 = unknown.
+static int s_hb_source = -1;
+static uint8_t s_hb_streak = 0;
+
 // Tempo lock: absolute millis() until which incoming BPM updates from S3 are
 // ignored (set by uart_lock_tempo() after applying a MIDI-file tempo).
 static uint32_t s_tempo_lock_until_ms = 0;
@@ -112,9 +117,6 @@ bool uart_restore_cached_pattern(uint8_t slot) {
 // INIT
 // =============================================================================
 void uart_handler_init(void) {
-    UartS3.begin(UART_BAUD_RATE, SERIAL_8N1, UART_S3_RX_PIN, UART_S3_TX_PIN);
-    UartS3.setRxBufferSize(UART_RX_BUF);
-
     // Set defaults
     p4.bpm_int = Config::DEFAULT_BPM;
     p4.master_volume = 75;
@@ -129,6 +131,18 @@ void uart_handler_init(void) {
     // SD / MIDI load state
     p4sd.midi_load_result = -2;  // idle
 
+    p4.s3_connected = false;
+    p4.s3_wifi_connected = false;
+    p4.last_heartbeat_ms = 0;
+
+#if P4_STANDALONE_MASTER_ONLY
+    P4_LOG_PRINTLN("[UART] Standalone mode: AUX/S3 transport disabled");
+    return;
+#endif
+
+    UartS3.begin(UART_BAUD_RATE, SERIAL_8N1, UART_S3_RX_PIN, UART_S3_TX_PIN);
+    UartS3.setRxBufferSize(UART_RX_BUF);
+
     P4_LOG_PRINTF("[UART] Init port %d: TX=%d RX=%d @ %d baud\n",
                   UART_S3_PORT, UART_S3_TX_PIN, UART_S3_RX_PIN, UART_BAUD_RATE);
 }
@@ -137,6 +151,12 @@ void uart_handler_init(void) {
 // SEND TO S3
 // =============================================================================
 void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value) {
+#if P4_STANDALONE_MASTER_ONLY
+    (void)type;
+    (void)id;
+    (void)value;
+    return;
+#else
     UartBasicPacket pkt;
     uart_build_basic(&pkt, type, id, value);
 
@@ -144,6 +164,10 @@ void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value) {
     // Prefer USB if connected, fall back to UART
     if (usb_cdc_connected()) {
         usb_cdc_write((uint8_t*)&pkt, sizeof(pkt));
+    } else if (s_hb_source == 1) {
+        // Last healthy link was USB. Avoid silently blackholing commands to
+        // UART when there is no physical UART bridge to S3.
+        return;
     } else {
         UartS3.write((uint8_t*)&pkt, sizeof(pkt));
     }
@@ -151,6 +175,7 @@ void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value) {
     UartS3.write((uint8_t*)&pkt, sizeof(pkt));
 #endif
     uart_stats.tx_packets++;
+#endif
 }
 
 // =============================================================================
@@ -158,6 +183,12 @@ void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value) {
 // =============================================================================
 void uart_send_pattern_to_s3(int pattern, const bool steps[16][16]) {
     remember_master_pattern((uint8_t)constrain(pattern, 0, 15), steps);
+
+#if P4_STANDALONE_MASTER_ONLY
+    (void)pattern;
+    (void)steps;
+    return;
+#endif
 
 #if P4_USB_CDC_ENABLED
     bool has_usb_s3 = usb_cdc_connected();
@@ -200,7 +231,11 @@ void uart_send_pattern_to_s3(int pattern, const bool steps[16][16]) {
 }
 
 bool uart_s3_alive(void) {
+#if P4_STANDALONE_MASTER_ONLY
+    return false;
+#else
     return p4.s3_connected;
+#endif
 }
 
 // =============================================================================
@@ -239,7 +274,7 @@ void uart_send_sd_load_midi(uint8_t slot) {
 // =============================================================================
 // PROCESS BASIC PACKET
 // =============================================================================
-static void process_basic(const UartBasicPacket* pkt) {
+static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
     uint8_t type = pkt->type;
     uint8_t id   = pkt->id;
     uint8_t val  = pkt->value;
@@ -353,10 +388,21 @@ static void process_basic(const UartBasicPacket* pkt) {
                     if (udp_wifi_connected()) udp_send_set_live_volume(val);
                     break;
                 case SYS_HEARTBEAT:
-                    p4.last_heartbeat_ms = millis();
-                    p4.s3_connected = true;
+                    {
+                    uint32_t now_ms = millis();
+                    int src = from_usb ? 1 : 0;
+                    if (s_hb_source != src || (now_ms - p4.last_heartbeat_ms) > 1500) {
+                        s_hb_streak = 0;
+                    }
+                    s_hb_source = src;
+                    if (s_hb_streak < 255) s_hb_streak++;
+                    p4.last_heartbeat_ms = now_ms;
+                    // Require at least 2 coherent heartbeats from the same
+                    // transport before declaring AUX ON.
+                    p4.s3_connected = (s_hb_streak >= 2);
                     // Echo heartbeat back so S3 knows P4 is alive
                     uart_send_to_s3(MSG_SYSTEM, SYS_HEARTBEAT, 0x01);
+                    }
                     break;
             }
             break;
@@ -662,15 +708,22 @@ static int s_totalDiscarded = 0;
 static int s_processed = 0;
 
 // Feed one byte into one transport's protocol parser.
-static void feed_byte(RxParser& parser, uint8_t b) {
+static void feed_byte(RxParser& parser, uint8_t b, bool from_usb) {
+    bool link_active = p4.s3_connected;
+#if P4_USB_CDC_ENABLED
+    if (from_usb) link_active = usb_cdc_connected() || p4.s3_connected;
+#endif
+
     parser.buf[parser.head] = b;
 
     // Look for start byte
     if (parser.head == 0) {
         if (b != UART_START_BASIC && b != UART_START_EXTENDED) {
             s_totalDiscarded++;
-            uart_stats.rx_framing_errors++;
-            if (s_totalDiscarded <= 50) {
+            if (link_active) {
+                uart_stats.rx_framing_errors++;
+            }
+            if (link_active && s_totalDiscarded <= 50) {
                 P4_LOG_PRINTF("[UART-DISC] 0x%02X\n", b);
             }
             return;  // discard, wait for start byte
@@ -682,12 +735,17 @@ static void feed_byte(RxParser& parser, uint8_t b) {
     // Basic packet complete?
     if (parser.buf[0] == UART_START_BASIC && parser.head >= UART_BASIC_LEN) {
         UartBasicPacket* pkt = (UartBasicPacket*)parser.buf;
+        bool is_heartbeat = (pkt->type == MSG_SYSTEM && pkt->id == SYS_HEARTBEAT);
+        if (!p4.s3_connected && !is_heartbeat) {
+            parser.head = 0;
+            return;
+        }
         if (uart_validate_packet(pkt)) {
-            process_basic(pkt);
+            process_basic(pkt, from_usb);
             uart_stats.rx_packets++;
             s_processed++;
         } else {
-            uart_stats.rx_checksum_errors++;
+            if (link_active || is_heartbeat) uart_stats.rx_checksum_errors++;
         }
         parser.head = 0;
     }
@@ -701,7 +759,7 @@ static void feed_byte(RxParser& parser, uint8_t b) {
         // Reject oversized payload up front (also catches garbage in len bytes)
         if (payload_len > UART_EXT_MAX_PAYLOAD || total > (int)sizeof(parser.buf)) {
             // Packet too large — discard and resync
-            uart_stats.rx_checksum_errors++;
+            if (link_active) uart_stats.rx_checksum_errors++;
             parser.head = 0;
             return;
         }
@@ -716,7 +774,7 @@ static void feed_byte(RxParser& parser, uint8_t b) {
                 uart_stats.rx_packets++;
                 s_processed++;
             } else {
-                uart_stats.rx_checksum_errors++;
+                if (link_active) uart_stats.rx_checksum_errors++;
             }
             parser.head = 0;
         }
@@ -729,11 +787,18 @@ static void feed_byte(RxParser& parser, uint8_t b) {
 }
 
 int uart_handler_process(void) {
+#if P4_STANDALONE_MASTER_ONLY
+    p4.s3_connected = false;
+    return 0;
+#endif
+
     s_processed = 0;
 
     // Check heartbeat timeout
     if (p4.s3_connected && (millis() - p4.last_heartbeat_ms) > Config::HEARTBEAT_TIMEOUT_MS) {
         p4.s3_connected = false;
+        s_hb_streak = 0;
+        s_hb_source = -1;
         // Reset framing-error display throttle so [UART-DISC] logs resume
         // for diagnosing the recovery window.
         s_totalDiscarded = 0;
@@ -774,14 +839,14 @@ int uart_handler_process(void) {
 
     // Read from UART
     while (UartS3.available()) {
-        feed_byte(s_uart_rx, (uint8_t)UartS3.read());
+        feed_byte(s_uart_rx, (uint8_t)UartS3.read(), false);
     }
 
 #if P4_USB_CDC_ENABLED
     // Read from USB CDC (S3 via USB-C)
     while (usb_cdc_available()) {
         int b = usb_cdc_read();
-        if (b >= 0) feed_byte(s_usb_rx, (uint8_t)b);
+        if (b >= 0) feed_byte(s_usb_rx, (uint8_t)b, true);
     }
 #endif
 

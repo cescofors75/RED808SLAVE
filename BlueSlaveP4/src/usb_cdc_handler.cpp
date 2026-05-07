@@ -258,7 +258,7 @@ void usb_cdc_init(void) {
 }
 
 // Helper: finalize connection after successful open
-static void finalize_connection(const char* method) {
+static void finalize_connection(const char* method, bool assert_dtr) {
     s_usb_connected = true;
     int connect_count = s_connect_count.fetch_add(1, std::memory_order_relaxed) + 1;
 
@@ -267,11 +267,12 @@ static void finalize_connection(const char* method) {
              connect_count, method, millis());
     P4_LOG_PRINT(buf);
 
-    // DO NOT assert DTR — CH343 auto-reset circuit pulses ESP32-S3 EN on DTR=true
-    // With DTR=false the CDC data channel still works normally
-    esp_err_t err = cdc_acm_host_set_control_line_state(s_cdc_dev, false, false);
+    // Native ESP32-S3 HWCDC only starts behaving like an open serial port when
+    // the host asserts DTR. Keep vendor-specific bridges conservative because
+    // CH343-style auto-reset circuits may wire DTR/RTS to EN/BOOT.
+    esp_err_t err = cdc_acm_host_set_control_line_state(s_cdc_dev, assert_dtr, false);
     s_last_dtr_err.store((int)err, std::memory_order_relaxed);
-    snprintf(buf, sizeof(buf), "[USB-CDC] DTR/RTS (no-reset): 0x%x (%s)\n", err, esp_err_to_name(err));
+    snprintf(buf, sizeof(buf), "[USB-CDC] DTR=%d RTS=0: 0x%x (%s)\n", assert_dtr ? 1 : 0, err, esp_err_to_name(err));
     P4_LOG_PRINT(buf);
 
     // Set line coding (informational for USB CDC)
@@ -310,33 +311,50 @@ void usb_cdc_process(void) {
         .user_arg  = NULL,
     };
 
-    // Strategy: try wildcard first (proven to work), then specific VID/PID
-    // ESP32-S3 HWCDC is standard 2-interface CDC-ACM: IF#0=Comm, IF#1=Data
+    // Strategy: across S3 firmware variants (TinyUSB CDC and USB-JTAG+CDC),
+    // interface numbering can change. Probe a wider interface range and avoid
+    // vendor-specific fallback by default because it can bind to non-CDC
+    // interfaces and produce a "connected but no data" state.
     esp_err_t err;
 
-    // 1. Wildcard VID/PID, interface 0 (standard CDC-ACM communication interface)
-    err = cdc_acm_host_open(CDC_HOST_ANY_VID, CDC_HOST_ANY_PID, 0,
-                             &dev_config, &s_cdc_dev);
-    if (err == ESP_OK && s_cdc_dev) {
-        finalize_connection("wildcard iface=0");
-        return;
+    const uint8_t ifaces[] = {0, 1, 2, 3, 4, 5, 6, 7};
+    for (uint8_t iface : ifaces) {
+        err = cdc_acm_host_open(S3_USB_VID, S3_USB_PID, iface,
+                                &dev_config, &s_cdc_dev);
+        s_last_open_err.store((int)err, std::memory_order_relaxed);
+        if (err == ESP_OK && s_cdc_dev) {
+            char method[40];
+            snprintf(method, sizeof(method), "VID/PID iface=%u", iface);
+            finalize_connection(method, true);
+            return;
+        }
+
+        err = cdc_acm_host_open(CDC_HOST_ANY_VID, CDC_HOST_ANY_PID, iface,
+                                &dev_config, &s_cdc_dev);
+        s_last_open_err.store((int)err, std::memory_order_relaxed);
+        if (err == ESP_OK && s_cdc_dev) {
+            char method[32];
+            snprintf(method, sizeof(method), "wildcard iface=%u", iface);
+            finalize_connection(method, true);
+            return;
+        }
     }
 
-    // 2. Specific Espressif VID/PID
-    err = cdc_acm_host_open(S3_USB_VID, S3_USB_PID, 0,
-                             &dev_config, &s_cdc_dev);
-    if (err == ESP_OK && s_cdc_dev) {
-        finalize_connection("specific VID/PID iface=0");
-        return;
+#if defined(P4_USB_CDC_ALLOW_VENDOR_FALLBACK) && P4_USB_CDC_ALLOW_VENDOR_FALLBACK
+    // Optional fallback for unusual USB-UART bridges. Disabled by default
+    // because it may attach to non-CDC interfaces on composite devices.
+    for (uint8_t iface : ifaces) {
+        err = cdc_acm_host_open_vendor_specific(CDC_HOST_ANY_VID, CDC_HOST_ANY_PID, iface,
+                                                &dev_config, &s_cdc_dev);
+        s_last_open_err.store((int)err, std::memory_order_relaxed);
+        if (err == ESP_OK && s_cdc_dev) {
+            char method[40];
+            snprintf(method, sizeof(method), "vendor iface=%u", iface);
+            finalize_connection(method, false);
+            return;
+        }
     }
-
-    // 3. Vendor-specific open (non-standard descriptors)
-    err = cdc_acm_host_open_vendor_specific(CDC_HOST_ANY_VID, CDC_HOST_ANY_PID, 0,
-                                             &dev_config, &s_cdc_dev);
-    if (err == ESP_OK && s_cdc_dev) {
-        finalize_connection("vendor-specific iface=0");
-        return;
-    }
+#endif
 
     // Log periodically (every 5th attempt = every 10s)
     if (s_open_attempts % 5 == 1) {
@@ -409,4 +427,11 @@ const char* usb_cdc_status_str(void) {
              s_last_dtr_err.load(std::memory_order_relaxed),
              (unsigned long)s_rx_drop_count.load(std::memory_order_relaxed));
     return s_status_buf;
+}
+
+void usb_cdc_get_diag(int* detected, int* connects, int* disconnects, int* attempts) {
+    if (detected) *detected = s_dev_detect_count.load(std::memory_order_relaxed);
+    if (connects) *connects = s_connect_count.load(std::memory_order_relaxed);
+    if (disconnects) *disconnects = s_disconnect_count.load(std::memory_order_relaxed);
+    if (attempts) *attempts = s_open_attempts;
 }

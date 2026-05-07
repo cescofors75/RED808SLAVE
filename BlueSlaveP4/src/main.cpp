@@ -16,7 +16,7 @@
 #include "ui/ui_theme.h"
 #include "dsp_task.h"
 
-#if P4_USB_CDC_ENABLED
+#if P4_USB_CDC_ENABLED && !P4_STANDALONE_MASTER_ONLY
 #include "usb_cdc_handler.h"
 #endif
 
@@ -66,10 +66,12 @@ void setup() {
         P4_LOG_PRINTLN("[INIT] SPIFFS mount failed (run uploadfs once)");
     }
 
-#if P4_USB_CDC_ENABLED
+#if P4_USB_CDC_ENABLED && !P4_STANDALONE_MASTER_ONLY
     // 8. Start USB Host CDC (S3 via USB-C OTG port)
     P4_LOG_PRINTLN("[INIT] USB-C Host for S3...");
     usb_cdc_init();
+#elif P4_STANDALONE_MASTER_ONLY
+    P4_LOG_PRINTLN("[INIT] Standalone mode: AUX/S3 host disabled");
 #endif
 
     // 9. Start DSP processing task (Core 0)
@@ -95,7 +97,7 @@ void loop() {
     // Drain deferred MIDI→Master UDP burst (staged by MSG_PATTERN_PUSH)
     uart_handler_tick_pending_push();
 
-#if P4_USB_CDC_ENABLED
+#if P4_USB_CDC_ENABLED && !P4_STANDALONE_MASTER_ONLY
     // Try to connect/reconnect to S3 USB CDC device
     usb_cdc_process();
 #endif

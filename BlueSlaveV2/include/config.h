@@ -112,7 +112,7 @@
 // =============================================================================
 #define I2C_SDA        GPIO_NUM_8
 #define I2C_SCL        GPIO_NUM_9
-#define I2C_FREQ       400000  // 400kHz
+#define I2C_FREQ       100000  // 100kHz — stable for active 8-port hub + long harnesses
 
 // =============================================================================
 // ON-BOARD I2C DEVICES
@@ -134,10 +134,18 @@
 // =============================================================================
 #define I2C_HUB_ADDR   0x70  // PCA9548A / TCA9548A
 
+// Known-device bitmask per PCA9548A channel for the STATUS screen.
+#define I2C_DEVBIT_M5_ROTATE8   0x01
+#define I2C_DEVBIT_BYTEBUTTON   0x02
+#define I2C_DEVBIT_DFROBOT_ENC  0x04
+#define I2C_DEVBIT_POT_ADC      0x08
+
 // M5 ROTATE8 Modules (2x)
 #define M5_ENCODER_MODULES     2
 #define ENCODERS_PER_MODULE    8
 #define M5_ENCODER_ADDR        0x41  // Both modules, separated by hub
+#define M5_ENCODER1_HUB_CH     2     // preferred channel for module #1
+#define M5_ENCODER2_HUB_CH     6     // preferred channel for module #2
 
 // DFRobot SEN0502 Visual Rotary Encoders (4x)
 #define DFROBOT_ENCODER_COUNT  4    // 4 DFRobot ring-LED rotaries via PCA9548A

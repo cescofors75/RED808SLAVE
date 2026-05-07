@@ -26,7 +26,7 @@ void i2c_init() {
     }
     Wire.begin(I2C_SDA, I2C_SCL, I2C_FREQ);
     Wire.setBufferSize(256);  // Arduino 3.x: increase I2C buffer from default 128
-    Wire.setTimeOut(8);
+    Wire.setTimeOut(8);   // 8ms — fast recovery; long timeouts corrupt PCA9548A channel state
 }
 
 bool i2c_write_byte(uint8_t addr, uint8_t reg, uint8_t data) {

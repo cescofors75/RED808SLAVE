@@ -55,9 +55,12 @@
 				"${workspaceFolder}/BlueSlaveP4",
 				"--target",
 				"upload",
+				"--target",
+				"monitor",
 				"--environment",
 				"esp32p4-fs"
 			],
+			"isBackground": true,
 			"problemMatcher": [],
 			"group": "build"
 		},

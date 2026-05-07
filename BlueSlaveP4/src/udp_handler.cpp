@@ -5,6 +5,7 @@
 
 #include "udp_handler.h"
 #include "uart_handler.h"   // for P4State p4
+#include "ui/ui_screens.h"
 #include "../include/config.h"
 #include <Arduino.h>
 #include <WiFi.h>
@@ -36,6 +37,9 @@ static unsigned long lastWifiAttempt  = 0;
 static unsigned long lastMasterPacket = 0;
 static unsigned long lastSyncRequest  = 0;
 static bool sessionCleanSent = false;
+static int pendingPatternRequest = -1;
+static unsigned long pendingPatternLastTxMs = 0;
+static uint8_t pendingPatternRetries = 0;
 
 // JSON parse buffer
 static char rxBuf[4096];
@@ -103,6 +107,10 @@ void udp_send_synth_note_off(uint8_t engine, uint8_t track) {
              "{\"cmd\":\"synthNoteOff\",\"engine\":%u,\"track\":%u}",
              (unsigned)engine, (unsigned)track);
     sendJson(buf);
+}
+
+void udp_send_synth303_note_off(void) {
+    sendJson("{\"cmd\":\"synth303NoteOff\"}");
 }
 
 void udp_send_synth_param(uint8_t engine, uint8_t instrument, uint8_t paramId, float value) {
@@ -227,12 +235,20 @@ void udp_send_tempo(float bpm) {
 void udp_send_select_pattern(int index) {
     char buf[64];
     snprintf(buf, sizeof(buf), "{\"cmd\":\"selectPattern\",\"index\":%d}", index);
+    P4_LOG_PRINTF("[UDP][PAT] TX selectPattern idx=%d\n", index);
     sendJson(buf);
 }
 
 void udp_send_get_pattern(int pattern) {
     char buf[64];
+    if (pendingPatternRequest != pattern) {
+        pendingPatternRequest = pattern;
+        pendingPatternRetries = 0;
+    }
     snprintf(buf, sizeof(buf), "{\"cmd\":\"get_pattern\",\"pattern\":%d}", pattern);
+    pendingPatternLastTxMs = millis();
+    if (pendingPatternRetries < 255) pendingPatternRetries++;
+    P4_LOG_PRINTF("[UDP][PAT] TX get_pattern idx=%d\n", pattern);
     sendJson(buf);
 }
 
@@ -339,31 +355,32 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
     if (!udpStarted) return;
     if (enc_id < 0 || enc_id > 2) return;
 
-    static bool was_active[3] = {false, false, false};
     char buf[96];
     bool active = (!muted && value > 0);
     float norm = (float)value / 127.0f;
-    float mix = 0.05f + 0.45f * norm;
-
-    // Resend ALL params on every active value change. FX controls are low-rate,
-    // and this avoids silent states if Master missed an activation/config packet.
     bool fullSend = active;
-    was_active[enc_id] = active;
 
-    P4_LOG_PRINTF("[FX] enc%d val=%d muted=%d active=%d mix=%.2f full=%d\n",
-                  enc_id, value, muted, active, mix, fullSend);
+    P4_LOG_PRINTF("[FX] enc%d val=%d muted=%d active=%d norm=%.2f full=%d\n",
+                  enc_id, value, muted, active, norm, fullSend);
 
     switch (enc_id) {
-        case 0: // Chorus — lush stereo modulation
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusActive\",\"value\":%d}", active ? 1 : 0);
+        case 0: // Flanger — audible sweep; WebInterface divides rate/depth/fb/mix by 100.
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
+            int rate_pct = clamp_int((int)(35.0f + norm * 315.0f + 0.5f), 0, 500); // 0.35..3.50 Hz
+            int depth_pct = clamp_int((int)(35.0f + norm * 55.0f + 0.5f), 0, 100);
+            int fb_pct = clamp_int((int)(6.0f + norm * 30.0f + 0.5f), 0, 100);
+            int mix_pct = clamp_int((int)(12.0f + norm * 34.0f + 0.5f), 0, 100);
                 if (fullSend) {
-                    sendJson("{\"cmd\":\"setChorusRate\",\"value\":1.5}");
-                    sendJson("{\"cmd\":\"setChorusDepth\",\"value\":0.5}");
-                    sendJson("{\"cmd\":\"setChorusStereo\",\"value\":1}");
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerRate\",\"value\":%d}", rate_pct);
+                    sendJson(buf);
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerDepth\",\"value\":%d}", depth_pct);
+                    sendJson(buf);
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerFeedback\",\"value\":%d}", fb_pct);
+                    sendJson(buf);
                 }
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusMix\",\"value\":%.3f}", mix);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerMix\",\"value\":%d}", mix_pct);
                 sendJson(buf);
             }
             break;
@@ -371,12 +388,17 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setDelayActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
+                int delay_ms = clamp_int((int)(90.0f + norm * 650.0f + 0.5f), 60, 900);
+                int fb_pct = clamp_int((int)(14.0f + norm * 56.0f + 0.5f), 0, 85);
+                int mix_pct = clamp_int((int)(8.0f + norm * 50.0f + 0.5f), 0, 100);
                 if (fullSend) {
-                    sendJson("{\"cmd\":\"setDelayTime\",\"value\":300}");
-                    sendJson("{\"cmd\":\"setDelayFeedback\",\"value\":0.35}");
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setDelayTime\",\"value\":%d}", delay_ms);
+                    sendJson(buf);
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setDelayFeedback\",\"value\":%d}", fb_pct);
+                    sendJson(buf);
                     sendJson("{\"cmd\":\"setDelayStereo\",\"value\":1}");
                 }
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setDelayMix\",\"value\":%.3f}", mix);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setDelayMix\",\"value\":%d}", mix_pct);
                 sendJson(buf);
             }
             break;
@@ -384,11 +406,18 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setReverbActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
+                float feedback = 0.28f + norm * 0.48f;
+                int lp_hz = clamp_int((int)(2200.0f + norm * 6800.0f + 0.5f), 1800, 12000);
+                float early_mix = 0.08f + norm * 0.18f;
+                float mix = 0.06f + norm * 0.42f;
                 if (fullSend) {
-                    sendJson("{\"cmd\":\"setReverbFeedback\",\"value\":0.6}");
-                    sendJson("{\"cmd\":\"setReverbLpFreq\",\"value\":4000}");
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setReverbFeedback\",\"value\":%.3f}", feedback);
+                    sendJson(buf);
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setReverbLpFreq\",\"value\":%d}", lp_hz);
+                    sendJson(buf);
                     sendJson("{\"cmd\":\"setEarlyRefActive\",\"value\":1}");
-                    sendJson("{\"cmd\":\"setEarlyRefMix\",\"value\":0.2}");
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setEarlyRefMix\",\"value\":%.3f}", early_mix);
+                    sendJson(buf);
                 }
                 snprintf(buf, sizeof(buf), "{\"cmd\":\"setReverbMix\",\"value\":%.3f}", mix);
                 sendJson(buf);
@@ -407,12 +436,22 @@ void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
     float norm = (float)value / 127.0f;
     switch (pot_id) {
         case 0: {  // Distortion/Drive
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setDistortion\",\"value\":%.3f}", muted ? 0.0f : norm);
+            // Keep drive below the range that made page-2 FX harsh/unstable on Daisy.
+            float amount = muted ? 0.0f : powf(norm, 1.45f) * 0.55f;
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setDistortion\",\"value\":%.3f}", amount);
             sendJson(buf); break;
         }
         case 1: {  // Cutoff (20-20000 Hz, log)
-            if (muted) break;
-            int hz = (int)(20.0f * powf(1000.0f, norm));
+            if (muted) {
+                sendJson("{\"cmd\":\"setFilter\",\"type\":0}");
+                s_fx_lp_filter_enabled = false;
+                break;
+            }
+            if (!s_fx_lp_filter_enabled) {
+                sendJson("{\"cmd\":\"setFilter\",\"type\":1}");
+                s_fx_lp_filter_enabled = true;
+            }
+            int hz = (int)(80.0f * powf(125.0f, norm)); // 80..10000 Hz, avoids sub-bass filter stalls
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterCutoff\",\"value\":%d}", hz);
             sendJson(buf); break;
         }
@@ -429,7 +468,7 @@ void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
                 sendJson("{\"cmd\":\"setFilter\",\"type\":1}");
                 s_fx_lp_filter_enabled = true;
             }
-            float q = 1.0f + norm * 9.0f;
+            float q = 0.7f + norm * 3.8f; // cap resonance; Q=10 was too unstable on page 2
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterResonance\",\"value\":%.2f}", q);
             sendJson(buf); break;
         }
@@ -448,15 +487,13 @@ void udp_request_master_sync(void) {
     sendJson("{\"cmd\":\"hello\",\"device\":\"P4_DISPLAY\"}");
 
     if (!sessionCleanSent) {
+        // Keep local state clean, but avoid sending a 32-packet solo/mute burst.
+        // That burst can exhaust UDP buffers and trigger endPacket errno 12.
         for (int track = 0; track < 16; track++) {
             p4.track_solo[track] = false;
             p4.track_muted[track] = false;
-            char buf[64];
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"solo\",\"track\":%d,\"value\":false}", track);
-            sendJson(buf);
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"mute\",\"track\":%d,\"value\":false}", track);
-            sendJson(buf);
             uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), 0);
+            uart_send_to_s3(MSG_TRACK, TRK_SOLO_BIT | (track & 0x0F), 0);
         }
         sessionCleanSent = true;
     }
@@ -581,6 +618,21 @@ static void processJson(const char* json, int len) {
     // ----- Pattern sync -----
     if (strcmp(cmd, "pattern_sync") == 0) {
         int pat = clamp_int(doc["pattern"] | p4.current_pattern, 0, 15);
+        bool requested_pattern = (pendingPatternRequest == pat);
+        bool matches_current   = (pat == p4.current_pattern);
+        bool active_hint       = doc["active"] | false;
+        // Accept the payload if (a) it matches our pending request, (b) it
+        // matches the pattern we are currently displaying, or (c) the master
+        // marked the broadcast as the new active pattern. Otherwise ignore.
+        if (!requested_pattern && !matches_current && !active_hint) {
+            P4_LOG_PRINTF("[UDP][PAT] RX stale pattern_sync pat=%d cur=%d waiting=%d (ignored)\n",
+                          pat, p4.current_pattern, pendingPatternRequest);
+            return;
+        }
+        int raw_len = clamp_int(doc["stepCount"] | 16, 16, 64);
+        bool raw_steps[16][64] = {};
+        P4_LOG_PRINTF("[UDP][PAT] RX pattern_sync pat=%d raw=%d requested=%d\n",
+                      pat, raw_len, requested_pattern ? 1 : 0);
         JsonArray data = doc["data"];
         if (data) {
             bool nestedRows = false;
@@ -603,20 +655,11 @@ static void processJson(const char* json, int len) {
                 }
             }
 
-            // If the incoming pattern is empty but we already have local data for
-            // the same index, keep local (protects against master sync floods).
-            if (incomingEmpty && pat == p4.current_pattern) {
-                bool localHasData = pattern_grid_has_data();
-                if (localHasData) {
-                    P4_LOG_PRINTF("[UDP] Skipping empty pattern_sync for pattern %d\n", pat + 1);
-                    return;
-                }
+            if (incomingEmpty) {
+                P4_LOG_PRINTF("[UDP][PAT] RX empty payload pat=%d (applied)\n", pat);
             }
 
             p4.current_pattern = pat;
-
-            // Replace the local 16x16 view with incoming payload.
-            memset(p4.steps, 0, sizeof(p4.steps));
 
             if (nestedRows) {
                 int track = 0;
@@ -624,26 +667,32 @@ static void processJson(const char* json, int len) {
                     if (track >= 16) break;
                     int step = 0;
                     for (JsonVariant val : row) {
-                        if (step >= 16) break;
-                        p4.steps[track][step] = (val.as<int>() != 0);
+                        if (step >= 64) break;
+                        raw_steps[track][step] = (val.as<int>() != 0);
                         step++;
                     }
                     track++;
                 }
             } else {
-                // Flat payload fallback: track-major [t0s0..t0s15, t1s0..]
+                // Flat payload fallback: track-major [t0s0..t0s63, t1s0..]
                 int idx = 0;
                 for (JsonVariant val : data) {
-                    if (idx >= 256) break;
-                    int track = idx / 16;
-                    int step  = idx % 16;
-                    p4.steps[track][step] = (val.as<int>() != 0);
+                    if (idx >= 1024) break;
+                    int track = idx / 64;
+                    int step  = idx % 64;
+                    if (track >= 16) break;
+                    raw_steps[track][step] = (val.as<int>() != 0);
                     idx++;
                 }
             }
+            ui_sequencer_load_external_pattern(raw_steps, raw_len);
         } else {
             p4.current_pattern = pat;
+            ui_sequencer_sync_from_current_pattern();
         }
+        pendingPatternRequest = -1;
+        pendingPatternRetries = 0;
+        pendingPatternLastTxMs = 0;
         // Forward pattern data to S3 so it can sync its sequencer + pad-sync
         uart_send_pattern_to_s3(pat, p4.steps);
     }
@@ -748,6 +797,8 @@ static void processJson(const char* json, int len) {
         int idx = clamp_int(doc["index"] | doc["pattern"] | 0, 0, 15);
         if (idx != p4.current_pattern) {
             p4.current_pattern = idx;
+            extern void ui_sequencer_sync_from_current_pattern(void);
+            ui_sequencer_sync_from_current_pattern();
             udp_send_get_pattern(idx);
         } else if (!pattern_grid_has_data()) {
             // Refresh if we stayed on the same pattern but local grid is empty.
@@ -908,6 +959,24 @@ void udp_handler_process(void) {
         if (udpStarted && masterAlive && (now - lastPingMs >= 5000)) {
             lastPingMs = now;
             sendCmd("ping");
+        }
+    }
+
+    // --- Pattern request watchdog ---
+    // If the selected pattern wasn't confirmed via pattern_sync, re-request it
+    // at a controlled rate so UI/audio don't stay stuck on old steps.
+    if (udpStarted && masterAlive && pendingPatternRequest >= 0) {
+        if (now - pendingPatternLastTxMs >= 250 && pendingPatternRetries < 12) {
+            if ((pendingPatternRetries % 3) == 0) {
+                udp_send_select_pattern(pendingPatternRequest);
+            }
+            udp_send_get_pattern(pendingPatternRequest);
+        } else if (pendingPatternRetries >= 12) {
+            P4_LOG_PRINTF("[UDP][PAT] timeout waiting pattern_sync idx=%d\n",
+                          pendingPatternRequest);
+            pendingPatternRequest = -1;
+            pendingPatternRetries = 0;
+            pendingPatternLastTxMs = 0;
         }
     }
 

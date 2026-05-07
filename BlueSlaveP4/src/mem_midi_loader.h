@@ -12,6 +12,7 @@
 // =============================================================================
 #pragma once
 #include <cstdint>
+#include <FS.h>
 
 namespace mem_midi {
 
@@ -45,6 +46,23 @@ bool load_pattern_raw(const char* path,
                       float* bpm_out = nullptr,
                       int* raw_len_out = nullptr,
                       int mode = 0);
+
+        // Same parser, but reading from an arbitrary mounted filesystem such as
+        // SD_MMC. This lets the P4 browse/import MIDI from its own SD card.
+        bool load_pattern_raw_from_fs(fs::FS& storage,
+                            const char* path,
+                            bool raw_steps[16][64],
+                            char* name_out,
+                            int name_max,
+                            int* steps_found_out = nullptr,
+                            float* bpm_out = nullptr,
+                            int* raw_len_out = nullptr,
+                            int mode = 0);
+
+        int list_midi_files_from_fs(fs::FS& storage,
+                            const char* dir,
+                            char names[][48],
+                            int cap);
 
 // List .mid files in a SPIFFS directory. Writes up to `cap` names (stems only,
 // no extension) truncated to 47 chars. Returns the count written (<= cap).

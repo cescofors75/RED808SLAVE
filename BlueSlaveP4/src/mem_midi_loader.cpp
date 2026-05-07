@@ -261,8 +261,8 @@ static int expandEventsTo64(int tpq, bool raw[16][64]) {
 // parseFile — open the SMF and feed all tracks through parseTrack.
 // Returns tpq (>0) on success, 0 on error. Fills tempo_us if found.
 // ---------------------------------------------------------------------------
-static uint16_t parseFile(const char* path, int midi_channel, uint32_t* tempo_us_out) {
-    s_f = SPIFFS.open(path, "r");
+static uint16_t parseFile(fs::FS& storage, const char* path, int midi_channel, uint32_t* tempo_us_out) {
+    s_f = storage.open(path, "r");
     s_err = false;
     s_parse_start_ms = millis();
     if (!s_f) return 0;
@@ -330,7 +330,7 @@ bool load_pattern(const char* path,
         return false;
     }
 
-    uint16_t tpq = parseFile(path, -2, &tempo_us);
+    uint16_t tpq = parseFile(SPIFFS, path, -2, &tempo_us);
     if (tpq == 0) return false;
 
     int ev_primary = s_evcount;
@@ -339,7 +339,7 @@ bool load_pattern(const char* path,
     if (s_evcount == 0) {
         s_evcount = 0;
         s_evbuf_overflow = false;
-        tpq = parseFile(path, -1, &tempo_us);
+        tpq = parseFile(SPIFFS, path, -1, &tempo_us);
         if (tpq == 0) return false;
     }
 
@@ -400,13 +400,13 @@ bool load_pattern_raw(const char* path,
     //               events, fall back to all-channels so the user still
     //               gets something audible.
     int primary_filter = (mode == 1) ? 9 : -2;
-    uint16_t tpq = parseFile(path, primary_filter, &tempo_us);
+    uint16_t tpq = parseFile(SPIFFS, path, primary_filter, &tempo_us);
     if (tpq == 0) return false;
     if (s_evcount == 0) {
         s_evcount = 0;
         s_evbuf_overflow = false;
         // Fallback: -1 (legacy any-channel, same path as load_pattern)
-        tpq = parseFile(path, -1, &tempo_us);
+        tpq = parseFile(SPIFFS, path, -1, &tempo_us);
         if (tpq == 0) return false;
     }
 
@@ -427,18 +427,75 @@ bool load_pattern_raw(const char* path,
 }
 
 int list_midi_files(const char* dir, char names[][48], int cap) {
+    return list_midi_files_from_fs(SPIFFS, dir, names, cap);
+}
+
+bool load_pattern_raw_from_fs(fs::FS& storage,
+                              const char* path,
+                              bool raw_steps[16][64],
+                              char* name_out,
+                              int name_max,
+                              int* steps_found_out,
+                              float* bpm_out,
+                              int* raw_len_out,
+                              int mode) {
+    for (int t = 0; t < 16; t++)
+        for (int s = 0; s < 64; s++) raw_steps[t][s] = false;
+
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    if (name_out && name_max > 0) {
+        strncpy(name_out, base, name_max - 1);
+        name_out[name_max - 1] = '\0';
+        char* dot = strrchr(name_out, '.');
+        if (dot) *dot = '\0';
+        if ((int)strlen(name_out) > 8) name_out[8] = '\0';
+    }
+
+    uint32_t tempo_us = 0;
+    s_evcount = 0;
+    s_evbuf_overflow = false;
+    if (!ensure_evbuf()) {
+        log_e("[MEM-MIDI] cannot allocate event buffer");
+        return false;
+    }
+
+    int primary_filter = (mode == 1) ? 9 : -2;
+    uint16_t tpq = parseFile(storage, path, primary_filter, &tempo_us);
+    if (tpq == 0) return false;
+    if (s_evcount == 0) {
+        s_evcount = 0;
+        s_evbuf_overflow = false;
+        tpq = parseFile(storage, path, -1, &tempo_us);
+        if (tpq == 0) return false;
+    }
+
+    int raw_len = expandEventsTo64((int)tpq, raw_steps);
+    if (raw_len_out) *raw_len_out = raw_len;
+
+    int total = 0;
+    for (int t = 0; t < 16; t++)
+        for (int s = 0; s < raw_len; s++)
+            if (raw_steps[t][s]) total++;
+    if (steps_found_out) *steps_found_out = total;
+
+    if (bpm_out)
+        *bpm_out = (tempo_us > 0) ? (60000000.0f / (float)tempo_us) : 0.0f;
+
+    log_i("[MEM-MIDI-RAW-FS] %s: rawLen=%d total=%d", path, raw_len, total);
+    return total > 0;
+}
+
+int list_midi_files_from_fs(fs::FS& storage, const char* dir, char names[][48], int cap) {
     int count = 0;
-    File d = SPIFFS.open(dir);
+    File d = storage.open(dir);
     if (!d || !d.isDirectory()) {
-        // SPIFFS is flat — scan root and filter by prefix
-        File root = SPIFFS.open("/");
+        File root = storage.open("/");
         if (!root) return 0;
         File f = root.openNextFile();
         size_t prefix_len = strlen(dir);
-        // Ensure dir ends with '/'
         while (f && count < cap) {
             const char* full = f.name();   // e.g. "/mid/song.mid"
-            // SPIFFS on Arduino returns names without leading '/'; handle both.
             const char* fname = (full[0] == '/') ? full : full;
             if (strncmp(fname, dir, prefix_len) == 0 ||
                 (prefix_len > 1 && fname[0] != '/' && strncmp(fname, dir + 1, prefix_len - 1) == 0)) {

@@ -68,10 +68,10 @@ volatile int  pendingThemeIdx  = -1;   // Set by encoder_task, consumed by updat
 // Sequencer
 Pattern patterns[Config::MAX_PATTERNS];
 int currentPattern = 0;
-uint32_t patternUiRevision = 1;
-int currentStep = 0;
+volatile uint32_t patternUiRevision = 1;
+volatile int currentStep = 0;
 int selectedTrack = 0;
-bool isPlaying = false;
+volatile bool isPlaying = false;
 int currentBPM = Config::DEFAULT_BPM;
 float currentBPMPrecise = (float)Config::DEFAULT_BPM;
 int currentKit = 0;
@@ -111,6 +111,7 @@ EncoderMode encoderMode = ENC_MODE_VOLUME;
 int m5HubChannel[M5_ENCODER_MODULES] = {-1, -1};
 int dfRobotHubChannel[DFROBOT_ENCODER_COUNT] = {-1, -1, -1, -1};
 int byteButtonHubChannel[BYTEBUTTON_COUNT] = {-1, -1};
+uint8_t i2cHubKnownMask[8] = {};
 int dfRobotPotHubChannel = -1;
 bool hubDetected = false;
 
@@ -188,6 +189,7 @@ bool byteButtonLivePressed[BYTEBUTTON_TOTAL_BUTTONS] = {};
 uint32_t byteButtonLedCache[BYTEBUTTON_COUNT][BYTEBUTTON_BUTTONS + 1] = {};
 bool byteButtonLedInitialized[BYTEBUTTON_COUNT] = {false, false};
 volatile FxResponseMode fxResponseMode = FX_MODE_LIVE;
+volatile bool g_i2c_scan_in_progress = false;
 const char* const byteButtonActionNames[] = {
     "Menu",              // BB_ACTION_MENU
     "Vol Resync",        // BB_ACTION_VOL_MODE
@@ -523,7 +525,7 @@ void handleP4TouchCommand(uint8_t cmdId, uint8_t value) {
             selectPatternOnMaster(value);
             break;
         case TCMD_SCREEN_NAV:
-            navigateToScreen((Screen)value);
+            if (value < SCREEN_COUNT) navigateToScreen((Screen)value);
             break;
         case TCMD_THEME_NEXT:
             pendingThemeIdx = (value < THEME_COUNT) ? value : ((currentTheme + 1) % THEME_COUNT);
@@ -578,7 +580,7 @@ void handleP4PatternData(int pat, const bool steps[16][16]) {
             patterns[pat].steps[t][s] = (s < 16) ? steps[t][s] : false;
     }
     patterns[pat].length = Config::STEPS_PER_BANK;  // P4 always sends 16 steps
-    patternUiRevision++;
+    patternUiRevision += 1;
     // Update current pattern number
     if (currentPattern != pat) {
         currentPattern = pat;
@@ -622,7 +624,7 @@ void handleMidiPatternLoaded(int slot, const bool steps[16][64], const char* nam
     // Select this pattern locally
     currentPattern = slot;
     needsFullRedraw = true;
-    patternUiRevision++;
+    patternUiRevision += 1;
 
     // --- Hand over to P4 ----------------------------------------------------
     // Design: the P4 is the sole owner of the Master UDP channel for
@@ -762,8 +764,8 @@ void nvs_save_settings() {
 
     nvs_set_u8(h, "theme", (uint8_t)currentTheme);
     nvs_set_i32(h, "masterVol", masterVolume);
-    nvs_set_i32(h, "seqVol", masterVolume);
-    nvs_set_i32(h, "liveVol", masterVolume);
+    nvs_set_i32(h, "seqVol", sequencerVolume);
+    nvs_set_i32(h, "liveVol", livePadsVolume);
     nvs_set_i32(h, "bpm", currentBPM);
     nvs_set_i32(h, "bpm10", (int32_t)lroundf(currentBPMPrecise * 10.0f));
     nvs_set_i32(h, "swingPct", sequencerSwingPercent);
@@ -1116,7 +1118,7 @@ static bool pattern_has_data(int patternIndex) {
 void selectPatternOnMaster(int patternIndex) {
     currentPattern = constrain(patternIndex, 0, Config::MAX_PATTERNS - 1);
     needsFullRedraw = true;
-    patternUiRevision++;
+    patternUiRevision += 1;
 
     bool localHasData = pattern_has_data(currentPattern);
 
@@ -1285,6 +1287,11 @@ static bool ads1115ReadChannel(uint8_t channel, uint16_t& raw) {
     return true;
 }
 
+static bool i2c_device_present_raw(uint8_t addr) {
+    Wire.beginTransmission(addr);
+    return Wire.endTransmission() == 0;
+}
+
 void handleDFRobotPots() {
     if (!dfRobotPotConnected) return;
 
@@ -1429,33 +1436,61 @@ static void sendAnalogFxParamNow(int lane) {
 void scanI2CHub() {
     RED808_LOG_PRINTLN("[I2C] Scanning bus...");
 
+    g_i2c_scan_in_progress = true;
+
     // Check for PCA9548A hub (with mutex protection)
     hubDetected = i2c_device_present(I2C_HUB_ADDR);
     diagInfo.i2cHubOk = hubDetected;
 
     if (!hubDetected) {
         RED808_LOG_PRINTLN("[I2C] No PCA9548A hub found");
+        g_i2c_scan_in_progress = false;
         return;
     }
     RED808_LOG_PRINTLN("[I2C] PCA9548A hub detected");
 
+    // Full rescan reset: clear stale channel/connection state before remapping.
+    for (int i = 0; i < M5_ENCODER_MODULES; i++) {
+        m5encoderConnected[i] = false;
+        m5HubChannel[i] = -1;
+        m5FirmwareVersion[i] = 0;
+    }
+    for (int i = 0; i < DFROBOT_ENCODER_COUNT; i++) {
+        dfEncoderConnected[i] = false;
+        dfRobotHubChannel[i] = -1;
+        if (dfEncoders[i]) {
+            delete dfEncoders[i];
+            dfEncoders[i] = nullptr;
+        }
+    }
+    for (int i = 0; i < BYTEBUTTON_COUNT; i++) {
+        byteButtonConnected[i] = false;
+        byteButtonHubChannel[i] = -1;
+        byteButtonLedInitialized[i] = false;
+        prevByteButtonState[i] = 0;
+    }
+    dfRobotPotConnected = false;
+    dfRobotPotHubChannel = -1;
+
     int m5Found = 0, dfFound = 0;
     int byteButtonsFound = 0;
     bool potHubFound = false;
+    memset(i2cHubKnownMask, 0, sizeof(i2cHubKnownMask));
 
-    for (uint8_t ch = 0; ch < 8 && (m5Found < M5_ENCODER_MODULES || dfFound < DFROBOT_ENCODER_COUNT || byteButtonsFound < BYTEBUTTON_COUNT || !potHubFound); ch++) {
-        i2c_hub_select(ch);
-        delay(5);
+    // Atomic scan: hold I2C mutex for complete hub scan to avoid channel races
+    // with touch/encoder tasks while selecting PCA9548A channels.
+    if (i2c_lock(300)) {
+        for (uint8_t ch = 0; ch < 8 && (m5Found < M5_ENCODER_MODULES || dfFound < DFROBOT_ENCODER_COUNT || byteButtonsFound < BYTEBUTTON_COUNT || !potHubFound); ch++) {
+            i2c_hub_select_raw(ch);
+            delay(5);
 
-        // Probe M5 ROTATE8 (0x41)
-        if (m5Found < M5_ENCODER_MODULES && i2c_device_present(M5_ENCODER_ADDR)) {
-            m5HubChannel[m5Found] = ch;
-            m5encoderConnected[m5Found] = true;
-            RED808_LOG_PRINTF("[I2C] M5 ROTATE8 #%d found on ch %d\n", m5Found + 1, ch);
+            // Probe M5 ROTATE8 (0x41)
+            if (m5Found < M5_ENCODER_MODULES && i2c_device_present_raw(M5_ENCODER_ADDR)) {
+                m5HubChannel[m5Found] = ch;
+                m5encoderConnected[m5Found] = true;
+                i2cHubKnownMask[ch] |= I2C_DEVBIT_M5_ROTATE8;
+                RED808_LOG_PRINTF("[I2C] M5 ROTATE8 #%d found on ch %d\n", m5Found + 1, ch);
 
-            // begin() and resetCounter() do I2C — protect with scoped lock
-            if (i2c_lock(50)) {
-                i2c_hub_select_raw(ch);
                 if (m5encoders[m5Found].begin()) {
                     for (int e = 0; e < ENCODERS_PER_MODULE; e++) {
                         m5encoders[m5Found].resetCounter(e);
@@ -1464,18 +1499,14 @@ void scanI2CHub() {
                 m5FirmwareVersion[m5Found] = m5encoders[m5Found].getVersion();
                 RED808_LOG_PRINTF("[I2C] M5 #%d firmware v%d\n", m5Found + 1, m5FirmwareVersion[m5Found]);
                 i2c_hub_deselect_raw();
-                i2c_unlock();
+                m5Found++;
             }
-            m5Found++;
-        }
 
-        // Probe DFRobot SEN0502 (0x54)
-        if (dfFound < DFROBOT_ENCODER_COUNT && i2c_device_present(DFROBOT_ENCODER_ADDR)) {
-            dfRobotHubChannel[dfFound] = ch;
-            dfEncoders[dfFound] = new DFRobot_VisualRotaryEncoder_I2C(DFROBOT_ENCODER_ADDR, &Wire);
-            // begin() and setGainCoefficient() do I2C — protect with scoped lock
-            if (i2c_lock(50)) {
-                i2c_hub_select_raw(ch);
+            // Probe DFRobot SEN0502 (0x54)
+            if (dfFound < DFROBOT_ENCODER_COUNT && i2c_device_present_raw(DFROBOT_ENCODER_ADDR)) {
+                i2cHubKnownMask[ch] |= I2C_DEVBIT_DFROBOT_ENC;
+                dfRobotHubChannel[dfFound] = ch;
+                dfEncoders[dfFound] = new DFRobot_VisualRotaryEncoder_I2C(DFROBOT_ENCODER_ADDR, &Wire);
                 if (dfEncoders[dfFound]->begin() == 0) {
                     dfEncoderConnected[dfFound] = true;
                     dfEncoders[dfFound]->setGainCoefficient(10);
@@ -1488,80 +1519,81 @@ void scanI2CHub() {
                     dfEncoders[dfFound] = nullptr;
                 }
                 i2c_hub_deselect_raw();
-                i2c_unlock();
+                dfFound++;
             }
-            dfFound++;
-        }
 
-        // Re-select hub channel before ByteButton probe
-        // (M5/DFRobot init blocks above may have deselected the hub,
-        //  causing a false detection on the direct bus)
-        if (byteButtonsFound < BYTEBUTTON_COUNT) {
-            i2c_hub_select(ch);
-            delay(2);
-            if (i2c_device_present(BYTEBUTTON_ADDR)) {
-                bool alreadyAssigned = false;
-                for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
-                    if (byteButtonConnected[m] && byteButtonHubChannel[m] == ch) {
-                        alreadyAssigned = true;
-                        break;
-                    }
-                }
-                if (!alreadyAssigned) {
-                    int moduleIdx = -1;
+            // Re-select hub channel before ByteButton probe
+            if (byteButtonsFound < BYTEBUTTON_COUNT) {
+                i2c_hub_select_raw(ch);
+                delay(2);
+                if (i2c_device_present_raw(BYTEBUTTON_ADDR)) {
+                    i2cHubKnownMask[ch] |= I2C_DEVBIT_BYTEBUTTON;
+                    bool alreadyAssigned = false;
                     for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
-                        if (!byteButtonConnected[m] && ch == kByteButtonExpectedChannels[m]) {
-                            moduleIdx = m;
+                        if (byteButtonConnected[m] && byteButtonHubChannel[m] == ch) {
+                            alreadyAssigned = true;
                             break;
                         }
                     }
-                    if (moduleIdx < 0) {
+                    if (!alreadyAssigned) {
+                        int moduleIdx = -1;
                         for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
-                            if (!byteButtonConnected[m]) {
+                            if (!byteButtonConnected[m] && ch == kByteButtonExpectedChannels[m]) {
                                 moduleIdx = m;
                                 break;
                             }
                         }
-                    }
-
-                    if (moduleIdx >= 0) {
-                        byteButtonHubChannel[moduleIdx] = ch;
-                        byteButtonConnected[moduleIdx] = true;
-                        prevByteButtonState[moduleIdx] = 0;
-                        byteButtonsFound++;
-
-                        if (ch == kByteButtonExpectedChannels[moduleIdx]) {
-                            RED808_LOG_PRINTF("[I2C] M5 ByteButton #%d found on hub ch %d\n", moduleIdx + 1, ch);
-                        } else {
-                            RED808_LOG_PRINTF("[I2C] WARNING: ByteButton #%d found on ch %d (expected %d), using detected channel\n",
-                                              moduleIdx + 1, ch, kByteButtonExpectedChannels[moduleIdx]);
+                        if (moduleIdx < 0) {
+                            for (int m = 0; m < BYTEBUTTON_COUNT; m++) {
+                                if (!byteButtonConnected[m]) {
+                                    moduleIdx = m;
+                                    break;
+                                }
+                            }
                         }
 
-                        if (i2c_lock(50)) {
+                        if (moduleIdx >= 0) {
+                            byteButtonHubChannel[moduleIdx] = ch;
+                            byteButtonConnected[moduleIdx] = true;
+                            prevByteButtonState[moduleIdx] = 0;
+                            byteButtonsFound++;
+
+                            if (ch == kByteButtonExpectedChannels[moduleIdx]) {
+                                RED808_LOG_PRINTF("[I2C] M5 ByteButton #%d found on hub ch %d\n", moduleIdx + 1, ch);
+                            } else {
+                                RED808_LOG_PRINTF("[I2C] WARNING: ByteButton #%d found on ch %d (expected %d), using detected channel\n",
+                                                  moduleIdx + 1, ch, kByteButtonExpectedChannels[moduleIdx]);
+                            }
+
                             i2c_hub_select_raw(ch);
                             byteButtonLedInitialized[moduleIdx] = byteButtonApplyLedConfigLocked();
                             i2c_hub_deselect_raw();
-                            i2c_unlock();
                         }
                     }
                 }
             }
-        }
 
-        // Probe DFRobot 4-pot ADC hub converter (ADS1115-compatible, 0x48)
-        if (!potHubFound) {
-            i2c_hub_select(ch);
-            delay(2);
-            if (i2c_device_present(DFROBOT_POT_ADC_ADDR) || i2c_device_present(DFROBOT_POT_ADC_ADDR_ALT)) {
-                dfRobotPotAddr = i2c_device_present(DFROBOT_POT_ADC_ADDR) ? DFROBOT_POT_ADC_ADDR : DFROBOT_POT_ADC_ADDR_ALT;
-                dfRobotPotHubChannel = ch;
-                dfRobotPotConnected = true;
-                potHubFound = true;
-                RED808_LOG_PRINTF("[I2C] DFRobot 4-pot ADC found on hub ch %d (0x%02X)\n", ch, dfRobotPotAddr);
+            // Probe DFRobot 4-pot ADC hub converter (ADS1115-compatible, 0x48)
+            if (!potHubFound) {
+                i2c_hub_select_raw(ch);
+                delay(2);
+                if (i2c_device_present_raw(DFROBOT_POT_ADC_ADDR) || i2c_device_present_raw(DFROBOT_POT_ADC_ADDR_ALT)) {
+                    i2cHubKnownMask[ch] |= I2C_DEVBIT_POT_ADC;
+                    dfRobotPotAddr = i2c_device_present_raw(DFROBOT_POT_ADC_ADDR) ? DFROBOT_POT_ADC_ADDR : DFROBOT_POT_ADC_ADDR_ALT;
+                    dfRobotPotHubChannel = ch;
+                    dfRobotPotConnected = true;
+                    potHubFound = true;
+                    RED808_LOG_PRINTF("[I2C] DFRobot 4-pot ADC found on hub ch %d (0x%02X)\n", ch, dfRobotPotAddr);
+                }
             }
+
+            i2c_hub_deselect_raw();
         }
 
-        i2c_hub_deselect();
+        i2c_hub_deselect_raw();
+        i2c_unlock();
+    } else {
+        RED808_LOG_PRINTLN("[I2C] WARNING: could not acquire I2C lock for atomic hub scan");
     }
 
     int byteButtonFoundCount = byteButtonsFound;
@@ -1638,6 +1670,31 @@ void scanI2CHub() {
                   dfFound,
                   byteButtonFoundCount,
                   dfRobotPotConnected ? "YES" : "NO");
+
+    for (int ch = 0; ch < 8; ch++) {
+        if (!i2cHubKnownMask[ch]) continue;
+        RED808_LOG_PRINTF("[I2C] CH%d mask=0x%02X (M5=%d BB=%d DF=%d POT=%d)\n", ch, i2cHubKnownMask[ch],
+            (i2cHubKnownMask[ch] & I2C_DEVBIT_M5_ROTATE8) != 0,
+            (i2cHubKnownMask[ch] & I2C_DEVBIT_BYTEBUTTON) != 0,
+            (i2cHubKnownMask[ch] & I2C_DEVBIT_DFROBOT_ENC) != 0,
+            (i2cHubKnownMask[ch] & I2C_DEVBIT_POT_ADC) != 0);
+    }
+
+    g_i2c_scan_in_progress = false;
+}
+
+static bool controls_i2c_ready() {
+    for (int i = 0; i < M5_ENCODER_MODULES; i++) {
+        if (!m5encoderConnected[i]) return false;
+    }
+    for (int i = 0; i < DFROBOT_ENCODER_COUNT; i++) {
+        if (!dfEncoderConnected[i]) return false;
+    }
+    for (int i = 0; i < BYTEBUTTON_COUNT; i++) {
+        if (!byteButtonConnected[i]) return false;
+    }
+    if (!dfRobotPotConnected) return false;
+    return true;
 }
 
 void updateByteButtonLeds() {
@@ -1714,8 +1771,8 @@ void updateByteButtonLeds() {
         else if (byteButtonHubChannel[moduleIdx] == -2) i2c_hub_deselect_raw();
         for (int i = 0; i < BYTEBUTTON_LED_COUNT; i++) {
             if (byteButtonLedCache[moduleIdx][i] == desired[i]) continue;
-            uint32_t color = desired[i];
-            if (!byteButtonWriteBytes(BYTEBUTTON_LED_RGB888_REG + i * 4, (uint8_t*)&color, 4)) {
+            uint8_t rgb4[4] = {(uint8_t)(desired[i] >> 16), (uint8_t)(desired[i] >> 8), (uint8_t)desired[i], 0};
+            if (!byteButtonWriteBytes(BYTEBUTTON_LED_RGB888_REG + i * 4, rgb4, 4)) {
                 byteButtonLedInitialized[moduleIdx] = false;
                 break;
             }
@@ -1732,7 +1789,7 @@ void updateByteButtonLeds() {
 
 void updateTrackEncoderLED(int track) {
     int moduleIndex = track / ENCODERS_PER_MODULE;
-    int encoderIndex = (ENCODERS_PER_MODULE - 1) - (track % ENCODERS_PER_MODULE);  // mirror
+    int encoderIndex = track % ENCODERS_PER_MODULE;
     if (!m5encoderConnected[moduleIndex]) return;
 
     int ch = m5HubChannel[moduleIndex];
@@ -1784,7 +1841,8 @@ static void setByteButtonLedDirect(int moduleIdx, int index, uint32_t color) {
     if (!i2c_lock(10)) return;
     if (byteButtonHubChannel[moduleIdx] >= 0) i2c_hub_select_raw(byteButtonHubChannel[moduleIdx]);
     else if (byteButtonHubChannel[moduleIdx] == -2) i2c_hub_deselect_raw();
-    byteButtonWriteBytes(BYTEBUTTON_LED_RGB888_REG + index * 4, (uint8_t*)&color, 4);
+    uint8_t rgb4[4] = {(uint8_t)(color >> 16), (uint8_t)(color >> 8), (uint8_t)color, 0};
+    byteButtonWriteBytes(BYTEBUTTON_LED_RGB888_REG + index * 4, rgb4, 4);
     byteButtonLedCache[moduleIdx][index] = color;
     if (byteButtonHubChannel[moduleIdx] >= 0) i2c_hub_deselect_raw();
     i2c_unlock();
@@ -1909,7 +1967,7 @@ void handleM5Encoders() {
         i2c_hub_select_raw(ch);
 
         for (int enc = 0; enc < ENCODERS_PER_MODULE; enc++) {
-            int track = mod * ENCODERS_PER_MODULE + (ENCODERS_PER_MODULE - 1 - enc);
+            int track = mod * ENCODERS_PER_MODULE + enc;
 
             // Always read the absolute counter — the V2 change mask is unreliable
             // across firmware versions and I2C hubs.
@@ -1952,11 +2010,11 @@ void handleM5Encoders() {
                     btnArmed[track] = false;
                     trackMuted[track] = !trackMuted[track];
                     if (trackMuted[track]) {
-                        ledQueue[ledCount++] = {mod, enc, 0x1E, 0, 0};
+                        if (ledCount < Config::MAX_TRACKS) ledQueue[ledCount++] = {mod, enc, 0x1E, 0, 0};
                     } else {
                         uint8_t rgb[3]; theme_encoder_color(track, rgb);
                         uint8_t br = (uint8_t)map(trackVolumes[track], 0, Config::MAX_VOLUME, 10, 255);
-                        ledQueue[ledCount++] = {mod, enc, (uint8_t)((rgb[0]*br)/255), (uint8_t)((rgb[1]*br)/255), (uint8_t)((rgb[2]*br)/255)};
+                        if (ledCount < Config::MAX_TRACKS) ledQueue[ledCount++] = {mod, enc, (uint8_t)((rgb[0]*br)/255), (uint8_t)((rgb[1]*br)/255), (uint8_t)((rgb[2]*br)/255)};
                     }
                     pending[pendingCount++] = {1, track, (int)trackMuted[track]};
                 }
@@ -2497,14 +2555,18 @@ void setup() {
     analogReadResolution(12);  // 12-bit ADC (0-4095)
     RED808_LOG_PRINTLN("[FADER] Unit Fader on GPIO6 initialized");
 
+    // 7b. UART bridge to ESP32-P4 — init EARLY so P4 handshake is not missed during I2C delay.
+    uart_bridge_init();
+
     // 7. Scan I2C hub for M5 + DFRobot + ByteButton (before LVGL task starts - no I2C race)
+    // Guard: CH32V003 inside M5 ROTATE8 needs ~4-5s from cold-power-on before it responds to I2C.
+    { unsigned long ms = millis(); if (ms < 5000) delay(5000 - ms); }
     scanI2CHub();
+
+    setOceanBlueLeds();
 
     // 8. WiFi DISABLED — S3 communicates via UART/USB-C only
     RED808_LOG_PRINTLN("[WiFi] DISABLED — S3 is UART-only slave to P4");
-
-    // 8b. UART bridge to ESP32-P4 Visual Beast
-    uart_bridge_init();
 
     // 9. Create initial UI screens (must be inside LVGL lock)
     //    Widgets now allocate from PSRAM via lv_conf.h, keeping internal heap free
@@ -2567,6 +2629,10 @@ void setup() {
 static void touch_task(void* arg) {
     (void)arg;
     while (true) {
+        if (g_i2c_scan_in_progress) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
         // Poll unconditionally — GT911 status register handles "no new data"
         // internally (returns immediately when !bufferReady).
         // INT pin polling was unreliable (pulse mode, missed >99% of events).
@@ -2644,6 +2710,10 @@ static void encoder_task(void* arg) {
     (void)arg;
     TickType_t last_wake = xTaskGetTickCount();
     while (true) {
+        if (g_i2c_scan_in_progress) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
         // Periodic alive check
         {
             static uint32_t encLoops = 0;
@@ -2673,6 +2743,8 @@ static void encoder_task(void* arg) {
 void loop() {
     unsigned long now = millis();
     static Screen lastUiScreen = SCREEN_BOOT;
+
+    // Runtime I2C rescan disabled for stability. Only boot-time scan is used.
 
     // === Pad triggers now handled by pad_trigger_task (prio 2) ===
 

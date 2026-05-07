@@ -113,6 +113,16 @@
 #endif
 
 // =============================================================================
+// STANDALONE MODE
+// 1 = P4 runs as the only control surface and talks only to Master.
+//     AUX/S3 transport is disabled at runtime so pads, sequencer, patterns
+//     and FX stay on the P4->Master path only.
+// =============================================================================
+#ifndef P4_STANDALONE_MASTER_ONLY
+#define P4_STANDALONE_MASTER_ONLY 1
+#endif
+
+// =============================================================================
 // NETWORK — ESP32-C6 hosted WiFi link to RED808 Master
 // Override these with build_flags or a local config overlay when needed.
 // =============================================================================

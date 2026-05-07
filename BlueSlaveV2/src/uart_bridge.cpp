@@ -10,19 +10,85 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
 
-// Transport selection: USB-C (Serial0/UART0 → CH343 → USB) or RS485 (Serial1/UART1)
+// Transport selection: USB-C bridge or RS485 (Serial1/UART1)
 #if P4_USB_BRIDGE
-// The Waveshare S3 LCD 7B routes USB-C through a CH343 chip connected to UART0.
-// Native USB (HWCDC/GPIO19-20) is NOT on the USB-C connector.
-// So we use Serial0 (UART0 → CH343 → USB-C → P4 USB Host CDC-ACM).
-static auto& P4Serial = Serial0;
+static void bridge_begin() {
+#if ARDUINO_USB_MODE == 0
+    Serial.begin(UART_BAUD_RATE);
+    Serial.setRxBufferSize(2048);
+#else
+    Serial0.begin(UART_BAUD_RATE);
+    Serial0.setRxBufferSize(2048);
+    Serial0.setTxBufferSize(512);
+#endif
+}
+
+static size_t bridge_write(const uint8_t* data, size_t len) {
+#if ARDUINO_USB_MODE == 0
+    return Serial.write(data, len);
+#else
+    return Serial0.write(data, len);
+#endif
+}
+
+static size_t bridge_write(uint8_t b) {
+    uint8_t one = b;
+    return bridge_write(&one, 1);
+}
+
+static int bridge_available() {
+#if ARDUINO_USB_MODE == 0
+    return Serial.available();
+#else
+    return Serial0.available();
+#endif
+}
+
+static int bridge_peek() {
+#if ARDUINO_USB_MODE == 0
+    return Serial.peek();
+#else
+    return Serial0.peek();
+#endif
+}
+
+static int bridge_read() {
+#if ARDUINO_USB_MODE == 0
+    return Serial.read();
+#else
+    return Serial0.read();
+#endif
+}
+
+static size_t bridge_read_bytes(uint8_t* data, size_t len) {
+#if ARDUINO_USB_MODE == 0
+    return Serial.readBytes(data, len);
+#else
+    return Serial0.readBytes(data, len);
+#endif
+}
 #else
 // UART1 via RS485 transceiver (GPIO15 RX, GPIO16 TX)
 static HardwareSerial& P4Serial = Serial1;
+
+static void bridge_begin() {
+    P4Serial.begin(UART_BAUD_RATE, SERIAL_8N1, Config::UART_P4_RX_PIN, Config::UART_P4_TX_PIN);
+    P4Serial.setRxBufferSize(1024);
+    P4Serial.setTxBufferSize(256);
+}
+
+static size_t bridge_write(const uint8_t* data, size_t len) { return P4Serial.write(data, len); }
+static size_t bridge_write(uint8_t b) { return P4Serial.write(b); }
+static int bridge_available() { return P4Serial.available(); }
+static int bridge_peek() { return P4Serial.peek(); }
+static int bridge_read() { return P4Serial.read(); }
+static size_t bridge_read_bytes(uint8_t* data, size_t len) { return P4Serial.readBytes(data, len); }
 #endif
 
 // TX buffer to coalesce sends
 static uint8_t txBuf[UART_BASIC_LEN];
+static SemaphoreHandle_t s_bridge_tx_mutex = NULL;
+static bool s_bridge_hb_task_started = false;
 
 // Link statistics
 UartStats uart_stats = {};
@@ -31,21 +97,32 @@ UartStats uart_stats = {};
 // INIT
 // =============================================================================
 void uart_bridge_init(void) {
+    if (!s_bridge_tx_mutex) {
+        s_bridge_tx_mutex = xSemaphoreCreateMutex();
+    }
+
 #if P4_USB_BRIDGE
-    // UART0 → CH343 → USB-C → P4. Use protocol baud rate.
-    // CH343 is transparent: whatever baud rate we set on UART0,
-    // the P4 USB Host sets the same via CDC LineCoding.
-    P4Serial.begin(UART_BAUD_RATE);
-    P4Serial.setRxBufferSize(2048);
-    P4Serial.setTxBufferSize(512);
-    RED808_LOG_PRINTLN("[UART] Bridge: UART0 → CH343 → USB-C → P4");
+    bridge_begin();
+#if ARDUINO_USB_MODE == 0
+    RED808_LOG_PRINTLN("[UART] Bridge: TinyUSB CDC (Serial) -> P4");
 #else
-    P4Serial.begin(UART_BAUD_RATE, SERIAL_8N1, Config::UART_P4_RX_PIN, Config::UART_P4_TX_PIN);
-    P4Serial.setRxBufferSize(1024);  // Was 512: ~9ms of headroom at 921600 baud absorbs LVGL stalls
-    P4Serial.setTxBufferSize(256);
+    RED808_LOG_PRINTLN("[UART] Bridge: UART0/CH343 (Serial0) -> P4");
+#endif
+#else
+    bridge_begin();
     RED808_LOG_PRINTF("[UART] Bridge init: TX=%d RX=%d @ %d baud\n",
                       Config::UART_P4_TX_PIN, Config::UART_P4_RX_PIN, UART_BAUD_RATE);
 #endif
+
+    if (!s_bridge_hb_task_started) {
+        s_bridge_hb_task_started = true;
+        xTaskCreatePinnedToCore([](void*) {
+            for (;;) {
+                uart_bridge_heartbeat();
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
+        }, "p4_hb", 2048, NULL, 1, NULL, 0);
+    }
 }
 
 // =============================================================================
@@ -54,7 +131,9 @@ void uart_bridge_init(void) {
 void uart_bridge_send(uint8_t type, uint8_t id, uint8_t value) {
     UartBasicPacket pkt;
     uart_build_basic(&pkt, type, id, value);
-    size_t written = P4Serial.write((const uint8_t*)&pkt, UART_BASIC_LEN);
+    if (s_bridge_tx_mutex) xSemaphoreTake(s_bridge_tx_mutex, pdMS_TO_TICKS(20));
+    size_t written = bridge_write((const uint8_t*)&pkt, UART_BASIC_LEN);
+    if (s_bridge_tx_mutex) xSemaphoreGive(s_bridge_tx_mutex);
     if (written == UART_BASIC_LEN) uart_stats.tx_packets++;
     else uart_stats.tx_dropped++;
 }
@@ -69,13 +148,15 @@ void uart_bridge_send_extended(uint8_t type, uint8_t id, const uint8_t* data, ui
     hdr[2] = id;
     hdr[3] = (len >> 8) & 0xFF;
     hdr[4] = len & 0xFF;
-    P4Serial.write(hdr, UART_EXT_HEADER_LEN);
-    if (len > 0 && data) P4Serial.write(data, len);
+    if (s_bridge_tx_mutex) xSemaphoreTake(s_bridge_tx_mutex, pdMS_TO_TICKS(50));
+    bridge_write(hdr, UART_EXT_HEADER_LEN);
+    if (len > 0 && data) bridge_write(data, len);
     // Checksum: sum of all bytes & 0xFF
     uint8_t cs = 0;
     for (int i = 0; i < UART_EXT_HEADER_LEN; i++) cs += hdr[i];
-    for (uint16_t i = 0; i < len; i++) cs += data[i];
-    P4Serial.write(cs);
+    if (data) { for (uint16_t i = 0; i < len; i++) cs += data[i]; }
+    bridge_write(cs);
+    if (s_bridge_tx_mutex) xSemaphoreGive(s_bridge_tx_mutex);
 }
 
 // =============================================================================
@@ -83,13 +164,13 @@ void uart_bridge_send_extended(uint8_t type, uint8_t id, const uint8_t* data, ui
 // =============================================================================
 int uart_bridge_receive(void) {
     int count = 0;
-    while (P4Serial.available() > 0) {
-        uint8_t peek = (uint8_t)P4Serial.peek();
+    while (bridge_available() > 0) {
+        uint8_t peek = (uint8_t)bridge_peek();
 
         if (peek == UART_START_BASIC) {
-            if (P4Serial.available() < UART_BASIC_LEN) break;
+            if (bridge_available() < UART_BASIC_LEN) break;
             uint8_t buf[UART_BASIC_LEN];
-            P4Serial.readBytes(buf, UART_BASIC_LEN);
+            bridge_read_bytes(buf, UART_BASIC_LEN);
             UartBasicPacket* pkt = (UartBasicPacket*)buf;
             if (!uart_validate_packet(pkt)) { uart_stats.rx_checksum_errors++; continue; }
             uart_stats.rx_packets++;
@@ -132,8 +213,8 @@ int uart_bridge_receive(void) {
                 // must NOT re-send UDP here or the two sequencers drift
                 // due to duplicated starts. Just mirror the flag so the
                 // S3 UI and local clock match P4's intent.
-                extern bool isPlaying;
-                extern int currentStep;
+                extern volatile bool isPlaying;
+                extern volatile int currentStep;
                 extern unsigned long lastLocalStepMs;
                 extern uint32_t lastLocalStepUs;
                 bool want = (pkt->value != 0);
@@ -150,7 +231,7 @@ int uart_bridge_receive(void) {
             } else if (pkt->type == MSG_SYSTEM && pkt->id == SYS_STEP) {
                 // P4 is authoritative sequencer clock. Execute this step value
                 // as-is (S3 main loop triggers hits on step-edge changes).
-                extern int currentStep;
+                extern volatile int currentStep;
                 extern unsigned long lastLocalStepMs;
                 extern uint32_t lastLocalStepUs;
                 currentStep = (int)pkt->value;
@@ -160,12 +241,12 @@ int uart_bridge_receive(void) {
             } else if (pkt->type == MSG_SYSTEM && pkt->id == SYS_PATTERN) {
                 // Keep S3 sequencer pattern selection synced to P4/Master.
                 extern int currentPattern;
-                extern uint32_t patternUiRevision;
+                extern volatile uint32_t patternUiRevision;
                 extern bool needsFullRedraw;
                 int pat = constrain((int)pkt->value, 0, Config::MAX_PATTERNS - 1);
                 if (currentPattern != pat) {
                     currentPattern = pat;
-                    patternUiRevision++;
+                    patternUiRevision += 1;
                     needsFullRedraw = true;
                 }
                 count++;
@@ -186,7 +267,7 @@ int uart_bridge_receive(void) {
                 extern bool trackMuted[];
                 extern bool trackSolo[];
                 extern bool needsFullRedraw;
-                extern uint32_t patternUiRevision;
+                extern volatile uint32_t patternUiRevision;
                 uint8_t sub = pkt->id & 0xF0;
                 uint8_t trk = pkt->id & 0x0F;
                 if (trk < Config::MAX_TRACKS) {
@@ -194,25 +275,29 @@ int uart_bridge_receive(void) {
                     else if (sub == TRK_MUTE_BIT) trackMuted[trk] = (pkt->value != 0);
                     else if (sub == TRK_SOLO_BIT) trackSolo[trk] = (pkt->value != 0);
                     needsFullRedraw = true;
-                    patternUiRevision++;
+                    patternUiRevision += 1;
                     count++;
                 }
             }
 
         } else if (peek == UART_START_EXTENDED) {
             // Need at least header (5 bytes)
-            if (P4Serial.available() < UART_EXT_HEADER_LEN) break;
+            if (bridge_available() < UART_EXT_HEADER_LEN) break;
             uint8_t hdr[UART_EXT_HEADER_LEN];
-            P4Serial.readBytes(hdr, UART_EXT_HEADER_LEN);
+            bridge_read_bytes(hdr, UART_EXT_HEADER_LEN);
             uint16_t payloadLen = ((uint16_t)hdr[3] << 8) | hdr[4];
             if (payloadLen > UART_EXT_MAX_PAYLOAD) continue;  // sanity check (was hardcoded 64)
-            // Wait briefly for payload + checksum to arrive (~0.4ms at 921600)
+            // Wait briefly for payload + checksum to arrive (~0.4ms at 921600).
+            // Use vTaskDelay(1) to yield to higher-priority tasks (touch, pads)
+            // instead of spinning, which would block Core 0 for up to 5ms.
             unsigned long t0 = millis();
-            while (P4Serial.available() < (int)(payloadLen + 1) && (millis() - t0) < 5) {}
-            if (P4Serial.available() < (int)(payloadLen + 1)) continue;
+            while (bridge_available() < (int)(payloadLen + 1) && (millis() - t0) < 5) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+            if (bridge_available() < (int)(payloadLen + 1)) continue;
             uint8_t payload[UART_EXT_MAX_PAYLOAD];
-            P4Serial.readBytes(payload, (int)payloadLen);
-            uint8_t cs_rx = (uint8_t)P4Serial.read();
+            bridge_read_bytes(payload, (int)payloadLen);
+            uint8_t cs_rx = (uint8_t)bridge_read();
             // Validate checksum
             uint8_t cs = 0;
             for (int i = 0; i < UART_EXT_HEADER_LEN; i++) cs += hdr[i];
@@ -231,7 +316,7 @@ int uart_bridge_receive(void) {
                 count++;
             }
         } else {
-            P4Serial.read();  // discard unrecognized byte
+            bridge_read();  // discard unrecognized byte
             uart_stats.rx_framing_errors++;
         }
     }

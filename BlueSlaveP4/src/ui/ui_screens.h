@@ -49,5 +49,13 @@ lv_obj_t* create_section_shell(lv_obj_t* parent, int x, int y, int w, int h);
 void ui_create_header(lv_obj_t* parent);
 void ui_update_header(void);
 
+// Reset the sequencer's temporary multi-bar import state so the current
+// 16-step pattern from Master becomes the authoritative view again.
+void ui_sequencer_sync_from_current_pattern(void);
+
+// Install a full external pattern (up to 64 steps) received from Master and
+// refresh the sequencer pagination/view around its first page.
+void ui_sequencer_load_external_pattern(const bool steps[16][64], int raw_len);
+
 // Sync pads state (called from UART handler)
 void ui_live_set_sync_p4(bool on);
