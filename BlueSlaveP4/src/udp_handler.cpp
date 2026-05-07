@@ -10,6 +10,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <math.h>
 
@@ -40,9 +41,13 @@ static bool sessionCleanSent = false;
 static int pendingPatternRequest = -1;
 static unsigned long pendingPatternLastTxMs = 0;
 static uint8_t pendingPatternRetries = 0;
+static bool patternRowGrid[16][64] = {};
+static uint16_t patternRowMask = 0;
+static int patternRowPattern = -1;
+static int patternRowStepCount = 16;
 
 // JSON parse buffer
-static char rxBuf[4096];
+static char rxBuf[8192];
 
 static int clamp_int(int value, int lo, int hi) {
     if (value < lo) return lo;
@@ -63,6 +68,84 @@ static bool pattern_grid_has_data(void) {
         }
     }
     return false;
+}
+
+static int hex_nibble_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+static void decode_pattern_row_hex(const char* row, bool* dest, int stepCount) {
+    if (!row || !dest) return;
+    for (int s = 0; s < 64; s++) dest[s] = false;
+    int nibbles = (stepCount + 3) / 4;
+    if (nibbles > 16) nibbles = 16;
+    for (int nib = 0; row[nib] && nib < nibbles; nib++) {
+        int value = hex_nibble_value(row[nib]);
+        if (value < 0) continue;
+        int baseStep = nib * 4;
+        for (int bit = 0; bit < 4; bit++) {
+            int step = baseStep + bit;
+            if (step >= stepCount || step >= 64) break;
+            dest[step] = ((value >> bit) & 0x01) != 0;
+        }
+    }
+}
+
+static bool fetch_pattern_http(int pattern) {
+    if (!wifiConnected) return false;
+
+    char url[96];
+    snprintf(url, sizeof(url), "http://192.168.4.1/api/getPattern?index=%d", pattern);
+
+    HTTPClient http;
+    http.setTimeout(900);
+    if (!http.begin(url)) return false;
+
+    int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+        http.end();
+        return false;
+    }
+
+    String payload = http.getString();
+    http.end();
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) {
+        P4_LOG_PRINTF("[HTTP][PAT] parse error: %s\n", err.c_str());
+        return false;
+    }
+
+    bool raw_steps[16][64] = {};
+    int raw_len = 16;
+    for (int track = 0; track < 16; track++) {
+        char key[4];
+        snprintf(key, sizeof(key), "%d", track);
+        JsonArray row = doc[key];
+        if (!row) continue;
+        int step = 0;
+        for (JsonVariant val : row) {
+            if (step >= 64) break;
+            raw_steps[track][step] = val.as<bool>();
+            step++;
+        }
+        if (step > raw_len) raw_len = step;
+    }
+
+    p4.current_pattern = clamp_int(pattern, 0, 15);
+    ui_sequencer_load_external_pattern(raw_steps, clamp_int(raw_len, 16, 64));
+    pendingPatternRequest = -1;
+    pendingPatternRetries = 0;
+    pendingPatternLastTxMs = 0;
+    masterAlive = true;
+    p4.master_connected = true;
+    uart_send_pattern_to_s3(p4.current_pattern, p4.steps);
+    P4_LOG_PRINTF("[HTTP][PAT] loaded pattern %d len=%d\n", pattern, raw_len);
+    return true;
 }
 
 // =============================================================================
@@ -250,6 +333,7 @@ void udp_send_get_pattern(int pattern) {
     if (pendingPatternRetries < 255) pendingPatternRetries++;
     P4_LOG_PRINTF("[UDP][PAT] TX get_pattern idx=%d\n", pattern);
     sendJson(buf);
+    fetch_pattern_http(pattern);
 }
 
 void udp_send_set_step(int track, int step, bool active) {
@@ -633,8 +717,28 @@ static void processJson(const char* json, int len) {
         bool raw_steps[16][64] = {};
         P4_LOG_PRINTF("[UDP][PAT] RX pattern_sync pat=%d raw=%d requested=%d\n",
                       pat, raw_len, requested_pattern ? 1 : 0);
+        JsonArray rows = doc["rows"];
         JsonArray data = doc["data"];
-        if (data) {
+        if (rows) {
+            p4.current_pattern = pat;
+            int track = 0;
+            for (JsonVariant rowVal : rows) {
+                if (track >= 16) break;
+                const char* row = rowVal | "";
+                for (int nib = 0; row[nib] && nib < 16; nib++) {
+                    int value = hex_nibble_value(row[nib]);
+                    if (value < 0) continue;
+                    int baseStep = nib * 4;
+                    for (int bit = 0; bit < 4; bit++) {
+                        int step = baseStep + bit;
+                        if (step >= 64) break;
+                        raw_steps[track][step] = ((value >> bit) & 0x01) != 0;
+                    }
+                }
+                track++;
+            }
+            ui_sequencer_load_external_pattern(raw_steps, raw_len);
+        } else if (data) {
             bool nestedRows = false;
             if (!data.isNull() && data.size() > 0) {
                 nestedRows = data[0].is<JsonArray>();
@@ -695,6 +799,34 @@ static void processJson(const char* json, int len) {
         pendingPatternLastTxMs = 0;
         // Forward pattern data to S3 so it can sync its sequencer + pad-sync
         uart_send_pattern_to_s3(pat, p4.steps);
+    }
+    else if (strcmp(cmd, "pattern_row") == 0) {
+        int pat = clamp_int(doc["pattern"] | p4.current_pattern, 0, 15);
+        int track = clamp_int(doc["track"] | -1, -1, 15);
+        int raw_len = clamp_int(doc["stepCount"] | 16, 16, 64);
+        const char* row = doc["row"] | "";
+        bool requested_pattern = (pendingPatternRequest == pat);
+        bool matches_current = (pat == p4.current_pattern);
+        if (track < 0 || (!requested_pattern && !matches_current)) {
+            return;
+        }
+        if (patternRowPattern != pat || patternRowStepCount != raw_len) {
+            memset(patternRowGrid, 0, sizeof(patternRowGrid));
+            patternRowMask = 0;
+            patternRowPattern = pat;
+            patternRowStepCount = raw_len;
+        }
+        decode_pattern_row_hex(row, patternRowGrid[track], raw_len);
+        patternRowMask |= (uint16_t)(1U << track);
+        p4.current_pattern = pat;
+        if (patternRowMask == 0xFFFFU) {
+            ui_sequencer_load_external_pattern(patternRowGrid, raw_len);
+            pendingPatternRequest = -1;
+            pendingPatternRetries = 0;
+            pendingPatternLastTxMs = 0;
+            patternRowMask = 0;
+            uart_send_pattern_to_s3(pat, p4.steps);
+        }
     }
     // ----- Play state -----
     else if (strcmp(cmd, "play_state") == 0) {

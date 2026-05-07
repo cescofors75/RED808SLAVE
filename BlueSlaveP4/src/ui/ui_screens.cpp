@@ -387,7 +387,7 @@ static lv_obj_t* live_pad_state_labels[16] = {};
 static lv_obj_t* live_pad_inst_labels[16] = {};
 static lv_obj_t* live_pad_accent_strips[16] = {};
 static lv_obj_t* live_spectrum_bars[16] = {};  // spectrum bar per pad (bottom of pad)
-static lv_obj_t* live_home_panels[16] = {};
+static lv_obj_t* live_home_panels[24] = {};
 static int       live_home_panel_count = 0;
 
 // Pad layout mode: 0=16 normal, 1=16 FS, 2=8 FS, 3=4 FS, 4=2 FS, 5=1 FS
@@ -990,7 +990,7 @@ static void apply_pad_layout(int mode) {
     }
 
     bool fullscreen = (mode != 0);
-    for (int i = 0; i < live_home_panel_count; i++) {
+    for (int i = 0; i < live_home_panel_count && i < (int)(sizeof(live_home_panels) / sizeof(live_home_panels[0])); i++) {
         if (!live_home_panels[i]) continue;
         if (fullscreen) lv_obj_add_flag(live_home_panels[i], LV_OBJ_FLAG_HIDDEN);
         else            lv_obj_clear_flag(live_home_panels[i], LV_OBJ_FLAG_HIDDEN);
@@ -1187,12 +1187,12 @@ static void create_live_screen(void) {
     b = create_ctrl_btn(scr_live, COL_X(5), ROW_Y(0), CW, CH,
                          LV_SYMBOL_LEFT "\nPAT", RED808_WARNING, &lv_font_montserrat_20);
     lv_obj_add_event_cb(b, header_pattern_cb, LV_EVENT_CLICKED, (void*)(intptr_t)-1);
+    live_home_panels[live_home_panel_count++] = b;
 
     // [6,0] PAT +
     b = create_ctrl_btn(scr_live, COL_X(6), ROW_Y(0), CW, CH,
                          "PAT\n" LV_SYMBOL_RIGHT, RED808_WARNING, &lv_font_montserrat_20);
     lv_obj_add_event_cb(b, header_pattern_cb, LV_EVENT_CLICKED, (void*)(intptr_t)1);
-    live_home_panels[live_home_panel_count++] = b;
     live_home_panels[live_home_panel_count++] = b;
 
     // [7,0] Home status cell — pattern + link health
@@ -1612,15 +1612,21 @@ static void update_live_screen(void) {
 
     // Dedicated HOME controls labels
     static int gp_prev_home_master = -1;
-    if (grid_vol_lbl && p4.master_volume != gp_prev_home_master) {
+    static lv_obj_t* gp_prev_home_master_lbl = NULL;
+    if (grid_vol_lbl && (p4.master_volume != gp_prev_home_master || grid_vol_lbl != gp_prev_home_master_lbl)) {
         gp_prev_home_master = p4.master_volume;
+        gp_prev_home_master_lbl = grid_vol_lbl;
         lv_label_set_text_fmt(grid_vol_lbl, "%d", p4.master_volume);
+        lv_obj_clear_flag(grid_vol_lbl, LV_OBJ_FLAG_HIDDEN);
     }
 
     static int gp_prev_home_bpm = -1;
-    if (grid_pat_lbl && p4.bpm_int != gp_prev_home_bpm) {
+    static lv_obj_t* gp_prev_home_bpm_lbl = NULL;
+    if (grid_pat_lbl && (p4.bpm_int != gp_prev_home_bpm || grid_pat_lbl != gp_prev_home_bpm_lbl)) {
         gp_prev_home_bpm = p4.bpm_int;
+        gp_prev_home_bpm_lbl = grid_pat_lbl;
         lv_label_set_text_fmt(grid_pat_lbl, "%d", p4.bpm_int);
+        lv_obj_clear_flag(grid_pat_lbl, LV_OBJ_FLAG_HIDDEN);
     }
 
     // Step — only show the running step while playing; show "--" when paused
@@ -2054,6 +2060,7 @@ static int        seq_page              = 0;    // 0..3
 static bool       seq_force_refresh_cells = false; // force full cell repaint on next update_sequencer_screen
 static lv_obj_t*  seq_page_btns[4]      = {};
 static lv_obj_t*  seq_page_lbls[4]      = {};
+static bool       seq_page_styles_dirty = false;
 static bool       seq_groove_base[16][16] = {};
 static bool       seq_groove_base_valid = false;
 // Sequencer-local header buttons
@@ -2070,6 +2077,7 @@ static int        seq_pattern_wait_pat  = -1;
 static uint32_t   seq_pattern_wait_ms   = 0;
 static bool       seq_pattern_waiting   = false;
 static uint32_t   seq_pattern_payload_revision = 0;
+static uint32_t   seq_pattern_wait_base_revision = 0;
 
 // Last-loaded MIDI info — kept so the info button in the sequencer header
 // can re-open the summary modal on demand.
@@ -2096,6 +2104,7 @@ static void seq_pattern_modal_hide(void) {
     seq_pattern_wait_pat = -1;
     seq_pattern_wait_ms = 0;
     seq_pattern_waiting = false;
+    seq_pattern_wait_base_revision = 0;
 }
 
 static void seq_pattern_modal_show(int pattern) {
@@ -2136,6 +2145,7 @@ static void seq_pattern_modal_show(int pattern) {
     seq_pattern_wait_pat = pattern;
     seq_pattern_wait_ms = millis();
     seq_pattern_waiting = true;
+    seq_pattern_wait_base_revision = seq_pattern_payload_revision;
 }
 
 static void seq_pattern_modal_mark_loaded(void) {
@@ -2149,6 +2159,7 @@ static void seq_pattern_modal_mark_loaded(void) {
     }
     lv_obj_set_style_border_color(seq_pattern_modal, RED808_SUCCESS, 0);
     seq_pattern_waiting = false;
+    seq_pattern_wait_base_revision = 0;
     seq_pattern_wait_ms = millis();
 }
 
@@ -2409,20 +2420,8 @@ void ui_sequencer_sync_from_current_pattern(void) {
     seq_raw_len = 16;
     seq_page = 0;
     seq_groove_base_valid = false;
-    for (int t = 0; t < 16; t++) {
-        for (int s = 0; s < 16; s++) {
-            seq_raw_grid[t][s] = false;
-            p4.steps[t][s] = false;
-        }
-        for (int s = 16; s < 64; s++) {
-            seq_raw_grid[t][s] = false;
-        }
-    }
     seq_force_refresh_cells = true;
-    seq_apply_page_styles();
-    if (!(udp_wifi_connected() || udp_master_connected())) {
-        seq_pattern_modal_hide();
-    }
+    seq_page_styles_dirty = true;
 }
 
 void ui_sequencer_load_external_pattern(const bool steps[16][64], int raw_len) {
@@ -2438,11 +2437,8 @@ void ui_sequencer_load_external_pattern(const bool steps[16][64], int raw_len) {
         }
     }
     seq_force_refresh_cells = true;  // force full cell repaint — prev_cell_key may be stale
-    seq_apply_page_styles();
+    seq_page_styles_dirty = true;
     seq_pattern_payload_revision++;
-    if (seq_pattern_waiting || seq_pattern_modal) {
-        seq_pattern_modal_mark_loaded();
-    }
 }
 
 static void create_sequencer_screen(void) {
@@ -2728,19 +2724,13 @@ static void update_sequencer_screen(void) {
     int step = p4.current_step;
     bool playing = p4.is_playing;
     unsigned long now = millis();
-    static uint32_t seq_pattern_wait_rev = 0;
-
-    if (seq_pattern_waiting && seq_pattern_wait_rev == 0) {
-        seq_pattern_wait_rev = seq_pattern_payload_revision;
-    }
 
     // Pattern loading modal lifecycle: waiting -> loaded or timeout.
     if (seq_pattern_modal) {
         if (seq_pattern_waiting) {
-            if (seq_pattern_payload_revision != seq_pattern_wait_rev) {
+            if (seq_pattern_payload_revision != seq_pattern_wait_base_revision) {
                 seq_pattern_modal_mark_loaded();
-                seq_pattern_wait_rev = 0;
-            } else if ((now - seq_pattern_wait_ms) > 1800) {
+            } else if ((now - seq_pattern_wait_ms) > 3500) {
                 if (seq_pattern_modal_spin) {
                     lv_obj_add_flag(seq_pattern_modal_spin, LV_OBJ_FLAG_HIDDEN);
                 }
@@ -2751,11 +2741,10 @@ static void update_sequencer_screen(void) {
                 lv_obj_set_style_border_color(seq_pattern_modal, RED808_ERROR, 0);
                 seq_pattern_waiting = false;
                 seq_pattern_wait_ms = now;
-                seq_pattern_wait_rev = 0;
+                seq_pattern_wait_base_revision = 0;
             }
         } else if ((now - seq_pattern_wait_ms) > 700) {
             seq_pattern_modal_hide();
-            seq_pattern_wait_rev = 0;
         }
     }
 
@@ -2800,6 +2789,10 @@ static void update_sequencer_screen(void) {
         seq_force_refresh_cells = false;
         memset(prev_cell_key, 0xFF, sizeof(prev_cell_key));
         memset(prev_trk_key,  0xFF, sizeof(prev_trk_key));
+    }
+    if (seq_page_styles_dirty) {
+        seq_page_styles_dirty = false;
+        seq_apply_page_styles();
     }
 
     // ── Auto-advance pages on bar wrap (song mode) ──
@@ -5671,9 +5664,11 @@ void ui_navigate_to(int screen_id) {
     };
     int count = sizeof(targets) / sizeof(targets[0]);
     if (screen_id >= 0 && screen_id < count && targets[screen_id]) {
-        // Before leaving, stop all active synths to prevent stuck notes
-        // Note-off for all synth engines (Daisy, TB-303, etc.)
-        if (udp_wifi_connected()) {
+        bool keep_piano_preview = s_piano_play_active &&
+            ((active_screen == 10 && screen_id == 11) || (active_screen == 11 && screen_id == 10));
+        // Before leaving most screens, stop active synths to prevent stuck notes.
+        // Keep the local Melody preview alive while moving between PIANO and PARAMS.
+        if (udp_wifi_connected() && !keep_piano_preview) {
             for (int eng = 0; eng < 7; eng++) {
                 udp_send_synth_note_off(eng, 0);  // engine, track=0
             }
@@ -5943,7 +5938,7 @@ void ui_update_current_screen(void) {
     else if (active == scr_sequencer) update_sequencer_screen();
     else if (active == scr_fx) update_fx_screen();
     else if (active == scr_volumes) update_volumes_screen();
-    else if (active == scr_piano) update_piano_screen();
+    else if (active == scr_piano || active == scr_piano_params) update_piano_screen();
     else if (active == scr_sdcard && p4sd.needs_refresh) {
         p4sd.needs_refresh = false;
         sd_refresh_ui();
