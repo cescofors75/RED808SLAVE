@@ -12,6 +12,7 @@
 #include "config.h"
 #include <Arduino.h>
 #include <SD_MMC.h>
+#include <WiFi.h>
 #include <atomic>
 #include <math.h>
 
@@ -204,6 +205,55 @@ static lv_obj_t* create_header_button(lv_obj_t* parent, int x, int y, int w, int
     lv_obj_set_style_text_color(label, RED808_TEXT, 0);
     lv_obj_center(label);
     return btn;
+}
+
+static lv_obj_t* s_ui_toast = NULL;
+static lv_obj_t* s_ui_toast_label = NULL;
+static uint32_t s_ui_toast_until_ms = 0;
+
+static void ui_toast_hide(void) {
+    if (s_ui_toast) lv_obj_add_flag(s_ui_toast, LV_OBJ_FLAG_HIDDEN);
+    s_ui_toast_until_ms = 0;
+}
+
+static void ui_toast_update(void) {
+    if (s_ui_toast && s_ui_toast_until_ms && millis() > s_ui_toast_until_ms) {
+        ui_toast_hide();
+    }
+}
+
+static void ui_show_toast(const char* text, lv_color_t accent) {
+    lv_obj_t* parent = lv_scr_act();
+    if (!parent) return;
+
+    if (!s_ui_toast || lv_obj_get_parent(s_ui_toast) != parent) {
+        s_ui_toast = lv_obj_create(parent);
+        lv_obj_set_size(s_ui_toast, 420, 62);
+        lv_obj_align(s_ui_toast, LV_ALIGN_TOP_MID, 0, 54);
+        lv_obj_set_style_radius(s_ui_toast, 8, 0);
+        lv_obj_set_style_bg_color(s_ui_toast, RED808_PANEL, 0);
+        lv_obj_set_style_bg_opa(s_ui_toast, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(s_ui_toast, 2, 0);
+        lv_obj_set_style_shadow_width(s_ui_toast, 18, 0);
+        lv_obj_set_style_shadow_color(s_ui_toast, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_pad_hor(s_ui_toast, 18, 0);
+        lv_obj_set_style_pad_ver(s_ui_toast, 12, 0);
+        lv_obj_clear_flag(s_ui_toast, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(s_ui_toast, LV_OBJ_FLAG_CLICKABLE);
+
+        s_ui_toast_label = lv_label_create(s_ui_toast);
+        lv_obj_set_width(s_ui_toast_label, 384);
+        lv_label_set_long_mode(s_ui_toast_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_font(s_ui_toast_label, &lv_font_montserrat_18, 0);
+        lv_obj_center(s_ui_toast_label);
+    }
+
+    lv_label_set_text(s_ui_toast_label, text);
+    lv_obj_set_style_border_color(s_ui_toast, accent, 0);
+    lv_obj_set_style_text_color(s_ui_toast_label, RED808_TEXT, 0);
+    lv_obj_move_foreground(s_ui_toast);
+    lv_obj_clear_flag(s_ui_toast, LV_OBJ_FLAG_HIDDEN);
+    s_ui_toast_until_ms = millis() + 1800U;
 }
 
 static void seq_pattern_modal_show(int pattern);
@@ -1699,8 +1749,8 @@ static void update_live_screen(void) {
 
 // =============================================================================
 // FX LAB SCREEN — 2 pages × 3 circles
-//   Page 0: FLANGER (enc0) | DELAY (enc1) | REVERB (enc2)
-//   Page 1: DRIVE (pot3)   | CUTOFF (pot1) | RESONANCE (pot2)
+//   Page 0: CHORUS (enc0) | DELAY (enc1) | REVERB (enc2)
+//   Page 1: FILTER (pot3) | TREM (pot1)  | LIMIT (pot2)
 // =============================================================================
 static int fx_page = 0;   // 0 or 1
 
@@ -1715,10 +1765,10 @@ static lv_obj_t* fx_page_lbl       = NULL;
 static bool s_fx_ui_syncing = false;
 
 // FX metadata (page × 3)
-static const char*    fx_names[6]  = {"FLANGER","DELAY","REVERB","DRIVE","CUTOFF","RESONANCE"};
+static const char*    fx_names[6]  = {"CHORUS","DELAY","REVERB","FILTER","TREM","LIMIT"};
 static const uint32_t fx_colors[6] = {0x58A6FF, 0xB58BFF, 0x39D2C0,
                                        0xFF6B35, 0xFFD700, 0xFF8F5A};
-static const char*    fx_src[6]    = {"ENC 1","ENC 2","ENC 3","POT","POT","POT"};
+static const char*    fx_src[6]    = {"ENC 1","ENC 2","ENC 3","MACRO","MACRO","MACRO"};
 
 // Callback: toggle FX mute on card click
 static void fx_toggle_cb(lv_event_t* e) {
@@ -1732,7 +1782,7 @@ static void fx_toggle_cb(lv_event_t* e) {
         if (udp_wifi_connected())
             udp_send_fx_enc(enc_id, p4.enc_value[enc_id], m);
     } else {
-        // Pot FX (cell3=pot1, cell4=pot2, cell5=pot3)
+        // Macro FX (cell3=Filter, cell4=Tremolo, cell5=Limiter)
         int pot_idx = cell - 3;  // 0,1,2 → pot_muted[0,1,2]
         p4.pot_muted[pot_idx] = !p4.pot_muted[pot_idx];
         if (udp_wifi_connected()) {
@@ -1976,17 +2026,17 @@ static void create_fx_screen(void) {
 }
 
 static void update_fx_screen(void) {
-    // Page 0 cells 0..2: encoders (Flanger, Delay, Reverb)
-    // Page 1 cells 3..5: pots — cell3=DRIVE(pot3), cell4=CUTOFF(pot1), cell5=RESONANCE(pot2)
+    // Page 0 cells 0..2: encoders (Chorus, Delay, Reverb)
+    // Page 1 cells 3..5: macros (Filter, Tremolo, Limiter)
     // Map each card to its underlying raw value + mute flag.
     struct CellSrc { int val; bool muted; };
     CellSrc src[6] = {
-        { p4.enc_value[0], p4.enc_muted[0] },  // Flanger
+        { p4.enc_value[0], p4.enc_muted[0] },  // Chorus
         { p4.enc_value[1], p4.enc_muted[1] },  // Delay
         { p4.enc_value[2], p4.enc_muted[2] },  // Reverb
-        { p4.pot_value[3], p4.pot_muted[0] },  // Drive (S3 pot3 → pot_muted[0])
-        { p4.pot_value[1], p4.pot_muted[1] },  // Cutoff (disabled, pot1 unused)
-        { p4.pot_value[2], p4.pot_muted[2] },  // Resonance (S3 pot2)
+        { p4.pot_value[3], p4.pot_muted[0] },  // Filter macro (S3 pot3)
+        { p4.pot_value[1], p4.pot_muted[1] },  // Tremolo macro (S3 pot1)
+        { p4.pot_value[2], p4.pot_muted[2] },  // Limiter macro (S3 pot2)
     };
 
     static uint16_t prev_key[6] = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
@@ -3726,10 +3776,102 @@ static void sd_load_btn_cb(lv_event_t* e) {
     (void)e;
     if (p4sd.selected_file[0] == '\0') return;
     if (p4sd.selected_is_midi) return;
-    uart_send_sd_load((uint8_t)p4sd.selected_pad);
+
     if (sd_status_lbl) {
-        lv_label_set_text_fmt(sd_status_lbl, "LOAD PAD %02d...", p4sd.selected_pad + 1);
+        lv_label_set_text_fmt(sd_status_lbl, "UPLOAD PAD %02d...", p4sd.selected_pad + 1);
         lv_obj_set_style_text_color(sd_status_lbl, RED808_CYAN, 0);
+    }
+
+    char path[192];
+    if (strcmp(p4sd.path, "/") == 0)
+        snprintf(path, sizeof(path), "/%s", p4sd.selected_file);
+    else
+        snprintf(path, sizeof(path), "%s/%s", p4sd.path, p4sd.selected_file);
+
+    File sample = SD_MMC.open(path, FILE_READ);
+    if (!sample) {
+        ui_show_toast("No se puede abrir el WAV", RED808_WARNING);
+        if (sd_status_lbl) lv_label_set_text(sd_status_lbl, "OPEN FAILED");
+        return;
+    }
+
+    size_t sample_size = sample.size();
+    if (sample_size == 0 || sample_size > 4U * 1024U * 1024U) {
+        sample.close();
+        ui_show_toast("WAV no valido o demasiado grande", RED808_WARNING);
+        if (sd_status_lbl) lv_label_set_text(sd_status_lbl, "WAV INVALID");
+        return;
+    }
+
+    WiFiClient client;
+    client.setTimeout(10000);
+    if (!client.connect(IPAddress(192, 168, 4, 1), 80)) {
+        sample.close();
+        ui_show_toast("Master no conectado", RED808_WARNING);
+        if (sd_status_lbl) lv_label_set_text(sd_status_lbl, "MASTER OFFLINE");
+        return;
+    }
+
+    const char* boundary = "----RED808P4Upload";
+    char file_head[192];
+    snprintf(file_head, sizeof(file_head),
+             "--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\nContent-Type: audio/wav\r\n\r\n",
+             boundary, p4sd.selected_file);
+    char file_tail[40];
+    snprintf(file_tail, sizeof(file_tail), "\r\n--%s--\r\n", boundary);
+    size_t content_len = strlen(file_head) + sample_size + strlen(file_tail);
+
+    client.printf("POST /api/uploadDaisy?pad=%d HTTP/1.1\r\n", p4sd.selected_pad);
+    client.print("Host: 192.168.4.1\r\n");
+    client.print("Connection: close\r\n");
+    client.printf("Content-Type: multipart/form-data; boundary=%s\r\n", boundary);
+    client.printf("Content-Length: %u\r\n\r\n", (unsigned)content_len);
+    client.print(file_head);
+
+    uint8_t buf[2048];
+    bool write_ok = true;
+    while (sample.available()) {
+        size_t n = sample.read(buf, sizeof(buf));
+        if (n == 0) break;
+        if (client.write(buf, n) != n) {
+            write_ok = false;
+            break;
+        }
+        yield();
+    }
+    sample.close();
+    if (write_ok) client.print(file_tail);
+
+    int status = 0;
+    unsigned long wait_start = millis();
+    while (millis() - wait_start < 5000) {
+        if (client.available()) {
+            String line = client.readStringUntil('\n');
+            if (line.startsWith("HTTP/1.1 ")) status = line.substring(9, 12).toInt();
+            break;
+        }
+        if (!client.connected()) break;
+        delay(2);
+    }
+    client.stop();
+
+    if (write_ok && status == 200) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Sample cargado en Daisy PAD %02d", p4sd.selected_pad + 1);
+        ui_show_toast(msg, RED808_SUCCESS);
+        if (sd_status_lbl) {
+            lv_label_set_text(sd_status_lbl, msg);
+            lv_obj_set_style_text_color(sd_status_lbl, RED808_SUCCESS, 0);
+        }
+    } else {
+        char msg[64];
+        if (!write_ok) snprintf(msg, sizeof(msg), "Upload cortado");
+        else snprintf(msg, sizeof(msg), "Upload fallido HTTP %d", status);
+        ui_show_toast(msg, RED808_WARNING);
+        if (sd_status_lbl) {
+            lv_label_set_text(sd_status_lbl, msg);
+            lv_obj_set_style_text_color(sd_status_lbl, RED808_WARNING, 0);
+        }
     }
 }
 
@@ -3807,7 +3949,10 @@ static void sd_refresh_ui(void) {
     }
     // Enable/disable LOAD button
     if (sd_load_btn) {
-        lv_obj_add_state(sd_load_btn, LV_STATE_DISABLED);
+        if (p4sd.mounted && p4sd.selected_file[0] && !p4sd.selected_is_midi)
+            lv_obj_clear_state(sd_load_btn, LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(sd_load_btn, LV_STATE_DISABLED);
     }
     if (sd_midi_load_btn) {
         if (p4sd.selected_file[0] && p4sd.selected_is_midi)
@@ -4655,6 +4800,9 @@ static void piano_assign_btn_cb(lv_event_t* e) {
     if (s_piano_status_lbl) {
         lv_label_set_text_fmt(s_piano_status_lbl, "→ PAD %d", s_piano_assign_pad + 1);
     }
+    char msg[64];
+    snprintf(msg, sizeof(msg), "Melodia asignada a PAD %02d", s_piano_assign_pad + 1);
+    ui_show_toast(msg, RED808_SUCCESS);
 }
 
 // v2.9 — Apply melody_sync payload from master (engine/octave/rec/pad).
@@ -5887,6 +6035,7 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
 void ui_update_current_screen(void) {
     unsigned long now = millis();
     static unsigned long boot_enter_ms = 0;
+    ui_toast_update();
 
     // Auto-navigate from boot to live when Master or optional S3 connects
     if (active_screen == 0) {

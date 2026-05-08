@@ -307,15 +307,15 @@ static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
         case MSG_POT:
             if (id < 4) {
                 p4.pot_value[id] = val;
-                // Relay pot FX values to Master (see BlueSlaveV2/main.cpp mapping):
+                // Relay pot FX macros to Master:
                 //   S3 pot 0 = Master volume (NOT an FX, ignored here — handled elsewhere)
-                //   S3 pot 1 = reserved/disabled (was Cutoff, no audible effect now)
-                //   S3 pot 2 = Resonance  → udp_send_fx_pot(2) → setFilterResonance
-                //   S3 pot 3 = Distortion → udp_send_fx_pot(0) → setDistortion
-                // Previous mapping was `id-1` which swapped Resonance/Distortion/Cutoff
-                // and caused Master to apply the wrong DSP (silent/inaudible FX).
+                //   S3 pot 1 = Tremolo macro  → udp_send_fx_pot(1)
+                //   S3 pot 2 = Limiter macro  → udp_send_fx_pot(2)
+                //   S3 pot 3 = Filter macro   → udp_send_fx_pot(0)
                 if (udp_wifi_connected()) {
-                    if (id == 2) {
+                    if (id == 1) {
+                        udp_send_fx_pot(1, val, p4.pot_muted[1]);
+                    } else if (id == 2) {
                         udp_send_fx_pot(2, val, p4.pot_muted[2]);
                     } else if (id == 3) {
                         udp_send_fx_pot(0, val, p4.pot_muted[0]);

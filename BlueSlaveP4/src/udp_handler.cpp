@@ -148,6 +148,107 @@ static bool fetch_pattern_http(int pattern) {
     return true;
 }
 
+static bool fetch_master_state_http(void) {
+    if (!wifiConnected) return false;
+
+    HTTPClient http;
+    http.setTimeout(900);
+    if (!http.begin("http://192.168.4.1/api/p4State")) return false;
+
+    int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+        http.end();
+        return false;
+    }
+
+    String payload = http.getString();
+    http.end();
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) {
+        P4_LOG_PRINTF("[HTTP][STATE] parse error: %s\n", err.c_str());
+        return false;
+    }
+
+    int pat = clamp_int(doc["pattern"] | p4.current_pattern, 0, 15);
+    p4.current_pattern = pat;
+    uart_send_to_s3(MSG_SYSTEM, SYS_PATTERN, (uint8_t)pat);
+
+    bool playing = doc["playing"] | p4.is_playing;
+    p4.is_playing = playing;
+    uart_send_to_s3(MSG_SYSTEM, SYS_PLAY_STATE, playing ? 1 : 0);
+
+    float bpm = clamp_float(doc["tempo"] | (float)(p4.bpm_int + p4.bpm_frac * 0.1f), 40.0f, 240.0f);
+    p4.bpm_int = (int)bpm;
+    p4.bpm_frac = (int)((bpm - p4.bpm_int) * 10.0f);
+    uart_send_to_s3(MSG_SYSTEM, SYS_BPM_INT, (uint8_t)p4.bpm_int);
+    uart_send_to_s3(MSG_SYSTEM, SYS_BPM_FRAC, (uint8_t)p4.bpm_frac);
+
+    int masterVol = clamp_int(doc["masterVolume"] | p4.master_volume, 0, 150);
+    p4.master_volume = masterVol;
+    p4.seq_volume = clamp_int(doc["sequencerVolume"] | p4.seq_volume, 0, 150);
+    p4.live_volume = clamp_int(doc["liveVolume"] | p4.live_volume, 0, 150);
+    uart_send_to_s3(MSG_SYSTEM, SYS_VOLUME, (uint8_t)masterVol);
+    uart_send_to_s3(MSG_SYSTEM, SYS_SEQ_VOL, (uint8_t)p4.seq_volume);
+    uart_send_to_s3(MSG_SYSTEM, SYS_LIVE_VOL, (uint8_t)p4.live_volume);
+
+    JsonArray mute = doc["mute"];
+    if (mute) {
+        int track = 0;
+        for (JsonVariant value : mute) {
+            if (track >= 16) break;
+            p4.track_muted[track] = value.as<bool>();
+            uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), p4.track_muted[track] ? 1 : 0);
+            track++;
+        }
+    }
+
+    JsonArray solo = doc["solo"];
+    if (solo) {
+        int track = 0;
+        for (JsonVariant value : solo) {
+            if (track >= 16) break;
+            p4.track_solo[track] = value.as<bool>();
+            uart_send_to_s3(MSG_TRACK, TRK_SOLO_BIT | (track & 0x0F), p4.track_solo[track] ? 1 : 0);
+            track++;
+        }
+    }
+
+    JsonArray volumes = doc["trackVolumes"];
+    if (volumes) {
+        int track = 0;
+        for (JsonVariant value : volumes) {
+            if (track >= 16) break;
+            int vol = clamp_int(value.as<int>(), 0, 150);
+            p4.track_volume[track] = vol;
+            uart_send_to_s3(MSG_TRACK, TRK_VOLUME | (track & 0x0F), (uint8_t)vol);
+            track++;
+        }
+    }
+
+    JsonObject fx = doc["fx"];
+    if (fx) {
+        p4.filter_type = clamp_int(fx["filterType"] | p4.filter_type, 0, 4);
+        p4.cutoff_hz = clamp_int(fx["filterCutoff"] | p4.cutoff_hz, 20, 20000);
+        float resonance = clamp_float(fx["filterResonance"] | ((float)p4.resonance_x10 / 10.0f), 1.0f, 10.0f);
+        p4.resonance_x10 = (int)(resonance * 10.0f);
+        float distortion = clamp_float(fx["distortion"] | ((float)p4.distortion_pct / 100.0f), 0.0f, 1.0f);
+        p4.distortion_pct = (int)(distortion * 100.0f);
+        p4.bitcrush_bits = clamp_int(fx["bitCrush"] | p4.bitcrush_bits, 4, 16);
+        p4.sample_rate_hz = clamp_int(fx["sampleRate"] | p4.sample_rate_hz, 1000, 48000);
+    }
+
+    const char* kit = doc["kit"] | "";
+    strncpy(p4.kit_name, kit, sizeof(p4.kit_name) - 1);
+    p4.kit_name[sizeof(p4.kit_name) - 1] = '\0';
+
+    masterAlive = true;
+    p4.master_connected = true;
+    P4_LOG_PRINTF("[HTTP][STATE] loaded pat=%d bpm=%.1f\n", pat, bpm);
+    return true;
+}
+
 // =============================================================================
 // SEND HELPERS
 // =============================================================================
@@ -448,23 +549,21 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
                   enc_id, value, muted, active, norm, fullSend);
 
     switch (enc_id) {
-        case 0: // Flanger — audible sweep; WebInterface divides rate/depth/fb/mix by 100.
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerActive\",\"value\":%d}", active ? 1 : 0);
+        case 0: // Chorus — stable DaisySP modulation, safer than the old flanger page.
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
-            int rate_pct = clamp_int((int)(35.0f + norm * 315.0f + 0.5f), 0, 500); // 0.35..3.50 Hz
-            int depth_pct = clamp_int((int)(35.0f + norm * 55.0f + 0.5f), 0, 100);
-            int fb_pct = clamp_int((int)(6.0f + norm * 30.0f + 0.5f), 0, 100);
-            int mix_pct = clamp_int((int)(12.0f + norm * 34.0f + 0.5f), 0, 100);
+                float rate_hz = 0.18f + norm * 1.65f;
+                float depth = 0.18f + norm * 0.48f;
+                float mix = 0.08f + norm * 0.28f;
                 if (fullSend) {
-                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerRate\",\"value\":%d}", rate_pct);
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusRate\",\"value\":%.3f}", rate_hz);
                     sendJson(buf);
-                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerDepth\",\"value\":%d}", depth_pct);
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusDepth\",\"value\":%.3f}", depth);
                     sendJson(buf);
-                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerFeedback\",\"value\":%d}", fb_pct);
-                    sendJson(buf);
+                    sendJson("{\"cmd\":\"setChorusStereo\",\"mode\":1}");
                 }
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerMix\",\"value\":%d}", mix_pct);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusMix\",\"value\":%.3f}", mix);
                 sendJson(buf);
             }
             break;
@@ -480,7 +579,7 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
                     sendJson(buf);
                     snprintf(buf, sizeof(buf), "{\"cmd\":\"setDelayFeedback\",\"value\":%d}", fb_pct);
                     sendJson(buf);
-                    sendJson("{\"cmd\":\"setDelayStereo\",\"value\":1}");
+                    sendJson("{\"cmd\":\"setDelayStereo\",\"mode\":1}");
                 }
                 snprintf(buf, sizeof(buf), "{\"cmd\":\"setDelayMix\",\"value\":%d}", mix_pct);
                 sendJson(buf);
@@ -499,8 +598,8 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
                     sendJson(buf);
                     snprintf(buf, sizeof(buf), "{\"cmd\":\"setReverbLpFreq\",\"value\":%d}", lp_hz);
                     sendJson(buf);
-                    sendJson("{\"cmd\":\"setEarlyRefActive\",\"value\":1}");
-                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setEarlyRefMix\",\"value\":%.3f}", early_mix);
+                    sendJson("{\"cmd\":\"setEarlyRefActive\",\"active\":1}");
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setEarlyRefMix\",\"mix\":%d}", clamp_int((int)(early_mix * 100.0f + 0.5f), 0, 100));
                     sendJson(buf);
                 }
                 snprintf(buf, sizeof(buf), "{\"cmd\":\"setReverbMix\",\"value\":%.3f}", mix);
@@ -510,58 +609,72 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
     }
 }
 
-// Latched state for LP-filter auto-enable (in udp_send_fx_pot case 2).
+// Latched state for filter macro auto-enable (in udp_send_fx_pot case 0).
 // Cleared on WiFi drop via udp_reset_fx_latch() so it is resent after reconnect.
-static bool s_fx_lp_filter_enabled = false;
+static bool s_fx_filter_enabled = false;
 
 void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
     if (!udpStarted) return;
     char buf[96];
     float norm = (float)value / 127.0f;
     switch (pot_id) {
-        case 0: {  // Distortion/Drive
-            // Keep drive below the range that made page-2 FX harsh/unstable on Daisy.
-            float amount = muted ? 0.0f : powf(norm, 1.45f) * 0.55f;
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setDistortion\",\"value\":%.3f}", amount);
-            sendJson(buf); break;
-        }
-        case 1: {  // Cutoff (20-20000 Hz, log)
+        case 0: {  // FILTER macro: DaisySP ladder LP with safe resonance.
             if (muted) {
                 sendJson("{\"cmd\":\"setFilter\",\"type\":0}");
-                s_fx_lp_filter_enabled = false;
+                s_fx_filter_enabled = false;
                 break;
             }
-            if (!s_fx_lp_filter_enabled) {
-                sendJson("{\"cmd\":\"setFilter\",\"type\":1}");
-                s_fx_lp_filter_enabled = true;
+            if (!s_fx_filter_enabled) {
+                sendJson("{\"cmd\":\"setFilter\",\"type\":10}");
+                s_fx_filter_enabled = true;
             }
-            int hz = (int)(80.0f * powf(125.0f, norm)); // 80..10000 Hz, avoids sub-bass filter stalls
+            int hz = (int)(180.0f * powf(70.0f, norm));
+            float q = 0.55f + norm * 4.2f;
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterCutoff\",\"value\":%d}", hz);
-            sendJson(buf); break;
-        }
-        case 2: {  // Resonance (1.0-10.0 Q) — LP filter must be active to hear it.
-            if (muted) {
-                sendJson("{\"cmd\":\"setFilter\",\"type\":0}");
-                s_fx_lp_filter_enabled = false;
-                break;
-            }
-            // Mirror S3 behaviour: auto-enable LowPass so the Q is audible.
-            // Latch is cleared in onWiFiDisconnected() so it re-sends after
-            // any master/link drop.
-            if (!s_fx_lp_filter_enabled) {
-                sendJson("{\"cmd\":\"setFilter\",\"type\":1}");
-                s_fx_lp_filter_enabled = true;
-            }
-            float q = 0.7f + norm * 3.8f; // cap resonance; Q=10 was too unstable on page 2
+            sendJson(buf);
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterResonance\",\"value\":%.2f}", q);
-            sendJson(buf); break;
+            sendJson(buf);
+            break;
+        }
+        case 1: {  // TREM macro: tempo-friendly range, no gain boost.
+            bool active = (!muted && value > 0);
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloActive\",\"value\":%d}", active ? 1 : 0);
+            sendJson(buf);
+            if (active) {
+                float rate_hz = 1.0f + norm * 7.0f;
+                float depth = 0.12f + norm * 0.63f;
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloRate\",\"value\":%.3f}", rate_hz);
+                sendJson(buf);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloDepth\",\"value\":%.3f}", depth);
+                sendJson(buf);
+            }
+            break;
+        }
+        case 2: {  // LIMIT macro: limiter plus gentle compression to control clipping.
+            bool active = (!muted && value > 0);
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setLimiterActive\",\"value\":%d}", active ? 1 : 0);
+            sendJson(buf);
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setCompressorActive\",\"value\":%d}", active ? 1 : 0);
+            sendJson(buf);
+            if (active) {
+                float threshold = -10.0f - norm * 22.0f;
+                float ratio = 2.0f + norm * 6.0f;
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setCompressorThreshold\",\"value\":%.2f}", threshold);
+                sendJson(buf);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setCompressorRatio\",\"value\":%.2f}", ratio);
+                sendJson(buf);
+                sendJson("{\"cmd\":\"setCompressorAttack\",\"value\":5.0}");
+                sendJson("{\"cmd\":\"setCompressorRelease\",\"value\":120.0}");
+                sendJson("{\"cmd\":\"setCompressorMakeupGain\",\"value\":1.0}");
+            }
+            break;
         }
     }
 }
 
 // Reset latched FX state so it is resent after (re)connecting to Master.
 // Called from WiFi disconnect path.
-void udp_reset_fx_latch(void) { s_fx_lp_filter_enabled = false; }
+void udp_reset_fx_latch(void) { s_fx_filter_enabled = false; }
 
 // =============================================================================
 // SYNC REQUEST — handshake + request initial data
@@ -582,6 +695,7 @@ void udp_request_master_sync(void) {
         sessionCleanSent = true;
     }
 
+    fetch_master_state_http();
     udp_send_get_pattern(p4.current_pattern);
     sendJson("{\"cmd\":\"getTrackVolumes\"}");
 

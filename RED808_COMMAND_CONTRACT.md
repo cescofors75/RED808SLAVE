@@ -19,7 +19,7 @@ Este es el contrato unico vigente entre BlueSlaveP4, BlueSlaveV2 y RedMaster ESP
 | BlueSlaveV2 -> RedMaster ESP32-S3 | WiFi UDP `8888` opcional | V2 fallback | JSON UTF-8 |
 | RedMaster ESP32-S3 -> Daisy Seed | SPI real | RedMaster | Binario `protocol.h` |
 
-La fuente de verdad musical es RedMaster ESP32-S3. P4/S3 pueden editar o pedir estado, pero deben aceptar `pattern_sync` y `state_sync` como confirmacion autoritativa del Master.
+La fuente de verdad musical es RedMaster ESP32-S3. P4/S3 pueden editar o pedir estado, pero deben aceptar snapshots autoritativos del Master. En P4, las lecturas pesadas/criticas de UI se hacen por HTTP (`/api/getPattern`, `/api/p4State`) y los controles en tiempo real siguen por UDP JSON.
 
 ## Reglas JSON
 
@@ -27,7 +27,7 @@ La fuente de verdad musical es RedMaster ESP32-S3. P4/S3 pueden editar o pedir e
 - Indices base cero: patrones `0..15`, tracks `0..15`, steps `0..63`.
 - Volumen master/seq/live: `0..150`. Volumen por track: `0..150` en UDP; si cruza UART hacia S3 se limita a `0..100` por compatibilidad del paquete binario.
 - Velocity: `1..127`; `0` se reserva para apagado cuando el comando lo soporte explicitamente.
-- UDP maximo operativo: 4096 bytes. `pattern_sync` completo usa `data` plano por compatibilidad P4/S3.
+- UDP maximo operativo: 4096 bytes para comandos/replies pequenos. P4 no debe depender de UDP para cargar la grid completa; usar HTTP para patron/estado inicial.
 
 ## Comandos P4/S3 -> Master
 
@@ -39,7 +39,7 @@ La fuente de verdad musical es RedMaster ESP32-S3. P4/S3 pueden editar o pedir e
 {"cmd":"selectPattern","index":0}
 ```
 
-Selecciona el patron actual en Master. El Master responde con `state_sync` y puede enviar `pattern_sync` si el cliente lo pide.
+Selecciona el patron actual en Master. P4 debe refrescar la grid con `GET /api/getPattern?index=N` tras seleccionar.
 
 `get_pattern`
 
@@ -48,6 +48,13 @@ Selecciona el patron actual en Master. El Master responde con `state_sync` y pue
 ```
 
 Solicita el patron indicado. Si `pattern` falta, el Master responde con el actual.
+
+Para P4, el camino preferido es HTTP:
+
+```http
+GET http://192.168.4.1/api/getPattern?index=0
+GET http://192.168.4.1/api/p4State
+```
 
 `setStep`
 
@@ -110,9 +117,29 @@ Comandos canonicos:
 {"cmd":"setReverbMix","value":0.35}
 {"cmd":"setChorusActive","value":true}
 {"cmd":"setChorusMix","value":0.30}
+{"cmd":"setTremoloActive","value":true}
+{"cmd":"setTremoloRate","value":4.0}
+{"cmd":"setTremoloDepth","value":0.45}
+{"cmd":"setLimiterActive","value":true}
+{"cmd":"setCompressorActive","value":true}
+{"cmd":"setCompressorThreshold","value":-18.0}
+{"cmd":"setCompressorRatio","value":4.0}
 ```
 
 Los campos `value` de mix pueden llegar como `0..1` o `0..100`; Master normaliza segun el comando existente.
+
+P4 FX LAB muestra seis macros soportados por Master/Daisy:
+
+| P4 | Transporte | Comandos principales | Rango recomendado |
+|---|---|---|---|
+| CHORUS | UDP | `setChorusActive/Rate/Depth/Mix`, `setChorusStereo` | mix `0.08..0.36`, depth `0.18..0.66`, rate `0.18..1.83 Hz` |
+| DELAY | UDP | `setDelayActive/Time/Feedback/Mix`, `setDelayStereo` | `60..900 ms`, feedback hasta `0.70`, mix hasta `0.58` |
+| REVERB | UDP | `setReverbActive/Feedback/LpFreq/Mix` | feedback `0.28..0.76`, mix hasta `0.48` |
+| FILTER | UDP | `setFilter type=10`, `setFilterCutoff`, `setFilterResonance` | Ladder LP, cutoff aprox. `180..12600 Hz`, Q `0.55..4.75` |
+| TREM | UDP | `setTremoloActive/Rate/Depth` | rate `1..8 Hz`, depth `0.12..0.75` |
+| LIMIT | UDP | `setLimiterActive`, `setCompressorActive/*` | threshold `-10..-32 dB`, ratio `2..8`, makeup `1.0` |
+
+Evitar en P4 como macros principales: `setDistortion` agresivo, `setBitCrush`/`setSampleRate` altos, y resonance separada sin cutoff; son utiles para edicion avanzada, pero pueden clipar o parecer inactivos en directo.
 
 ### FX Per-Track
 
@@ -176,6 +203,19 @@ Snapshot compacto del estado autoritativo del Master hacia P4/S3.
 ```
 
 El Master envia `state_sync` al saludar (`hello`), al recibir `get_state`, periodicamente a clientes UDP vivos y tras cambios de patron/mixer/FX/kit relevantes.
+
+## Samples desde P4 SD
+
+El navegador SD de P4 lee la SD propia del P4 con `SD_MMC`. No debe pedir al S3 que cargue esos WAV.
+
+Flujo correcto para WAV local de P4:
+
+```http
+POST http://192.168.4.1/api/uploadDaisy?pad=0
+multipart/form-data file=<WAV de SD_MMC del P4>
+```
+
+RedMaster actua como puente/conversor: parsea WAV 16/24-bit mono/stereo, lo convierte a PCM16 mono y lo envia a Daisy por SPI con `CMD_SAMPLE_BEGIN`, `CMD_SAMPLE_DATA` y `CMD_SAMPLE_END`. Evitar guardar el WAV completo en PSRAM del Master en este flujo; Daisy es el destino de memoria de audio.
 
 ## Daisy Seed
 

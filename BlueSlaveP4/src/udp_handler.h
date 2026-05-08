@@ -41,9 +41,9 @@ void udp_send_set_filter_resonance(float val);
 void udp_send_set_distortion(float val);
 
 // FX live commands (encoder/pot → Master)
-// id: 0=Flanger, 1=Chorus, 2=Tremolo
+// enc_id: 0=Chorus, 1=Delay, 2=Reverb
 void udp_send_fx_enc(int enc_id, uint8_t value, bool muted);
-// pot FX: 0=Distortion, 1=Cutoff, 2=Resonance
+// pot_id: 0=Filter macro, 1=Tremolo macro, 2=Limiter macro
 void udp_send_fx_pot(int pot_id, uint8_t value, bool muted);
 
 // Solo
