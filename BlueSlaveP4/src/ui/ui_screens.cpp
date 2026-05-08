@@ -856,6 +856,42 @@ static void pad_inst_modal_inst_cb(lv_event_t* e) {
     pad_inst_modal_refresh();
 }
 
+static bool pad_inst_unload_daisy_sample(uint8_t pad) {
+    WiFiClient client;
+    if (!client.connect(IPAddress(192, 168, 4, 1), 80)) return false;
+    client.printf("POST /api/unloadDaisy?pad=%d HTTP/1.1\r\n", pad);
+    client.print("Host: 192.168.4.1\r\n");
+    client.print("Content-Length: 0\r\n");
+    client.print("Connection: close\r\n\r\n");
+    uint32_t start = millis();
+    while (!client.available() && client.connected() && (millis() - start) < 2500) delay(10);
+    String statusLine = client.readStringUntil('\n');
+    statusLine.trim();
+    client.stop();
+    return statusLine.startsWith("HTTP/1.1 200") || statusLine.startsWith("HTTP/1.0 200");
+}
+
+static void pad_inst_sampler_original_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    uint8_t pad = s_pad_inst_focus_pad;
+    if (pad > 15) pad = 15;
+    if (!udp_wifi_connected() && !udp_master_connected()) {
+        ui_show_toast("Master no conectado", RED808_WARNING);
+        return;
+    }
+    bool ok = pad_inst_unload_daisy_sample(pad);
+    if (!ok) {
+        ui_show_toast("No se pudo restaurar sample", RED808_WARNING);
+        return;
+    }
+    s_pad_inst_sel[pad] = 0;
+    pad_inst_refresh_pad_badge(pad);
+    pad_inst_refresh_controls();
+    pad_inst_apply_to_master(pad);
+    pad_inst_modal_refresh();
+    ui_show_toast("Sampler original restaurado", RED808_SUCCESS);
+}
+
 static void pad_inst_modal_pick_inst_cb(lv_event_t* e) {
     int inst = (int)(intptr_t)lv_event_get_user_data(e);
     if (inst < 0 || inst > 7) return;
@@ -976,9 +1012,19 @@ static void grid_pad_inst_popup_cb(lv_event_t* e) {
         lv_obj_add_event_cb(ib, pad_inst_modal_pick_inst_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
     }
 
+    lv_obj_t* original_btn = lv_btn_create(card);
+    lv_obj_set_size(original_btn, 220, 40);
+    lv_obj_align(original_btn, LV_ALIGN_BOTTOM_LEFT, 34, -18);
+    apply_control_button_style(original_btn, RED808_ACCENT2, false, 10);
+    lv_obj_t* original_lbl = lv_label_create(original_btn);
+    lv_label_set_text(original_lbl, "SAMPLER ORIGINAL");
+    lv_obj_set_style_text_font(original_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_center(original_lbl);
+    lv_obj_add_event_cb(original_btn, pad_inst_sampler_original_cb, LV_EVENT_CLICKED, NULL);
+
     lv_obj_t* close_btn = lv_btn_create(card);
     lv_obj_set_size(close_btn, 120, 40);
-    lv_obj_align(close_btn, LV_ALIGN_BOTTOM_MID, 0, -18);
+    lv_obj_align(close_btn, LV_ALIGN_BOTTOM_RIGHT, -34, -18);
     apply_control_button_style(close_btn, RED808_BORDER, false, 10);
     lv_obj_t* close_lbl = lv_label_create(close_btn);
     lv_label_set_text(close_lbl, "CERRAR");
@@ -1432,8 +1478,8 @@ static void create_live_screen(void) {
     lv_obj_set_style_bg_grad_color(inst_panel, RED808_SURFACE, 0);
     lv_obj_set_style_bg_grad_dir(inst_panel, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_bg_opa(inst_panel, LV_OPA_90, 0);
-    lv_obj_set_style_border_width(inst_panel, 1, 0);
-    lv_obj_set_style_border_color(inst_panel, RED808_BORDER, 0);
+    lv_obj_set_style_border_width(inst_panel, 2, 0);
+    lv_obj_set_style_border_color(inst_panel, RED808_ACCENT2, 0);
     lv_obj_set_style_pad_all(inst_panel, 8, 0);
     lv_obj_clear_flag(inst_panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(inst_panel, LV_OBJ_FLAG_CLICKABLE);
@@ -1447,14 +1493,14 @@ static void create_live_screen(void) {
     grid_inst_next_btn = NULL;
     grid_inst_lbl = NULL;
 
-    grid_inst_edit_btn = lv_btn_create(inst_panel);
-    lv_obj_set_size(grid_inst_edit_btn, CW - 18, 58);
+    grid_inst_edit_btn = lv_label_create(inst_panel);
+    lv_label_set_text(grid_inst_edit_btn, "PAD\nSOUND");
+    lv_obj_set_width(grid_inst_edit_btn, CW - 18);
+    lv_obj_set_style_text_font(grid_inst_edit_btn, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(grid_inst_edit_btn, RED808_TEXT, 0);
+    lv_obj_set_style_text_align(grid_inst_edit_btn, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(grid_inst_edit_btn);
-    apply_control_button_style(grid_inst_edit_btn, RED808_CYAN, false, 10);
-    lv_obj_t* edit_lbl = lv_label_create(grid_inst_edit_btn);
-    lv_label_set_text(edit_lbl, "ADD INSTRUMENT");
-    lv_obj_set_style_text_font(edit_lbl, &lv_font_montserrat_16, 0);
-    lv_obj_center(edit_lbl);
+    lv_obj_add_flag(grid_inst_edit_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(grid_inst_edit_btn, grid_pad_inst_popup_cb, LV_EVENT_CLICKED, NULL);
 
     pad_inst_refresh_controls();

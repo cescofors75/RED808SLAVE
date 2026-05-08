@@ -217,6 +217,14 @@ multipart/form-data file=<WAV de SD_MMC del P4>
 
 RedMaster actua como puente/conversor: parsea WAV 16/24-bit mono/stereo, lo convierte a PCM16 mono y lo envia a Daisy por SPI con `CMD_SAMPLE_BEGIN`, `CMD_SAMPLE_DATA` y `CMD_SAMPLE_END`. Evitar guardar el WAV completo en PSRAM del Master en este flujo; Daisy es el destino de memoria de audio.
 
+Para restaurar el sampler original de un pad sin reiniciar Daisy:
+
+```http
+POST http://192.168.4.1/api/unloadDaisy?pad=0
+```
+
+RedMaster envia `CMD_SAMPLE_UNLOAD` a Daisy; Daisy desmarca el sample RAM cargado en ese pad y vuelve a usar el sonido por defecto del motor/kit.
+
 ## Daisy Seed
 
 Daisy no usa UART legacy para el enlace RedMaster. El enlace operativo es SPI real:
