@@ -132,14 +132,14 @@ P4 FX LAB muestra seis macros soportados por Master/Daisy:
 
 | P4 | Transporte | Comandos principales | Rango recomendado |
 |---|---|---|---|
-| CHORUS | UDP | `setChorusActive/Rate/Depth/Mix`, `setChorusStereo` | mix `0.08..0.36`, depth `0.18..0.66`, rate `0.18..1.83 Hz` |
+| FLANGE | UDP | `setFlangerActive/Rate/Depth/Feedback/Mix` | mix aprox. `0.10..0.52`, feedback aprox. `0.08..0.38` |
 | DELAY | UDP | `setDelayActive/Time/Feedback/Mix`, `setDelayStereo` | `60..900 ms`, feedback hasta `0.70`, mix hasta `0.58` |
 | REVERB | UDP | `setReverbActive/Feedback/LpFreq/Mix` | feedback `0.28..0.76`, mix hasta `0.48` |
-| FILTER | UDP | `setFilter type=10`, `setFilterCutoff`, `setFilterResonance` | Ladder LP, cutoff aprox. `180..12600 Hz`, Q `0.55..4.75` |
-| TREM | UDP | `setTremoloActive/Rate/Depth` | rate `1..8 Hz`, depth `0.12..0.75` |
-| LIMIT | UDP | `setLimiterActive`, `setCompressorActive/*` | threshold `-10..-32 dB`, ratio `2..8`, makeup `1.0` |
+| FOLD | UDP | `setWavefolderGain` | ganancia `1.0..3.25`, sin makeup |
+| CRUSH | UDP | `setBitCrush`, `setSampleRate`, `setDistortion` | `16..8 bits`, SR aprox. `32k..9k`, dist suave hasta `0.18` |
+| PHASER | UDP | `setPhaserActive/Rate/Depth/Feedback` | sweep aprox. `1..6.5 Hz`, feedback aprox. `0.08..0.42` |
 
-Evitar en P4 como macros principales: `setDistortion` agresivo, `setBitCrush`/`setSampleRate` altos, y resonance separada sin cutoff; son utiles para edicion avanzada, pero pueden clipar o parecer inactivos en directo.
+Evitar en P4 como macros principales: resonancia de filtro alta, limiter/compresion como efecto audible, tremolo muy profundo, y distorsion con ganancia alta; pueden clipar o parecer inactivos en directo.
 
 ### FX Per-Track
 

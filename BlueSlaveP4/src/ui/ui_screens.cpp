@@ -174,6 +174,31 @@ static bool ui_use_udp_transport(void) {
     return p4.wifi_connected || p4.master_connected;
 }
 
+static bool ui_master_link_display_on(void) {
+    static bool shown = false;
+    static bool pending = false;
+    static uint32_t pending_since = 0;
+
+    bool raw = p4.wifi_connected || p4.master_connected;
+    uint32_t now = millis();
+    uint32_t settle_ms = raw ? 350UL : 2200UL;
+
+    if (raw == shown) {
+        pending = raw;
+        pending_since = now;
+        return shown;
+    }
+
+    if (raw != pending) {
+        pending = raw;
+        pending_since = now;
+        return shown;
+    }
+
+    if ((uint32_t)(now - pending_since) >= settle_ms) shown = raw;
+    return shown;
+}
+
 static void apply_control_button_style(lv_obj_t* button, lv_color_t accent,
                                        bool filled, int radius) {
     if (!button) return;
@@ -860,7 +885,7 @@ static void grid_pad_inst_popup_cb(lv_event_t* e) {
     lv_obj_add_event_cb(s_pad_inst_modal, pad_inst_modal_close_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t* card = lv_obj_create(s_pad_inst_modal);
-    lv_obj_set_size(card, 560, 360);
+    lv_obj_set_size(card, 800, 360);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, RED808_PANEL, 0);
     lv_obj_set_style_bg_grad_color(card, RED808_SURFACE, 0);
@@ -922,7 +947,7 @@ static void grid_pad_inst_popup_cb(lv_event_t* e) {
     lv_obj_set_style_text_color(pad_hdr, RED808_TEXT_DIM, 0);
     lv_obj_set_pos(pad_hdr, pad_grid_x0, pad_grid_y0 - 20);
 
-    const int grid_x0 = 302;
+    const int grid_x0 = 326;
     const int grid_y0 = 138;
     const int grid_cols = 4;
     const int btn_w = 104;
@@ -1415,31 +1440,20 @@ static void create_live_screen(void) {
     lv_obj_add_event_cb(inst_panel, grid_pad_inst_popup_cb, LV_EVENT_CLICKED, NULL);
     live_home_panels[live_home_panel_count++] = inst_panel;
 
-    lv_obj_t* inst_title = lv_label_create(inst_panel);
-    lv_label_set_text(inst_title, "PAD INSTRUMENT");
-    lv_obj_set_style_text_font(inst_title, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(inst_title, RED808_CYAN, 0);
-    lv_obj_align(inst_title, LV_ALIGN_TOP_MID, 0, 12);
-
     grid_pad_prev_btn = NULL;
     grid_pad_next_btn = NULL;
     grid_pad_lbl = NULL;
     grid_inst_prev_btn = NULL;
     grid_inst_next_btn = NULL;
-
-    grid_inst_lbl = lv_label_create(inst_panel);
-    lv_label_set_text(grid_inst_lbl, "TOCA PARA ABRIR");
-    lv_obj_set_style_text_font(grid_inst_lbl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(grid_inst_lbl, RED808_TEXT_DIM, 0);
-    lv_obj_align(grid_inst_lbl, LV_ALIGN_CENTER, 0, -2);
+    grid_inst_lbl = NULL;
 
     grid_inst_edit_btn = lv_btn_create(inst_panel);
-    lv_obj_set_size(grid_inst_edit_btn, CW - 18, 40);
-    lv_obj_align(grid_inst_edit_btn, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_size(grid_inst_edit_btn, CW - 18, 58);
+    lv_obj_center(grid_inst_edit_btn);
     apply_control_button_style(grid_inst_edit_btn, RED808_CYAN, false, 10);
     lv_obj_t* edit_lbl = lv_label_create(grid_inst_edit_btn);
-    lv_label_set_text(edit_lbl, "PAD INSTRUMENT");
-    lv_obj_set_style_text_font(edit_lbl, &lv_font_montserrat_14, 0);
+    lv_label_set_text(edit_lbl, "ADD INSTRUMENT");
+    lv_obj_set_style_text_font(edit_lbl, &lv_font_montserrat_16, 0);
     lv_obj_center(edit_lbl);
     lv_obj_add_event_cb(grid_inst_edit_btn, grid_pad_inst_popup_cb, LV_EVENT_CLICKED, NULL);
 
@@ -1649,7 +1663,7 @@ static void update_live_screen(void) {
 
     static int8_t gp_prev_mstr_top = -1;
     static int8_t gp_prev_aux_top = -1;
-    bool mstr_on = p4.master_connected;
+    bool mstr_on = ui_master_link_display_on();
     bool aux_on  = p4.s3_connected;
     if (grid_home_vol_lbl && ((int8_t)mstr_on != gp_prev_mstr_top || (int8_t)aux_on != gp_prev_aux_top)) {
         gp_prev_mstr_top = (int8_t)mstr_on;
@@ -1749,8 +1763,8 @@ static void update_live_screen(void) {
 
 // =============================================================================
 // FX LAB SCREEN — 2 pages × 3 circles
-//   Page 0: CHORUS (enc0) | DELAY (enc1) | REVERB (enc2)
-//   Page 1: FILTER (pot3) | TREM (pot1)  | LIMIT (pot2)
+//   Page 0: FLANGE (enc0) | DELAY (enc1) | REVERB (enc2)
+//   Page 1: FOLD (pot3)  | CRUSH (pot1) | PHASER (pot2)
 // =============================================================================
 static int fx_page = 0;   // 0 or 1
 
@@ -1765,7 +1779,7 @@ static lv_obj_t* fx_page_lbl       = NULL;
 static bool s_fx_ui_syncing = false;
 
 // FX metadata (page × 3)
-static const char*    fx_names[6]  = {"CHORUS","DELAY","REVERB","FILTER","TREM","LIMIT"};
+static const char*    fx_names[6]  = {"FLANGE","DELAY","REVERB","FOLD","CRUSH","PHASER"};
 static const uint32_t fx_colors[6] = {0x58A6FF, 0xB58BFF, 0x39D2C0,
                                        0xFF6B35, 0xFFD700, 0xFF8F5A};
 static const char*    fx_src[6]    = {"ENC 1","ENC 2","ENC 3","MACRO","MACRO","MACRO"};
@@ -1775,14 +1789,14 @@ static void fx_toggle_cb(lv_event_t* e) {
     int cell = (int)(intptr_t)lv_event_get_user_data(e);
     if (cell < 0 || cell > 5) return;
     if (cell < 3) {
-        // Encoder FX (0=Chorus, 1=Delay, 2=Reverb)
+        // Encoder FX (0=Flanger, 1=Delay, 2=Reverb)
         int enc_id = cell;  // direct 1:1 mapping
         p4.enc_muted[enc_id] = !p4.enc_muted[enc_id];
         bool m = p4.enc_muted[enc_id];
         if (udp_wifi_connected())
             udp_send_fx_enc(enc_id, p4.enc_value[enc_id], m);
     } else {
-        // Macro FX (cell3=Filter, cell4=Tremolo, cell5=Limiter)
+        // Macro FX (cell3=Fold, cell4=Crush, cell5=Phaser)
         int pot_idx = cell - 3;  // 0,1,2 → pot_muted[0,1,2]
         p4.pot_muted[pot_idx] = !p4.pot_muted[pot_idx];
         if (udp_wifi_connected()) {
@@ -1980,7 +1994,7 @@ static void create_fx_screen(void) {
     }
 
     // Page controls
-    const int page_ctrl_y = 46;
+    const int page_ctrl_y = 8;
     const int page_ctrl_w = 46;
     const int page_ctrl_gap = 6;
     const int page_lbl_w = 46;
@@ -2010,12 +2024,12 @@ static void create_fx_screen(void) {
     lv_label_set_text(fx_page_lbl, "1 / 2");
     lv_obj_set_style_text_font(fx_page_lbl, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(fx_page_lbl, RED808_TEXT_DIM, 0);
-    lv_obj_set_pos(fx_page_lbl, page_group_x + page_ctrl_w * 2 + page_ctrl_gap * 2, 54);
+    lv_obj_set_pos(fx_page_lbl, page_group_x + page_ctrl_w * 2 + page_ctrl_gap * 2, 16);
 
     for (int p = 0; p < 2; p++) {
         fx_page_dot[p] = lv_obj_create(scr_fx);
         lv_obj_set_size(fx_page_dot[p], 8, 8);
-        lv_obj_set_pos(fx_page_dot[p], page_group_x + page_ctrl_w * 2 + page_ctrl_gap * 2 + page_lbl_w + 6 + p * 14, 60);
+        lv_obj_set_pos(fx_page_dot[p], page_group_x + page_ctrl_w * 2 + page_ctrl_gap * 2 + page_lbl_w + 6 + p * 14, 22);
         lv_obj_set_style_radius(fx_page_dot[p], LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_color(fx_page_dot[p], RED808_CYAN, 0);
         lv_obj_set_style_bg_opa(fx_page_dot[p], p == 0 ? LV_OPA_COVER : LV_OPA_30, 0);

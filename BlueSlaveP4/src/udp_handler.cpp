@@ -533,7 +533,7 @@ void udp_send_set_distortion(float val) {
 
 // =============================================================================
 // FX LIVE COMMANDS — enc/pot values → Master FX engine
-// Aggressive mix curve (sqrt) so small encoder values produce audible FX.
+// Ranges are intentionally conservative: audible first, no harsh clipping.
 // Params resent periodically to survive UDP packet drops.
 // =============================================================================
 void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
@@ -549,21 +549,23 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
                   enc_id, value, muted, active, norm, fullSend);
 
     switch (enc_id) {
-        case 0: // Chorus — stable DaisySP modulation, safer than the old flanger page.
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusActive\",\"value\":%d}", active ? 1 : 0);
+        case 0: // Flanger — stronger modulation than chorus, with capped feedback/mix.
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
-                float rate_hz = 0.18f + norm * 1.65f;
-                float depth = 0.18f + norm * 0.48f;
-                float mix = 0.08f + norm * 0.28f;
+                int rate_pct = clamp_int((int)(8.0f + norm * 44.0f + 0.5f), 8, 52);
+                int depth_pct = clamp_int((int)(18.0f + norm * 62.0f + 0.5f), 18, 80);
+                int feedback_pct = clamp_int((int)(8.0f + norm * 30.0f + 0.5f), 8, 38);
+                int mix_pct = clamp_int((int)(10.0f + norm * 42.0f + 0.5f), 10, 52);
                 if (fullSend) {
-                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusRate\",\"value\":%.3f}", rate_hz);
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerRate\",\"value\":%d}", rate_pct);
                     sendJson(buf);
-                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusDepth\",\"value\":%.3f}", depth);
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerDepth\",\"value\":%d}", depth_pct);
                     sendJson(buf);
-                    sendJson("{\"cmd\":\"setChorusStereo\",\"mode\":1}");
+                    snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerFeedback\",\"value\":%d}", feedback_pct);
+                    sendJson(buf);
                 }
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setChorusMix\",\"value\":%.3f}", mix);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setFlangerMix\",\"value\":%d}", mix_pct);
                 sendJson(buf);
             }
             break;
@@ -609,72 +611,61 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
     }
 }
 
-// Latched state for filter macro auto-enable (in udp_send_fx_pot case 0).
-// Cleared on WiFi drop via udp_reset_fx_latch() so it is resent after reconnect.
-static bool s_fx_filter_enabled = false;
-
 void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
     if (!udpStarted) return;
     char buf[96];
     float norm = (float)value / 127.0f;
     switch (pot_id) {
-        case 0: {  // FILTER macro: DaisySP ladder LP with safe resonance.
+        case 0: {  // FOLD macro: mild wavefolder drive, reset to 1.0 when muted.
             if (muted) {
-                sendJson("{\"cmd\":\"setFilter\",\"type\":0}");
-                s_fx_filter_enabled = false;
+                sendJson("{\"cmd\":\"setWavefolderGain\",\"value\":1.0}");
                 break;
             }
-            if (!s_fx_filter_enabled) {
-                sendJson("{\"cmd\":\"setFilter\",\"type\":10}");
-                s_fx_filter_enabled = true;
-            }
-            int hz = (int)(180.0f * powf(70.0f, norm));
-            float q = 0.55f + norm * 4.2f;
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterCutoff\",\"value\":%d}", hz);
-            sendJson(buf);
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterResonance\",\"value\":%.2f}", q);
+            float gain = 1.0f + norm * 2.25f;
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setWavefolderGain\",\"value\":%.2f}", gain);
             sendJson(buf);
             break;
         }
-        case 1: {  // TREM macro: tempo-friendly range, no gain boost.
-            bool active = (!muted && value > 0);
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloActive\",\"value\":%d}", active ? 1 : 0);
-            sendJson(buf);
-            if (active) {
-                float rate_hz = 1.0f + norm * 7.0f;
-                float depth = 0.12f + norm * 0.63f;
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloRate\",\"value\":%.3f}", rate_hz);
-                sendJson(buf);
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setTremoloDepth\",\"value\":%.3f}", depth);
-                sendJson(buf);
+        case 1: {  // CRUSH macro: bit depth and sample-rate reduction, no gain boost.
+            if (muted || value == 0) {
+                sendJson("{\"cmd\":\"setBitCrush\",\"value\":16}");
+                sendJson("{\"cmd\":\"setSampleRate\",\"value\":0}");
+                sendJson("{\"cmd\":\"setDistortion\",\"value\":0.0}");
+                break;
             }
+            int bits = clamp_int((int)(16.0f - norm * 8.0f + 0.5f), 8, 16);
+            int sr = clamp_int((int)(32000.0f - norm * 22000.0f + 0.5f), 9000, 32000);
+            float dist = norm * 0.18f;
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setBitCrush\",\"value\":%d}", bits);
+            sendJson(buf);
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setSampleRate\",\"value\":%d}", sr);
+            sendJson(buf);
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setDistortion\",\"value\":%.3f}", dist);
+            sendJson(buf);
             break;
         }
-        case 2: {  // LIMIT macro: limiter plus gentle compression to control clipping.
+        case 2: {  // PHASER macro: audible sweep without the tremolo/limiter gain issues.
             bool active = (!muted && value > 0);
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setLimiterActive\",\"value\":%d}", active ? 1 : 0);
-            sendJson(buf);
-            snprintf(buf, sizeof(buf), "{\"cmd\":\"setCompressorActive\",\"value\":%d}", active ? 1 : 0);
+            snprintf(buf, sizeof(buf), "{\"cmd\":\"setPhaserActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
-                float threshold = -10.0f - norm * 22.0f;
-                float ratio = 2.0f + norm * 6.0f;
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setCompressorThreshold\",\"value\":%.2f}", threshold);
+                int rate_pct = clamp_int((int)(10.0f + norm * 55.0f + 0.5f), 10, 65);
+                int depth_pct = clamp_int((int)(28.0f + norm * 60.0f + 0.5f), 28, 88);
+                int feedback_pct = clamp_int((int)(8.0f + norm * 34.0f + 0.5f), 8, 42);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setPhaserRate\",\"value\":%d}", rate_pct);
                 sendJson(buf);
-                snprintf(buf, sizeof(buf), "{\"cmd\":\"setCompressorRatio\",\"value\":%.2f}", ratio);
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setPhaserDepth\",\"value\":%d}", depth_pct);
                 sendJson(buf);
-                sendJson("{\"cmd\":\"setCompressorAttack\",\"value\":5.0}");
-                sendJson("{\"cmd\":\"setCompressorRelease\",\"value\":120.0}");
-                sendJson("{\"cmd\":\"setCompressorMakeupGain\",\"value\":1.0}");
+                snprintf(buf, sizeof(buf), "{\"cmd\":\"setPhaserFeedback\",\"value\":%d}", feedback_pct);
+                sendJson(buf);
             }
             break;
         }
     }
 }
 
-// Reset latched FX state so it is resent after (re)connecting to Master.
-// Called from WiFi disconnect path.
-void udp_reset_fx_latch(void) { s_fx_filter_enabled = false; }
+// Kept for the WiFi reconnect path; current FX macros resend their full state directly.
+void udp_reset_fx_latch(void) {}
 
 // =============================================================================
 // SYNC REQUEST — handshake + request initial data
