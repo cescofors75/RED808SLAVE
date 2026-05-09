@@ -52,9 +52,7 @@ static uint8_t s_s3_mel_octave = 4;
 static uint8_t s_s3_preview_engine = 3;
 static uint32_t s_s3_preview_note_off_due_ms = 0;
 
-// Anti-echo guard for track mute/solo messages mirrored to S3.
-// If S3 reflects the same command back shortly after P4 sent it, ignore it
-// to avoid duplicate UDP sends and UI flicker.
+// Ignore short-term S3 reflections of local mute/solo writes.
 static const uint32_t TRACK_ECHO_GUARD_MS = 350;
 static uint32_t s_last_mute_tx_ms[16] = {};
 static uint32_t s_last_solo_tx_ms[16] = {};
@@ -499,16 +497,6 @@ static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
                         bool incoming = (val != 0);
                         uint32_t now = millis();
                         if ((now - s_last_mute_tx_ms[trk] < TRACK_ECHO_GUARD_MS)) {
-                            if (incoming == s_last_mute_tx_val[trk]) {
-                                P4_LOG_PRINTF("[UART][ECHO] drop mute t=%u val=%u age=%lu\n",
-                                              (unsigned)trk, (unsigned)incoming,
-                                              (unsigned long)(now - s_last_mute_tx_ms[trk]));
-                                break;
-                            }
-                            P4_LOG_PRINTF("[UART][ECHO] drop mute conflict t=%u in=%u tx=%u age=%lu\n",
-                                          (unsigned)trk, (unsigned)incoming,
-                                          (unsigned)s_last_mute_tx_val[trk],
-                                          (unsigned long)(now - s_last_mute_tx_ms[trk]));
                             break;
                         }
                         if (p4.track_muted[trk] == incoming) break;
@@ -520,16 +508,6 @@ static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
                         bool incoming = (val != 0);
                         uint32_t now = millis();
                         if ((now - s_last_solo_tx_ms[trk] < TRACK_ECHO_GUARD_MS)) {
-                            if (incoming == s_last_solo_tx_val[trk]) {
-                                P4_LOG_PRINTF("[UART][ECHO] drop solo t=%u val=%u age=%lu\n",
-                                              (unsigned)trk, (unsigned)incoming,
-                                              (unsigned long)(now - s_last_solo_tx_ms[trk]));
-                                break;
-                            }
-                            P4_LOG_PRINTF("[UART][ECHO] drop solo conflict t=%u in=%u tx=%u age=%lu\n",
-                                          (unsigned)trk, (unsigned)incoming,
-                                          (unsigned)s_last_solo_tx_val[trk],
-                                          (unsigned long)(now - s_last_solo_tx_ms[trk]));
                             break;
                         }
                         if (p4.track_solo[trk] == incoming) break;

@@ -48,10 +48,8 @@ static std::atomic<bool>     s_ctrl_mute_mask_pending{false};
 static std::atomic<uint16_t> s_ctrl_mute_mask{0};
 static std::atomic<bool>     s_ctrl_solo_mask_pending{false};
 static std::atomic<uint16_t> s_ctrl_solo_mask{0};
-static std::atomic<uint32_t> s_ctrl_mute_enqueue_ms[16] = {};
-static std::atomic<uint32_t> s_ctrl_mute_mask_enqueue_ms{0};
-static std::atomic<uint32_t> s_ctrl_solo_mask_enqueue_ms{0};
 
+// Touch debounce tuned for GT911 + multi-indev setup.
 static const uint32_t MUTE_DEBOUNCE_TRACK_MS = 180;
 static const uint32_t MUTE_DEBOUNCE_GLOBAL_MS = 60;
 static const uint32_t SOLO_DEBOUNCE_TRACK_MS = 220;
@@ -77,20 +75,17 @@ static inline void enqueue_mute_control(uint8_t track, bool muted) {
     uint16_t values = s_ctrl_mute_values.load(std::memory_order_relaxed);
     values = muted ? (uint16_t)(values | bit) : (uint16_t)(values & ~bit);
     s_ctrl_mute_values.store(values, std::memory_order_release);
-    s_ctrl_mute_enqueue_ms[track].store(millis(), std::memory_order_release);
     s_ctrl_mute_dirty.fetch_or(bit, std::memory_order_release);
 }
 
 static inline void enqueue_mute_mask_control(uint16_t mask) {
     s_ctrl_mute_dirty.store(0, std::memory_order_release);
     s_ctrl_mute_mask.store(mask, std::memory_order_release);
-    s_ctrl_mute_mask_enqueue_ms.store(millis(), std::memory_order_release);
     s_ctrl_mute_mask_pending.store(true, std::memory_order_release);
 }
 
 static inline void enqueue_solo_mask_control(uint16_t mask) {
     s_ctrl_solo_mask.store(mask, std::memory_order_release);
-    s_ctrl_solo_mask_enqueue_ms.store(millis(), std::memory_order_release);
     s_ctrl_solo_mask_pending.store(true, std::memory_order_release);
 }
 
@@ -2663,16 +2658,11 @@ static void seq_mute_cb(lv_event_t* e) {
 
         bool next = !p4.track_muted[track];
         p4.track_muted[track] = next;
-        static uint32_t s_mute_clicks = 0;
-        s_mute_clicks++;
-        P4_LOG_PRINTF("[MUTE] click #%lu t=%d -> %d\n",
-                  (unsigned long)s_mute_clicks, track, (int)next);
         char tb[48];
-        snprintf(tb, sizeof(tb), "MUTE T%d %s #%lu",
-                 track + 1, next ? "ON" : "OFF", (unsigned long)s_mute_clicks);
+        snprintf(tb, sizeof(tb), "MUTE T%d %s",
+                 track + 1, next ? "ON" : "OFF");
         ui_show_toast(tb, next ? RED808_ERROR : RED808_SUCCESS);
         if (ui_use_udp_transport()) enqueue_mute_control((uint8_t)track, next);
-        P4_LOG_PRINTF("[LAT][MUTE] cb->enqueue t=%d state=%d\n", track, (int)next);
         // Relay mute to S3 so the sequencer trigger engine honors it.
         uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), next ? 1 : 0);
     }
@@ -2700,17 +2690,12 @@ static void seq_solo_cb(lv_event_t* e) {
     last_ms[track] = nowDbg;
     last_any_ms = nowDbg;
     bool wasSolo = p4.track_solo[track];
-    P4_LOG_PRINTF("[SOLO] click t=%d wasSolo=%d\n", track, (int)wasSolo);
 
     // Visible feedback so we can confirm the callback fires.
-    static uint32_t s_solo_clicks = 0;
-    s_solo_clicks++;
     char toastBuf[64];
-    snprintf(toastBuf, sizeof(toastBuf), "SOLO T%d %s #%lu",
-             track + 1, wasSolo ? "OFF" : "ON", (unsigned long)s_solo_clicks);
+    snprintf(toastBuf, sizeof(toastBuf), "SOLO T%d %s",
+             track + 1, wasSolo ? "OFF" : "ON");
     ui_show_toast(toastBuf, wasSolo ? RED808_BORDER : RED808_ACCENT);
-    P4_LOG_PRINTF("[SOLO] click #%lu track=%d wasSolo=%d\n",
-                  (unsigned long)s_solo_clicks, track, (int)wasSolo);
 
     if (wasSolo) {
         // Un-solo: clear solo flag and UNMUTE ALL tracks so the user can
@@ -6334,21 +6319,11 @@ static int8_t   s_pad_noteoff_engine[16] = {-1, -1, -1, -1, -1, -1, -1, -1,
 void ui_process_control_queue(void) {
     if (s_ctrl_mute_mask_pending.exchange(false, std::memory_order_acquire)) {
         uint16_t mask = s_ctrl_mute_mask.load(std::memory_order_acquire);
-        uint32_t tEnq = s_ctrl_mute_mask_enqueue_ms.exchange(0, std::memory_order_acq_rel);
-        if (tEnq) {
-            P4_LOG_PRINTF("[LAT][MUTE_MASK] enqueue->udp=%lu ms mask=0x%04X\n",
-                          (unsigned long)(millis() - tEnq), (unsigned)mask);
-        }
         udp_send_mute_mask(mask);
     }
 
     if (s_ctrl_solo_mask_pending.exchange(false, std::memory_order_acquire)) {
         uint16_t mask = s_ctrl_solo_mask.load(std::memory_order_acquire);
-        uint32_t tEnq = s_ctrl_solo_mask_enqueue_ms.exchange(0, std::memory_order_acq_rel);
-        if (tEnq) {
-            P4_LOG_PRINTF("[LAT][SOLO_MASK] enqueue->udp=%lu ms mask=0x%04X\n",
-                          (unsigned long)(millis() - tEnq), (unsigned)mask);
-        }
         udp_send_solo_mask(mask);
     }
 
@@ -6358,11 +6333,6 @@ void ui_process_control_queue(void) {
         for (uint8_t track = 0; track < 16; track++) {
             uint16_t bit = (uint16_t)(1U << track);
             if (dirty & bit) {
-                uint32_t tEnq = s_ctrl_mute_enqueue_ms[track].exchange(0, std::memory_order_acq_rel);
-                if (tEnq) {
-                    P4_LOG_PRINTF("[LAT][MUTE] enqueue->udp=%lu ms t=%u\n",
-                                  (unsigned long)(millis() - tEnq), (unsigned)track);
-                }
                 udp_send_mute(track, (values & bit) != 0);
             }
         }

@@ -1242,9 +1242,7 @@ void udp_handler_process(void) {
     if (masterAlive && (now - lastMasterPacket > MASTER_TIMEOUT_MS)) {
         masterAlive = false;
         p4.master_connected = false;
-        static uint32_t s_master_timeout_count = 0;
-        s_master_timeout_count++;
-        P4_LOG_PRINTF("[UDP] Master timeout! count=%lu\n", (unsigned long)s_master_timeout_count);
+        P4_LOG_PRINTLN("[UDP] Master timeout!");
     }
 
     // --- Re-request sync if no response ---
