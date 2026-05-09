@@ -38,6 +38,16 @@ static unsigned long lastWifiAttempt  = 0;
 static unsigned long lastMasterPacket = 0;
 static unsigned long lastSyncRequest  = 0;
 static bool sessionCleanSent = false;
+// Per-track timestamps of last LOCAL mute/solo change. Used to suppress the
+// state_sync broadcast from the master clobbering user input within a short
+// window (the broadcast can race with our own UDP commands).
+static unsigned long lastLocalMuteMs[16] = {};
+static unsigned long lastLocalSoloMs[16] = {};
+// Master broadcasts state_sync every 2 s. Pick a window > broadcast period so
+// any state_sync arriving right after a P4-initiated SOLO/UNMUTE-ALL is
+// suppressed (the master already has the correct state — re-applying it just
+// causes UI flicker). 5 s is comfortable.
+static const unsigned long LOCAL_OWNERSHIP_MS = 5000;
 static int pendingPatternRequest = -1;
 static unsigned long pendingPatternLastTxMs = 0;
 static uint8_t pendingPatternRetries = 0;
@@ -195,22 +205,32 @@ static bool fetch_master_state_http(void) {
 
     JsonArray mute = doc["mute"];
     if (mute) {
+        unsigned long nowMs = millis();
         int track = 0;
         for (JsonVariant value : mute) {
             if (track >= 16) break;
-            p4.track_muted[track] = value.as<bool>();
-            uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), p4.track_muted[track] ? 1 : 0);
+            if (nowMs - lastLocalMuteMs[track] < LOCAL_OWNERSHIP_MS) { track++; continue; }
+            bool v = value.as<bool>();
+            if (p4.track_muted[track] != v) {
+                p4.track_muted[track] = v;
+                uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), v ? 1 : 0);
+            }
             track++;
         }
     }
 
     JsonArray solo = doc["solo"];
     if (solo) {
+        unsigned long nowMs = millis();
         int track = 0;
         for (JsonVariant value : solo) {
             if (track >= 16) break;
-            p4.track_solo[track] = value.as<bool>();
-            uart_send_to_s3(MSG_TRACK, TRK_SOLO_BIT | (track & 0x0F), p4.track_solo[track] ? 1 : 0);
+            if (nowMs - lastLocalSoloMs[track] < LOCAL_OWNERSHIP_MS) { track++; continue; }
+            bool v = value.as<bool>();
+            if (p4.track_solo[track] != v) {
+                p4.track_solo[track] = v;
+                uart_send_to_s3(MSG_TRACK, TRK_SOLO_BIT | (track & 0x0F), v ? 1 : 0);
+            }
             track++;
         }
     }
@@ -454,6 +474,7 @@ void udp_send_set_step_velocity(int track, int step, int velocity) {
 }
 
 void udp_send_mute(int track, bool muted) {
+    if (track >= 0 && track < 16) lastLocalMuteMs[track] = millis();
     char buf[64];
     snprintf(buf, sizeof(buf),
              "{\"cmd\":\"mute\",\"track\":%d,\"value\":%s}",
@@ -462,10 +483,40 @@ void udp_send_mute(int track, bool muted) {
 }
 
 void udp_send_solo(int track, bool soloed) {
+    if (track >= 0 && track < 16) {
+        // Solo touches every track's solo + mute state on the master side.
+        // Mark all 16 entries to suppress racing state_sync overwrites.
+        unsigned long now = millis();
+        for (int t = 0; t < 16; t++) {
+            lastLocalSoloMs[t] = now;
+            lastLocalMuteMs[t] = now;
+        }
+    }
     char buf[64];
     snprintf(buf, sizeof(buf),
              "{\"cmd\":\"solo\",\"track\":%d,\"value\":%s}",
              track, soloed ? "true" : "false");
+    sendJson(buf);
+}
+
+void udp_send_mute_mask(uint16_t mask) {
+    unsigned long now = millis();
+    for (int t = 0; t < 16; t++) lastLocalMuteMs[t] = now;
+    char buf[64];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"setMuteMask\",\"mask\":%u}", (unsigned)mask);
+    sendJson(buf);
+}
+
+void udp_send_solo_mask(uint16_t mask) {
+    unsigned long now = millis();
+    for (int t = 0; t < 16; t++) {
+        lastLocalSoloMs[t] = now;
+        lastLocalMuteMs[t] = now;
+    }
+    char buf[64];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"setSoloMask\",\"mask\":%u}", (unsigned)mask);
     sendJson(buf);
 }
 
@@ -717,10 +768,15 @@ static void processJson(const char* json, int len) {
 
     if (strcmp(cmd, "state_sync") == 0) {
         int pat = clamp_int(doc["pattern"] | p4.current_pattern, 0, 15);
+        bool patternChanged = (pat != p4.current_pattern);
         p4.current_pattern = pat;
         uart_send_to_s3(MSG_SYSTEM, SYS_PATTERN, (uint8_t)pat);
-        // Ensure we always fetch the active pattern grid after state sync.
-        udp_send_get_pattern(pat);
+        // Only re-fetch grid when pattern actually changed. Re-fetching on
+        // every state_sync (every 2 s) caused full sequencer repaints and
+        // visible flicker that fought against local mute/solo edits.
+        if (patternChanged) {
+            udp_send_get_pattern(pat);
+        }
 
         bool playing = doc["playing"] | p4.is_playing;
         p4.is_playing = playing;
@@ -742,22 +798,32 @@ static void processJson(const char* json, int len) {
 
         JsonArray mute = doc["mute"];
         if (mute) {
+            unsigned long nowMs = millis();
             int track = 0;
             for (JsonVariant value : mute) {
                 if (track >= 16) break;
-                p4.track_muted[track] = value.as<bool>();
-                uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), p4.track_muted[track] ? 1 : 0);
+                if (nowMs - lastLocalMuteMs[track] < LOCAL_OWNERSHIP_MS) { track++; continue; }
+                bool v = value.as<bool>();
+                if (p4.track_muted[track] != v) {
+                    p4.track_muted[track] = v;
+                    uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), v ? 1 : 0);
+                }
                 track++;
             }
         }
 
         JsonArray solo = doc["solo"];
         if (solo) {
+            unsigned long nowMs = millis();
             int track = 0;
             for (JsonVariant value : solo) {
                 if (track >= 16) break;
-                p4.track_solo[track] = value.as<bool>();
-                uart_send_to_s3(MSG_TRACK, TRK_SOLO_BIT | (track & 0x0F), p4.track_solo[track] ? 1 : 0);
+                if (nowMs - lastLocalSoloMs[track] < LOCAL_OWNERSHIP_MS) { track++; continue; }
+                bool v = value.as<bool>();
+                if (p4.track_solo[track] != v) {
+                    p4.track_solo[track] = v;
+                    uart_send_to_s3(MSG_TRACK, TRK_SOLO_BIT | (track & 0x0F), v ? 1 : 0);
+                }
                 track++;
             }
         }
@@ -768,8 +834,10 @@ static void processJson(const char* json, int len) {
             for (JsonVariant value : volumes) {
                 if (track >= 16) break;
                 int vol = clamp_int(value.as<int>(), 0, 150);
-                p4.track_volume[track] = vol;
-                uart_send_to_s3(MSG_TRACK, TRK_VOLUME | (track & 0x0F), (uint8_t)vol);
+                if (p4.track_volume[track] != vol) {
+                    p4.track_volume[track] = vol;
+                    uart_send_to_s3(MSG_TRACK, TRK_VOLUME | (track & 0x0F), (uint8_t)vol);
+                }
                 track++;
             }
         }

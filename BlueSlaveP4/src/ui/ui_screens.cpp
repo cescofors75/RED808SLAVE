@@ -500,6 +500,8 @@ static lv_obj_t* s_pad_inst_modal_pad_lbl = NULL;
 static lv_obj_t* s_pad_inst_modal_inst_lbl = NULL;
 static lv_obj_t* s_pad_inst_modal_pad_btns[16] = {};
 static lv_obj_t* s_pad_inst_modal_inst_btns[8] = {};
+static lv_obj_t* s_pad_inst_modal_kit_btns[3][5] = {};   // [engine 0=808/1=909/2=505][preset 0..4]
+static lv_obj_t* s_pad_inst_modal_kit_lbl_eng[3] = {};   // labels "808"/"909"/"505"
 
 static const char* PAD_INST_NAMES[8] = {
     "Sampler", "808", "909", "505", "303", "WT", "FM2", "SH101"
@@ -508,7 +510,26 @@ static const char* PAD_INST_SHORT[8] = {
     "SMP", "808", "909", "505", "303", "WT", "FM2", "SH1"
 };
 static uint8_t s_pad_inst_sel[16] = {0};
+// Selección pendiente del modal PAD SOUND — no se aplica al master hasta
+// pulsar PREVIEW (suena) o ASIGNAR (suena y cierra).
+static uint8_t s_pad_inst_pending[16] = {0};
+// Kit (preset 0..4) por pad. Solo aplica cuando el instrumento del pad es un
+// drum engine (808/909/505). El "pending" es lo que el usuario marca en el
+// modal antes de PREVIEW/ASIGNAR; el "assigned" es lo confirmado por pad.
+static uint8_t s_pad_kit_pending[16] = {0};
+static uint8_t s_pad_kit_assigned[16] = {0};
+// Último kit enviado a la Daisy por engine drum (0=808, 1=909, 2=505) para
+// deduplicar envíos: solo se manda CMD_SYNTH_PRESET si difiere.
+static int8_t s_engine_kit_last_applied[3] = {-1,-1,-1};
 static volatile uint8_t s_pad_inst_focus_pad = 0;
+
+// Devuelve idx 0..2 si el instrumento es engine drum (808/909/505), -1 si no.
+static int8_t pad_inst_drum_engine_idx(uint8_t inst_idx) {
+    if (inst_idx == 1) return 0; // 808
+    if (inst_idx == 2) return 1; // 909
+    if (inst_idx == 3) return 2; // 505
+    return -1;
+}
 
 static int8_t pad_inst_engine_code(uint8_t inst_idx) {
     switch (inst_idx) {
@@ -788,12 +809,22 @@ static void grid_inst_next_cb(lv_event_t* e) {
 static void pad_inst_modal_refresh(void) {
     uint8_t pad = s_pad_inst_focus_pad;
     if (pad > 15) pad = 15;
-    uint8_t inst = s_pad_inst_sel[pad];
-    if (inst > 7) inst = 0;
+    uint8_t inst_assigned = s_pad_inst_sel[pad];
+    if (inst_assigned > 7) inst_assigned = 0;
+    uint8_t inst_pending = s_pad_inst_pending[pad];
+    if (inst_pending > 7) inst_pending = 0;
+    bool dirty = (inst_pending != inst_assigned);
     if (s_pad_inst_modal_pad_lbl)
         lv_label_set_text_fmt(s_pad_inst_modal_pad_lbl, "PAD %02d", (int)pad + 1);
-    if (s_pad_inst_modal_inst_lbl)
-        lv_label_set_text(s_pad_inst_modal_inst_lbl, PAD_INST_NAMES[inst]);
+    if (s_pad_inst_modal_inst_lbl) {
+        if (dirty)
+            lv_label_set_text_fmt(s_pad_inst_modal_inst_lbl, "%s  >  %s",
+                                  PAD_INST_NAMES[inst_assigned], PAD_INST_NAMES[inst_pending]);
+        else
+            lv_label_set_text(s_pad_inst_modal_inst_lbl, PAD_INST_NAMES[inst_assigned]);
+        lv_obj_set_style_text_color(s_pad_inst_modal_inst_lbl,
+            dirty ? RED808_WARNING : RED808_TEXT, 0);
+    }
     for (int i = 0; i < 16; i++) {
         lv_obj_t* btn = s_pad_inst_modal_pad_btns[i];
         if (!btn) continue;
@@ -806,11 +837,68 @@ static void pad_inst_modal_refresh(void) {
     for (int i = 0; i < 8; i++) {
         lv_obj_t* btn = s_pad_inst_modal_inst_btns[i];
         if (!btn) continue;
-        bool active = (i == (int)inst);
-        lv_obj_set_style_bg_color(btn, active ? RED808_ACCENT : RED808_SURFACE, 0);
-        lv_obj_set_style_border_color(btn, active ? RED808_CYAN : RED808_BORDER, 0);
-        lv_obj_set_style_bg_opa(btn, active ? LV_OPA_COVER : LV_OPA_80, 0);
-        lv_obj_set_style_border_width(btn, active ? 2 : 1, 0);
+        bool is_pending = (i == (int)inst_pending);
+        bool is_assigned = (i == (int)inst_assigned);
+        lv_color_t bg = RED808_SURFACE;
+        lv_color_t bd = RED808_BORDER;
+        lv_opa_t op = LV_OPA_80;
+        int bw = 1;
+        if (is_pending && dirty) {
+            bg = RED808_WARNING;  // amarillo: seleccionado, pendiente de asignar
+            bd = RED808_CYAN;
+            op = LV_OPA_COVER;
+            bw = 3;
+        } else if (is_assigned) {
+            bg = RED808_ACCENT;
+            bd = RED808_CYAN;
+            op = LV_OPA_COVER;
+            bw = 2;
+        }
+        lv_obj_set_style_bg_color(btn, bg, 0);
+        lv_obj_set_style_border_color(btn, bd, 0);
+        lv_obj_set_style_bg_opa(btn, op, 0);
+        lv_obj_set_style_border_width(btn, bw, 0);
+    }
+
+    // Kit chips: la fila del engine drum pendiente queda activa y resalta el
+    // kit pendiente del pad activo. Las otras filas quedan atenuadas.
+    int8_t drum_eng = pad_inst_drum_engine_idx(inst_pending);
+    uint8_t pad_kit = s_pad_kit_pending[pad];
+    if (pad_kit > 4) pad_kit = 0;
+    for (int eng = 0; eng < 3; eng++) {
+        bool row_active = (eng == drum_eng);
+        if (s_pad_inst_modal_kit_lbl_eng[eng]) {
+            lv_obj_set_style_text_color(s_pad_inst_modal_kit_lbl_eng[eng],
+                row_active ? RED808_ACCENT : RED808_TEXT_DIM, 0);
+        }
+        for (int p = 0; p < 5; p++) {
+            lv_obj_t* kb = s_pad_inst_modal_kit_btns[eng][p];
+            if (!kb) continue;
+            bool is_pending_kit = row_active && (p == (int)pad_kit);
+            lv_color_t bg = RED808_SURFACE;
+            lv_color_t bd = RED808_BORDER;
+            lv_opa_t op = row_active ? LV_OPA_80 : LV_OPA_30;
+            int bw = 1;
+            if (is_pending_kit) {
+                bg = (p == 4) ? RED808_SUCCESS : RED808_ACCENT;
+                bd = RED808_CYAN;
+                op = LV_OPA_COVER;
+                bw = 3;
+            } else if (p == 4 && row_active) {
+                // Pure: mantén sello visual cuando la fila está activa
+                bd = RED808_CYAN;
+                bw = 2;
+            }
+            lv_obj_set_style_bg_color(kb, bg, 0);
+            lv_obj_set_style_border_color(kb, bd, 0);
+            lv_obj_set_style_bg_opa(kb, op, 0);
+            lv_obj_set_style_border_width(kb, bw, 0);
+            if (row_active) {
+                lv_obj_add_flag(kb, LV_OBJ_FLAG_CLICKABLE);
+            } else {
+                lv_obj_clear_flag(kb, LV_OBJ_FLAG_CLICKABLE);
+            }
+        }
     }
 }
 
@@ -823,13 +911,23 @@ static void pad_inst_modal_close_cb(lv_event_t* e) {
         s_pad_inst_modal_inst_lbl = NULL;
         for (int i = 0; i < 16; i++) s_pad_inst_modal_pad_btns[i] = NULL;
         for (int i = 0; i < 8; i++) s_pad_inst_modal_inst_btns[i] = NULL;
+        for (int e2 = 0; e2 < 3; e2++) {
+            s_pad_inst_modal_kit_lbl_eng[e2] = NULL;
+            for (int p = 0; p < 5; p++) s_pad_inst_modal_kit_btns[e2][p] = NULL;
+        }
     }
 }
+
+// fwd decl: defined later; used inside the PAD SOUND modal builder
+static void grid_pad_kit_select_cb(lv_event_t* e);
 
 static void pad_inst_modal_pick_pad_cb(lv_event_t* e) {
     int pad = (int)(intptr_t)lv_event_get_user_data(e);
     if (pad < 0 || pad > 15) return;
     s_pad_inst_focus_pad = (uint8_t)pad;
+    // Al cambiar de pad, descarta pendiente del anterior y empieza con
+    // la asignación actual del nuevo.
+    s_pad_inst_pending[pad] = s_pad_inst_sel[pad];
     pad_inst_refresh_controls();
     pad_inst_modal_refresh();
 }
@@ -897,11 +995,76 @@ static void pad_inst_modal_pick_inst_cb(lv_event_t* e) {
     if (inst < 0 || inst > 7) return;
     uint8_t pad = s_pad_inst_focus_pad;
     if (pad > 15) pad = 15;
-    s_pad_inst_sel[pad] = (uint8_t)inst;
-    pad_inst_refresh_pad_badge(pad);
-    pad_inst_refresh_controls();
-    pad_inst_apply_to_master(pad);
+    // Solo marca la selección como pendiente. La asignación al master se hace
+    // al pulsar PREVIEW (escuchar) o ASIGNAR (confirmar).
+    s_pad_inst_pending[pad] = (uint8_t)inst;
     pad_inst_modal_refresh();
+}
+
+// Aplica al master la selección pendiente del pad (instrumento + kit si drum).
+// Devuelve true si se cambió algo.
+static bool pad_inst_commit_pending(uint8_t pad) {
+    if (pad > 15) return false;
+    bool changed = false;
+    uint8_t inst = s_pad_inst_pending[pad];
+    if (inst > 7) inst = 0;
+    int8_t drum = pad_inst_drum_engine_idx(inst);
+    // Cambio de kit por pad. El envío a la Daisy se deduplica con el último
+    // kit aplicado al engine: solo se manda CMD_SYNTH_PRESET si difiere del
+    // último. (En tiempo real, ui_process_pad_queue también hace switch).
+    if (drum >= 0) {
+        uint8_t kit = s_pad_kit_pending[pad];
+        if (kit > 4) kit = 0;
+        if (s_pad_kit_assigned[pad] != kit) {
+            s_pad_kit_assigned[pad] = kit;
+            changed = true;
+        }
+        if (udp_wifi_connected() && s_engine_kit_last_applied[drum] != (int8_t)kit) {
+            udp_send_synth_preset((uint8_t)drum, kit);
+            s_engine_kit_last_applied[drum] = (int8_t)kit;
+            changed = true;
+        }
+    }
+    // Cambio de instrumento (engine asignado al pad)
+    if (s_pad_inst_sel[pad] != inst) {
+        s_pad_inst_sel[pad] = inst;
+        pad_inst_refresh_pad_badge(pad);
+        pad_inst_refresh_controls();
+        pad_inst_apply_to_master(pad);  // udp_send_set_track_engine + trigger
+        changed = true;
+    }
+    return changed;
+}
+
+// PREVIEW: aplica la selección pendiente y dispara el pad para escuchar.
+static void pad_inst_modal_preview_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    uint8_t pad = s_pad_inst_focus_pad;
+    if (pad > 15) pad = 15;
+    if (!udp_wifi_connected() && !udp_master_connected()) {
+        ui_show_toast("Master no conectado", RED808_WARNING);
+        return;
+    }
+    bool changed = pad_inst_commit_pending(pad);
+    if (!changed) {
+        // Sin cambios: dispara igualmente para volver a oír
+        udp_send_trigger(pad, 110);
+    }
+    pad_inst_modal_refresh();
+}
+
+// ASIGNAR: confirma la selección pendiente y cierra el modal.
+static void pad_inst_modal_assign_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    uint8_t pad = s_pad_inst_focus_pad;
+    if (pad > 15) pad = 15;
+    if (!udp_wifi_connected() && !udp_master_connected()) {
+        ui_show_toast("Master no conectado", RED808_WARNING);
+        return;
+    }
+    pad_inst_commit_pending(pad);
+    ui_show_toast("Asignado", RED808_SUCCESS);
+    pad_inst_modal_close_cb(NULL);
 }
 
 static void grid_pad_inst_popup_cb(lv_event_t* e) {
@@ -909,6 +1072,12 @@ static void grid_pad_inst_popup_cb(lv_event_t* e) {
     if (s_pad_inst_modal) {
         pad_inst_modal_close_cb(NULL);
         return;
+    }
+
+    // Inicializa la selección pendiente con la asignación actual de cada pad
+    for (int i = 0; i < 16; i++) {
+        s_pad_inst_pending[i] = s_pad_inst_sel[i];
+        s_pad_kit_pending[i]  = s_pad_kit_assigned[i];
     }
 
     s_pad_inst_modal = lv_obj_create(lv_layer_top());
@@ -921,7 +1090,7 @@ static void grid_pad_inst_popup_cb(lv_event_t* e) {
     lv_obj_add_event_cb(s_pad_inst_modal, pad_inst_modal_close_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t* card = lv_obj_create(s_pad_inst_modal);
-    lv_obj_set_size(card, 800, 360);
+    lv_obj_set_size(card, 880, 500);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, RED808_PANEL, 0);
     lv_obj_set_style_bg_grad_color(card, RED808_SURFACE, 0);
@@ -1012,19 +1181,100 @@ static void grid_pad_inst_popup_cb(lv_event_t* e) {
         lv_obj_add_event_cb(ib, pad_inst_modal_pick_inst_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
     }
 
+    /* === DRUM KITS — preset selector (engines × presets, Pure incluido) === */
+    const int kits_y0 = grid_y0 + 2 * (btn_h + gap_y) + 18;  // tras el grid 2x4 de instruments
+
+    lv_obj_t* kit_hdr = lv_label_create(card);
+    lv_label_set_text(kit_hdr, "DRUM KITS");
+    lv_obj_set_style_text_font(kit_hdr, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(kit_hdr, RED808_CYAN, 0);
+    lv_obj_set_pos(kit_hdr, grid_x0, kits_y0 - 18);
+
+    static const char* engine_names[3]      = { "808", "909", "505" };
+    static const char* preset_names_808[5] = { "Classic", "HipHop", "Techno",  "Latin",      "Pure 808" };
+    static const char* preset_names_909[5] = { "Classic", "Techno", "House",   "Industrial", "Pure 909" };
+    static const char* preset_names_505[5] = { "Classic", "NewWav", "Electro", "LoFi HH",    "Pure 505" };
+    const char* const* preset_names[3] = { preset_names_808, preset_names_909, preset_names_505 };
+
+    const int eng_lbl_w = 56;
+    const int kit_btn_h = 36;
+    const int kit_gap_x = 6;
+    const int kit_gap_y = 6;
+    const int kit_btn_w = (4 * btn_w + 3 * gap_x - eng_lbl_w - kit_gap_x - 4 * kit_gap_x) / 5;
+
+    for (int eng = 0; eng < 3; eng++) {
+        int row_y = kits_y0 + eng * (kit_btn_h + kit_gap_y);
+
+        lv_obj_t* eng_lbl = lv_label_create(card);
+        lv_label_set_text(eng_lbl, engine_names[eng]);
+        lv_obj_set_style_text_font(eng_lbl, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(eng_lbl, RED808_ACCENT, 0);
+        lv_obj_set_pos(eng_lbl, grid_x0, row_y + 6);
+        s_pad_inst_modal_kit_lbl_eng[eng] = eng_lbl;
+
+        for (int p = 0; p < 5; p++) {
+            bool is_pure = (p == 4);
+            lv_obj_t* kb = lv_btn_create(card);
+            s_pad_inst_modal_kit_btns[eng][p] = kb;
+            lv_obj_set_size(kb, kit_btn_w, kit_btn_h);
+            lv_obj_set_pos(kb,
+                grid_x0 + eng_lbl_w + kit_gap_x + p * (kit_btn_w + kit_gap_x),
+                row_y);
+            apply_control_button_style(kb, RED808_BORDER, false, 8);
+            if (is_pure) {
+                lv_obj_set_style_border_color(kb, RED808_CYAN, 0);
+                lv_obj_set_style_border_width(kb, 2, 0);
+            }
+            lv_obj_t* kl = lv_label_create(kb);
+            lv_label_set_text(kl, preset_names[eng][p]);
+            lv_obj_set_style_text_font(kl, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(kl, RED808_TEXT, 0);
+            lv_obj_center(kl);
+            uint32_t key = ((uint32_t)eng << 8) | (uint32_t)p;
+            lv_obj_add_event_cb(kb, grid_pad_kit_select_cb, LV_EVENT_CLICKED,
+                                (void*)(intptr_t)key);
+        }
+    }
+
     lv_obj_t* original_btn = lv_btn_create(card);
-    lv_obj_set_size(original_btn, 220, 40);
-    lv_obj_align(original_btn, LV_ALIGN_BOTTOM_LEFT, 34, -18);
+    lv_obj_set_size(original_btn, 180, 44);
+    lv_obj_align(original_btn, LV_ALIGN_BOTTOM_LEFT, 18, -14);
     apply_control_button_style(original_btn, RED808_ACCENT2, false, 10);
     lv_obj_t* original_lbl = lv_label_create(original_btn);
-    lv_label_set_text(original_lbl, "SAMPLER ORIGINAL");
+    lv_label_set_text(original_lbl, "SAMPLER ORIG.");
     lv_obj_set_style_text_font(original_lbl, &lv_font_montserrat_14, 0);
     lv_obj_center(original_lbl);
     lv_obj_add_event_cb(original_btn, pad_inst_sampler_original_cb, LV_EVENT_CLICKED, NULL);
 
+    lv_obj_t* preview_btn = lv_btn_create(card);
+    lv_obj_set_size(preview_btn, 160, 44);
+    lv_obj_align(preview_btn, LV_ALIGN_BOTTOM_MID, -90, -14);
+    apply_control_button_style(preview_btn, RED808_SURFACE, false, 10);
+    lv_obj_set_style_border_color(preview_btn, RED808_CYAN, 0);
+    lv_obj_set_style_border_width(preview_btn, 2, 0);
+    lv_obj_t* preview_lbl = lv_label_create(preview_btn);
+    lv_label_set_text(preview_lbl, LV_SYMBOL_PLAY "  PREVIEW");
+    lv_obj_set_style_text_font(preview_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(preview_lbl, RED808_TEXT, 0);
+    lv_obj_center(preview_lbl);
+    lv_obj_add_event_cb(preview_btn, pad_inst_modal_preview_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* assign_btn = lv_btn_create(card);
+    lv_obj_set_size(assign_btn, 160, 44);
+    lv_obj_align(assign_btn, LV_ALIGN_BOTTOM_MID, 90, -14);
+    apply_control_button_style(assign_btn, RED808_SUCCESS, false, 10);
+    lv_obj_set_style_border_color(assign_btn, RED808_CYAN, 0);
+    lv_obj_set_style_border_width(assign_btn, 2, 0);
+    lv_obj_t* assign_lbl = lv_label_create(assign_btn);
+    lv_label_set_text(assign_lbl, LV_SYMBOL_OK "  ASIGNAR");
+    lv_obj_set_style_text_font(assign_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(assign_lbl, RED808_TEXT, 0);
+    lv_obj_center(assign_lbl);
+    lv_obj_add_event_cb(assign_btn, pad_inst_modal_assign_cb, LV_EVENT_CLICKED, NULL);
+
     lv_obj_t* close_btn = lv_btn_create(card);
-    lv_obj_set_size(close_btn, 120, 40);
-    lv_obj_align(close_btn, LV_ALIGN_BOTTOM_RIGHT, -34, -18);
+    lv_obj_set_size(close_btn, 110, 44);
+    lv_obj_align(close_btn, LV_ALIGN_BOTTOM_RIGHT, -18, -14);
     apply_control_button_style(close_btn, RED808_BORDER, false, 10);
     lv_obj_t* close_lbl = lv_label_create(close_btn);
     lv_label_set_text(close_lbl, "CERRAR");
@@ -1142,6 +1392,24 @@ static void pad_mode_select_cb(lv_event_t* e) {
     if (lv_scr_act() != scr_live) ui_navigate_to(2);
 }
 
+// Kit chip click — marca el preset como pendiente para el PAD ACTIVO.
+static void grid_pad_kit_select_cb(lv_event_t* e) {
+    uint32_t key = (uint32_t)(intptr_t)lv_event_get_user_data(e);
+    uint8_t engine = (uint8_t)(key >> 8);   // 0=808, 1=909, 2=505
+    uint8_t preset = (uint8_t)(key & 0xFF); // 0..4
+    if (engine > 2 || preset > 4) return;
+    uint8_t pad = s_pad_inst_focus_pad;
+    if (pad > 15) pad = 15;
+    // Solo permite cambiar el kit si el inst pendiente del pad coincide con
+    // el engine de la fila pulsada. (El refresh ya las desactiva visualmente,
+    // pero defendemos por si acaso.)
+    int8_t drum = pad_inst_drum_engine_idx(s_pad_inst_pending[pad]);
+    if (drum != (int8_t)engine) return;
+    s_pad_kit_pending[pad] = preset;
+    pad_inst_modal_refresh();
+}
+
+// PAD MODE modal — solo selector de visualización (1/2/4/8/16 pads)
 static void grid_pad_mode_cb(lv_event_t* e) {
     if (s_pad_mode_modal) { lv_obj_del(s_pad_mode_modal); s_pad_mode_modal = NULL; return; }
 
@@ -1159,7 +1427,7 @@ static void grid_pad_mode_cb(lv_event_t* e) {
     }, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t* card = lv_obj_create(s_pad_mode_modal);
-    lv_obj_set_size(card, 380, 380);
+    lv_obj_set_size(card, 360, 400);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, RED808_PANEL, 0);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
@@ -1170,8 +1438,8 @@ static void grid_pad_mode_cb(lv_event_t* e) {
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* title = lv_label_create(card);
-    lv_label_set_text(title, "MODO PADS");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+    lv_label_set_text(title, "PAD GRID");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(title, RED808_ACCENT2, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
 
@@ -1183,8 +1451,8 @@ static void grid_pad_mode_cb(lv_event_t* e) {
     for (int i = 0; i < 6; i++) {
         bool sel = (i == s_pad_mode);
         lv_obj_t* btn = lv_btn_create(card);
-        lv_obj_set_size(btn, 330, 42);
-        lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 32 + i*46);
+        lv_obj_set_size(btn, 320, 44);
+        lv_obj_set_pos(btn, 6, 44 + i*52);
         apply_control_button_style(btn, sel ? RED808_ACCENT2 : RED808_SURFACE, sel, 10);
         lv_obj_t* lbl = lv_label_create(btn);
         lv_label_set_text(lbl, mode_labels[i]);
@@ -1351,9 +1619,9 @@ static void create_live_screen(void) {
     lv_obj_add_event_cb(b, grid_theme_cb, LV_EVENT_CLICKED, NULL);
     live_home_panels[live_home_panel_count++] = b;
 
-    // [6,2] PAD MODE — layout selector (was PIANO PARAMS)
+    // [6,2] PAD GRID — selector de visualización (1/2/4/8/16 pads)
     grid_nr_btn = create_ctrl_btn(scr_live, COL_X(6), ROW_Y(2), CW, CH,
-                                  "PAD\nMODE", RED808_ACCENT2,
+                                  "PAD\nGRID", RED808_ACCENT2,
                                   &lv_font_montserrat_18);
     lv_obj_set_style_border_color(grid_nr_btn, RED808_ACCENT2, 0);
     grid_nr_lbl = lv_obj_get_child(grid_nr_btn, 0);
@@ -2311,8 +2579,33 @@ static void seq_step_cb(lv_event_t* e) {
 static void seq_mute_cb(lv_event_t* e) {
     int track = (int)(intptr_t)lv_event_get_user_data(e);
     if (track < 16) {
+        // Debounce per-track and global window: 5 LVGL indevs are registered
+        // for multi-touch and a single tap can fire CLICKED twice from
+        // neighbour slots.
+        static uint32_t last_ms[16] = {};
+        static uint32_t last_any_ms = 0;
+        uint32_t now = millis();
+        if (now - last_ms[track] < 200) {
+            Serial.printf("[MUTE] DROPPED dup t=%d dt=%lu\n", track, (unsigned long)(now - last_ms[track]));
+            return;
+        }
+        if (now - last_any_ms < 60) {
+            Serial.printf("[MUTE] DROPPED global t=%d dt=%lu\n", track, (unsigned long)(now - last_any_ms));
+            return;
+        }
+        last_ms[track] = now;
+        last_any_ms = now;
+
         bool next = !p4.track_muted[track];
         p4.track_muted[track] = next;
+        static uint32_t s_mute_clicks = 0;
+        s_mute_clicks++;
+        Serial.printf("[MUTE] click #%lu t=%d -> %d\n",
+                      (unsigned long)s_mute_clicks, track, (int)next);
+        char tb[48];
+        snprintf(tb, sizeof(tb), "MUTE T%d %s #%lu",
+                 track + 1, next ? "ON" : "OFF", (unsigned long)s_mute_clicks);
+        ui_show_toast(tb, next ? RED808_ERROR : RED808_SUCCESS);
         if (ui_use_udp_transport()) udp_send_mute(track, next);
         // Relay mute to S3 so the sequencer trigger engine honors it.
         uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), next ? 1 : 0);
@@ -2327,17 +2620,48 @@ static bool seq_solo_engaged   = false;
 static void seq_solo_cb(lv_event_t* e) {
     int track = (int)(intptr_t)lv_event_get_user_data(e);
     if (track >= 16) return;
+    static uint32_t last_ms[16] = {};
+    static uint32_t last_any_ms = 0;
+    uint32_t nowDbg = millis();
+    if (nowDbg - last_ms[track] < 300) {
+        Serial.printf("[SOLO] DROPPED dup t=%d dt=%lu\n", track, (unsigned long)(nowDbg - last_ms[track]));
+        return;
+    }
+    if (nowDbg - last_any_ms < 80) {
+        Serial.printf("[SOLO] DROPPED global t=%d dt=%lu\n", track, (unsigned long)(nowDbg - last_any_ms));
+        return;
+    }
+    last_ms[track] = nowDbg;
+    last_any_ms = nowDbg;
     bool wasSolo = p4.track_solo[track];
+    Serial.printf("[SOLO] click t=%d wasSolo=%d\n", track, (int)wasSolo);
+
+    // Visible feedback so we can confirm the callback fires.
+    static uint32_t s_solo_clicks = 0;
+    s_solo_clicks++;
+    char toastBuf[64];
+    snprintf(toastBuf, sizeof(toastBuf), "SOLO T%d %s #%lu",
+             track + 1, wasSolo ? "OFF" : "ON", (unsigned long)s_solo_clicks);
+    ui_show_toast(toastBuf, wasSolo ? RED808_BORDER : RED808_ACCENT);
+    P4_LOG_PRINTF("[SOLO] click #%lu track=%d wasSolo=%d\n",
+                  (unsigned long)s_solo_clicks, track, (int)wasSolo);
 
     if (wasSolo) {
-        // Un-solo: clear solo flag and restore saved mute states.
+        // Un-solo: clear solo flag and UNMUTE ALL tracks so the user can
+        // hear the full pattern again with one tap. (Previous behaviour
+        // restored a "saved" mute state, but the master used to auto-mute
+        // tracks on engine assignment, leaving phantom mutes after solo.)
         p4.track_solo[track] = false;
         seq_solo_engaged = false;
         for (int t = 0; t < 16; t++) {
-            p4.track_muted[t] = seq_saved_mute[t];
-            if (ui_use_udp_transport()) udp_send_mute(t, p4.track_muted[t]);
-            uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (t & 0x0F),
-                            p4.track_muted[t] ? 1 : 0);
+            p4.track_muted[t] = false;
+            seq_saved_mute[t] = false;
+            uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (t & 0x0F), 0);
+        }
+        // Single atomic UDP packet — no flicker from partial state_sync.
+        if (ui_use_udp_transport()) {
+            udp_send_mute_mask(0);
+            udp_send_solo_mask(0);
         }
     } else {
         // Engage solo: if first time, remember current mute state.
@@ -2348,15 +2672,19 @@ static void seq_solo_cb(lv_event_t* e) {
         // Exclusive: clear other solos, mute all non-solo tracks.
         for (int i = 0; i < 16; i++) p4.track_solo[i] = false;
         p4.track_solo[track] = true;
+        uint16_t muteMask = 0;
         for (int t = 0; t < 16; t++) {
             bool shouldMute = (t != track);
             p4.track_muted[t] = shouldMute;
-            if (ui_use_udp_transport()) udp_send_mute(t, shouldMute);
+            if (shouldMute) muteMask |= (1u << t);
             uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (t & 0x0F),
                             shouldMute ? 1 : 0);
         }
+        if (ui_use_udp_transport()) {
+            udp_send_mute_mask(muteMask);
+            udp_send_solo_mask((uint16_t)(1u << track));
+        }
     }
-    if (ui_use_udp_transport()) udp_send_solo(track, p4.track_solo[track]);
 }
 
 // ── Pagination helpers ─────────────────────────────────────────────────────
@@ -2614,6 +2942,36 @@ static void create_sequencer_screen(void) {
         lv_obj_set_style_text_font(ppl, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(ppl, RED808_TEXT, 0);
         lv_obj_center(ppl);
+        hx += 44 + 12;
+
+        // UNMUTE ALL — clears all mutes and solos in one tap.
+        lv_obj_t* uall = lv_btn_create(scr_sequencer);
+        lv_obj_set_size(uall, 130, HH);
+        lv_obj_set_pos(uall, hx, HY);
+        apply_control_button_style(uall, RED808_SUCCESS, false, 8);
+        lv_obj_set_style_border_color(uall, RED808_CYAN, 0);
+        lv_obj_set_style_border_width(uall, 2, 0);
+        lv_obj_add_event_cb(uall, [](lv_event_t* /*e*/){
+            seq_solo_engaged = false;
+            for (int t = 0; t < 16; t++) {
+                p4.track_muted[t]  = false;
+                p4.track_solo[t]   = false;
+                seq_saved_mute[t]  = false;
+                uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (t & 0x0F), 0);
+                uart_send_to_s3(MSG_TRACK, TRK_SOLO_BIT | (t & 0x0F), 0);
+            }
+            // Single atomic UDP packet for all 16 tracks (no flicker).
+            if (ui_use_udp_transport()) {
+                udp_send_mute_mask(0);
+                udp_send_solo_mask(0);
+            }
+            ui_show_toast("Unmute ALL", RED808_SUCCESS);
+        }, LV_EVENT_CLICKED, NULL);
+        lv_obj_t* uall_lbl = lv_label_create(uall);
+        lv_label_set_text(uall_lbl, "UNMUTE ALL");
+        lv_obj_set_style_text_font(uall_lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(uall_lbl, lv_color_white(), 0);
+        lv_obj_center(uall_lbl);
     }
 
     // ── Precompute step X positions ──
@@ -2719,7 +3077,7 @@ static void create_sequencer_screen(void) {
         lv_obj_set_style_bg_opa(seq_mute_btns[t], (lv_opa_t)140, 0);
         lv_obj_set_style_border_opa(seq_mute_btns[t], LV_OPA_60, 0);
         lv_obj_set_style_pad_all(seq_mute_btns[t], 0, 0);
-        lv_obj_add_event_cb(seq_mute_btns[t], seq_mute_cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
+        lv_obj_add_event_cb(seq_mute_btns[t], seq_mute_cb, LV_EVENT_PRESSED, (void*)(intptr_t)t);
 
         // Track label: "01\nBD" — number above, name below
         seq_track_labels[t] = lv_label_create(seq_mute_btns[t]);
@@ -2769,7 +3127,7 @@ static void create_sequencer_screen(void) {
         lv_obj_set_pos(seq_solo_btns[t], SEQ_SOLO_X, rowY);
         apply_control_button_style(seq_solo_btns[t], tc, false, 4);
         lv_obj_set_style_pad_all(seq_solo_btns[t], 0, 0);
-        lv_obj_add_event_cb(seq_solo_btns[t], seq_solo_cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
+        lv_obj_add_event_cb(seq_solo_btns[t], seq_solo_cb, LV_EVENT_PRESSED, (void*)(intptr_t)t);
         seq_solo_labels[t] = lv_label_create(seq_solo_btns[t]);
         lv_label_set_text(seq_solo_labels[t], "S");
         lv_obj_set_style_text_font(seq_solo_labels[t], &lv_font_montserrat_12, 0);
@@ -5788,6 +6146,10 @@ static void ui_reload_themed_screens(void) {
     s_pad_inst_modal_pad_lbl = NULL;
     s_pad_inst_modal_inst_lbl = NULL;
     for (int i = 0; i < 8; i++) s_pad_inst_modal_inst_btns[i] = NULL;
+    for (int e2 = 0; e2 < 3; e2++) {
+        s_pad_inst_modal_kit_lbl_eng[e2] = NULL;
+        for (int p = 0; p < 5; p++) s_pad_inst_modal_kit_btns[e2][p] = NULL;
+    }
     for (int i = 0; i < 3; i++) {
         fx_arcs[i] = NULL; fx_value_labels[i] = NULL;
         fx_name_labels[i] = NULL; fx_toggle_btns[i] = NULL;
@@ -5923,6 +6285,22 @@ void ui_process_pad_queue(void) {
         uart_send_to_s3(MSG_TOUCH_CMD, TCMD_PAD_TAP, pad);
         // Then send UDP to master with MPC-style velocity
         if (p4.wifi_connected || p4.master_connected) {
+            // Kit per-pad: si el pad usa un engine drum (808/909/505) y su
+            // kit asignado difiere del último aplicado a ese engine en la
+            // Daisy, manda CMD_SYNTH_PRESET justo antes del trigger. Esto
+            // permite que dos pads del mismo engine suenen con kits distintos
+            // (a costa de un cambio de preset por golpe cuando alternan).
+            if (pad < 16) {
+                int8_t drum = pad_inst_drum_engine_idx(s_pad_inst_sel[pad]);
+                if (drum >= 0) {
+                    uint8_t kit = s_pad_kit_assigned[pad];
+                    if (kit > 4) kit = 0;
+                    if (s_engine_kit_last_applied[drum] != (int8_t)kit) {
+                        udp_send_synth_preset((uint8_t)drum, kit);
+                        s_engine_kit_last_applied[drum] = (int8_t)kit;
+                    }
+                }
+            }
             udp_send_trigger(pad, velocity);
             // Schedule synth note-off for melodic engines so 303/WT/FM2/SH101
             // don't get stuck after a tap. Drum samples (engine -1, 0, 1, 2)
@@ -6011,6 +6389,17 @@ static inline uint8_t ui_live_pad_velocity(void) {
 void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
     (void)velocity;
     static bool prev_live_active = true;
+
+    // Si el modal PAD SOUND está abierto, ignora los pads físicos:
+    // la pantalla está cubierta y cualquier toque debe ir a los
+    // botones del modal, no al pad físico que hay debajo.
+    if (s_pad_inst_modal) {
+        for (int p = 0; p < 16; p++) {
+            s_pad_held[p] = false;
+            s_pad_repeat_next_ms[p] = 0;
+        }
+        return;
+    }
 
     if (!g_live_screen_active.load(std::memory_order_acquire)) {
         // Leaving LIVE screen: release all held pads to Master so they don't sustain

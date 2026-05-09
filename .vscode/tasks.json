@@ -20,7 +20,16 @@
 		{
 			"label": "PlatformIO: Upload S3",
 			"type": "shell",
-			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe run --target upload --environment esp32s3",
+			"command": "pwsh.exe",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-File", "${workspaceFolder}/.vscode/upload_device.ps1",
+				"-Device", "s3",
+				"-Target", "upload",
+				"-ProjectDir", "${workspaceFolder}/RedMaster_ESP32S3"
+			],
+			"problemMatcher": [],
 			"group": "build"
 		},
 		{
@@ -32,15 +41,15 @@
 		{
 			"label": "PlatformIO: Upload Filesystem P4",
 			"type": "shell",
-			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe",
+			"command": "pwsh.exe",
 			"args": [
-				"run",
-				"--project-dir",
-				"${workspaceFolder}/BlueSlaveP4",
-				"--target",
-				"uploadfs",
-				"--environment",
-				"esp32p4-fs"
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-File", "${workspaceFolder}/.vscode/upload_device.ps1",
+				"-Device", "p4",
+				"-Target", "uploadfs",
+				"-ProjectDir", "${workspaceFolder}/BlueSlaveP4",
+				"-Environment", "esp32p4-fs"
 			],
 			"problemMatcher": [],
 			"group": "build"
@@ -48,21 +57,52 @@
 		{
 			"label": "PlatformIO: Upload P4",
 			"type": "shell",
-			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe",
+			"command": "pwsh.exe",
 			"args": [
-				"run",
-				"--project-dir",
-				"${workspaceFolder}/BlueSlaveP4",
-				"--target",
-				"upload",
-				"--target",
-				"monitor",
-				"--environment",
-				"esp32p4-fs"
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-File", "${workspaceFolder}/.vscode/upload_device.ps1",
+				"-Device", "p4",
+				"-Target", "upload",
+				"-ProjectDir", "${workspaceFolder}/BlueSlaveP4",
+				"-Environment", "esp32p4-fs"
 			],
-			"isBackground": true,
 			"problemMatcher": [],
 			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Monitor P4",
+			"type": "shell",
+			"command": "pwsh.exe",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-File", "${workspaceFolder}/.vscode/monitor_device.ps1",
+				"-Device", "p4"
+			],
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true
+			}
+		},
+		{
+			"label": "PlatformIO: Monitor S3",
+			"type": "shell",
+			"command": "pwsh.exe",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-File", "${workspaceFolder}/.vscode/monitor_device.ps1",
+				"-Device", "s3"
+			],
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true
+			}
 		},
 		{
 			"label": "Inspect MEM MIDIs (Python)",

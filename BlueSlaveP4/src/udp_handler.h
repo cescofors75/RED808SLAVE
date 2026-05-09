@@ -49,6 +49,10 @@ void udp_send_fx_pot(int pot_id, uint8_t value, bool muted);
 // Solo
 void udp_send_solo(int track, bool soloed);
 
+// Atomic batch updates (single UDP packet sets all 16 tracks at once)
+void udp_send_mute_mask(uint16_t mask);
+void udp_send_solo_mask(uint16_t mask);
+
 // Synth (melody) — engine: 3=303, 4=WTosc, 5=SH101, 6=FM2Op
 void udp_send_synth_note_on_ex(uint8_t engine, uint8_t note, uint8_t velocity,
                                 bool accent, bool slide);
