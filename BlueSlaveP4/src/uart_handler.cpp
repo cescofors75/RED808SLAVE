@@ -52,6 +52,15 @@ static uint8_t s_s3_mel_octave = 4;
 static uint8_t s_s3_preview_engine = 3;
 static uint32_t s_s3_preview_note_off_due_ms = 0;
 
+// Anti-echo guard for track mute/solo messages mirrored to S3.
+// If S3 reflects the same command back shortly after P4 sent it, ignore it
+// to avoid duplicate UDP sends and UI flicker.
+static const uint32_t TRACK_ECHO_GUARD_MS = 350;
+static uint32_t s_last_mute_tx_ms[16] = {};
+static uint32_t s_last_solo_tx_ms[16] = {};
+static bool s_last_mute_tx_val[16] = {};
+static bool s_last_solo_tx_val[16] = {};
+
 // v2.9 — Pending melody state received from S3 (consumed by main loop under LVGL lock)
 PendingMelodyFromS3 g_pending_melody_from_s3 = {};
 
@@ -159,6 +168,21 @@ void uart_send_to_s3(uint8_t type, uint8_t id, uint8_t value) {
 #else
     UartBasicPacket pkt;
     uart_build_basic(&pkt, type, id, value);
+
+    if (type == MSG_TRACK) {
+        uint8_t sub = id & 0xF0;
+        uint8_t trk = id & 0x0F;
+        if (trk < 16) {
+            uint32_t now = millis();
+            if (sub == TRK_MUTE_BIT) {
+                s_last_mute_tx_ms[trk] = now;
+                s_last_mute_tx_val[trk] = (value != 0);
+            } else if (sub == TRK_SOLO_BIT) {
+                s_last_solo_tx_ms[trk] = now;
+                s_last_solo_tx_val[trk] = (value != 0);
+            }
+        }
+    }
 
 #if P4_USB_CDC_ENABLED
     // Prefer USB if connected, fall back to UART
@@ -471,14 +495,48 @@ static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
             uint8_t trk = id & 0x0F;
             if (trk < 16) {
                 switch (sub) {
-                    case TRK_MUTE_BIT:
-                        p4.track_muted[trk] = (val != 0);
-                        if (udp_wifi_connected()) udp_send_mute(trk, val != 0);
+                    case TRK_MUTE_BIT: {
+                        bool incoming = (val != 0);
+                        uint32_t now = millis();
+                        if ((now - s_last_mute_tx_ms[trk] < TRACK_ECHO_GUARD_MS)) {
+                            if (incoming == s_last_mute_tx_val[trk]) {
+                                P4_LOG_PRINTF("[UART][ECHO] drop mute t=%u val=%u age=%lu\n",
+                                              (unsigned)trk, (unsigned)incoming,
+                                              (unsigned long)(now - s_last_mute_tx_ms[trk]));
+                                break;
+                            }
+                            P4_LOG_PRINTF("[UART][ECHO] drop mute conflict t=%u in=%u tx=%u age=%lu\n",
+                                          (unsigned)trk, (unsigned)incoming,
+                                          (unsigned)s_last_mute_tx_val[trk],
+                                          (unsigned long)(now - s_last_mute_tx_ms[trk]));
+                            break;
+                        }
+                        if (p4.track_muted[trk] == incoming) break;
+                        p4.track_muted[trk] = incoming;
+                        if (udp_wifi_connected()) udp_send_mute(trk, incoming);
                         break;
-                    case TRK_SOLO_BIT:
-                        p4.track_solo[trk] = (val != 0);
-                        if (udp_wifi_connected()) udp_send_solo(trk, val != 0);
+                    }
+                    case TRK_SOLO_BIT: {
+                        bool incoming = (val != 0);
+                        uint32_t now = millis();
+                        if ((now - s_last_solo_tx_ms[trk] < TRACK_ECHO_GUARD_MS)) {
+                            if (incoming == s_last_solo_tx_val[trk]) {
+                                P4_LOG_PRINTF("[UART][ECHO] drop solo t=%u val=%u age=%lu\n",
+                                              (unsigned)trk, (unsigned)incoming,
+                                              (unsigned long)(now - s_last_solo_tx_ms[trk]));
+                                break;
+                            }
+                            P4_LOG_PRINTF("[UART][ECHO] drop solo conflict t=%u in=%u tx=%u age=%lu\n",
+                                          (unsigned)trk, (unsigned)incoming,
+                                          (unsigned)s_last_solo_tx_val[trk],
+                                          (unsigned long)(now - s_last_solo_tx_ms[trk]));
+                            break;
+                        }
+                        if (p4.track_solo[trk] == incoming) break;
+                        p4.track_solo[trk] = incoming;
+                        if (udp_wifi_connected()) udp_send_solo(trk, incoming);
                         break;
+                    }
                     case TRK_VOLUME:
                         p4.track_volume[trk] = val;
                         if (udp_wifi_connected()) udp_send_set_track_volume(trk, val);

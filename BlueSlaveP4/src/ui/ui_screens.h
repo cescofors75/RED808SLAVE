@@ -25,6 +25,9 @@ void ui_update_current_screen(void);
 // Drain pad event queue — call from loop() on Core 1 (outside LVGL mutex)
 void ui_process_pad_queue(void);
 
+// Drain deferred mute/solo commands — call from loop() outside LVGL mutex.
+void ui_process_control_queue(void);
+
 // Map absolute (x,y) touch coordinate to pad index 0..15 on the LIVE screen.
 // Returns -1 if not on a pad or the LIVE screen is not active.
 int ui_pad_from_xy(uint16_t x, uint16_t y);

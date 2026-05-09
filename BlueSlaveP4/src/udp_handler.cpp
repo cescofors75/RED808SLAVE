@@ -46,8 +46,9 @@ static unsigned long lastLocalSoloMs[16] = {};
 // Master broadcasts state_sync every 2 s. Pick a window > broadcast period so
 // any state_sync arriving right after a P4-initiated SOLO/UNMUTE-ALL is
 // suppressed (the master already has the correct state — re-applying it just
-// causes UI flicker). 5 s is comfortable.
-static const unsigned long LOCAL_OWNERSHIP_MS = 5000;
+// causes UI flicker). Keep it below 2 s to improve responsiveness while still
+// filtering near-race packets.
+static const unsigned long LOCAL_OWNERSHIP_MS = 1800;
 static int pendingPatternRequest = -1;
 static unsigned long pendingPatternLastTxMs = 0;
 static uint8_t pendingPatternRetries = 0;
@@ -209,9 +210,21 @@ static bool fetch_master_state_http(void) {
         int track = 0;
         for (JsonVariant value : mute) {
             if (track >= 16) break;
-            if (nowMs - lastLocalMuteMs[track] < LOCAL_OWNERSHIP_MS) { track++; continue; }
+            if (nowMs - lastLocalMuteMs[track] < LOCAL_OWNERSHIP_MS) {
+                bool incoming = value.as<bool>();
+                if (incoming != p4.track_muted[track]) {
+                    P4_LOG_PRINTF("[SYNC][MUTE] keep-local t=%d incoming=%d local=%d age=%lu\n",
+                                  track, (int)incoming, (int)p4.track_muted[track],
+                                  (unsigned long)(nowMs - lastLocalMuteMs[track]));
+                }
+                track++;
+                continue;
+            }
             bool v = value.as<bool>();
             if (p4.track_muted[track] != v) {
+                P4_LOG_PRINTF("[SYNC][MUTE] apply-master t=%d old=%d new=%d age=%lu\n",
+                              track, (int)p4.track_muted[track], (int)v,
+                              (unsigned long)(nowMs - lastLocalMuteMs[track]));
                 p4.track_muted[track] = v;
                 uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), v ? 1 : 0);
             }
@@ -225,9 +238,21 @@ static bool fetch_master_state_http(void) {
         int track = 0;
         for (JsonVariant value : solo) {
             if (track >= 16) break;
-            if (nowMs - lastLocalSoloMs[track] < LOCAL_OWNERSHIP_MS) { track++; continue; }
+            if (nowMs - lastLocalSoloMs[track] < LOCAL_OWNERSHIP_MS) {
+                bool incoming = value.as<bool>();
+                if (incoming != p4.track_solo[track]) {
+                    P4_LOG_PRINTF("[SYNC][SOLO] keep-local t=%d incoming=%d local=%d age=%lu\n",
+                                  track, (int)incoming, (int)p4.track_solo[track],
+                                  (unsigned long)(nowMs - lastLocalSoloMs[track]));
+                }
+                track++;
+                continue;
+            }
             bool v = value.as<bool>();
             if (p4.track_solo[track] != v) {
+                P4_LOG_PRINTF("[SYNC][SOLO] apply-master t=%d old=%d new=%d age=%lu\n",
+                              track, (int)p4.track_solo[track], (int)v,
+                              (unsigned long)(nowMs - lastLocalSoloMs[track]));
                 p4.track_solo[track] = v;
                 uart_send_to_s3(MSG_TRACK, TRK_SOLO_BIT | (track & 0x0F), v ? 1 : 0);
             }
@@ -726,8 +751,8 @@ void udp_request_master_sync(void) {
     sendJson("{\"cmd\":\"hello\",\"device\":\"P4_DISPLAY\"}");
 
     if (!sessionCleanSent) {
-        // Keep local state clean, but avoid sending a 32-packet solo/mute burst.
-        // That burst can exhaust UDP buffers and trigger endPacket errno 12.
+        // One-time boot/session init only. Do NOT repeat this on every
+        // reconnect/timeout because that force-clears mute/solo visuals.
         for (int track = 0; track < 16; track++) {
             p4.track_solo[track] = false;
             p4.track_muted[track] = false;
@@ -796,37 +821,10 @@ static void processJson(const char* json, int len) {
         uart_send_to_s3(MSG_SYSTEM, SYS_SEQ_VOL, (uint8_t)p4.seq_volume);
         uart_send_to_s3(MSG_SYSTEM, SYS_LIVE_VOL, (uint8_t)p4.live_volume);
 
-        JsonArray mute = doc["mute"];
-        if (mute) {
-            unsigned long nowMs = millis();
-            int track = 0;
-            for (JsonVariant value : mute) {
-                if (track >= 16) break;
-                if (nowMs - lastLocalMuteMs[track] < LOCAL_OWNERSHIP_MS) { track++; continue; }
-                bool v = value.as<bool>();
-                if (p4.track_muted[track] != v) {
-                    p4.track_muted[track] = v;
-                    uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), v ? 1 : 0);
-                }
-                track++;
-            }
-        }
-
-        JsonArray solo = doc["solo"];
-        if (solo) {
-            unsigned long nowMs = millis();
-            int track = 0;
-            for (JsonVariant value : solo) {
-                if (track >= 16) break;
-                if (nowMs - lastLocalSoloMs[track] < LOCAL_OWNERSHIP_MS) { track++; continue; }
-                bool v = value.as<bool>();
-                if (p4.track_solo[track] != v) {
-                    p4.track_solo[track] = v;
-                    uart_send_to_s3(MSG_TRACK, TRK_SOLO_BIT | (track & 0x0F), v ? 1 : 0);
-                }
-                track++;
-            }
-        }
+        // P4 owns mute/solo visuals once the session is running. Applying the
+        // periodic 2 s state_sync mix arrays here causes visible flicker when
+        // they race with local touch edits or delayed master-side state. The
+        // initial HTTP sync still seeds these values on connect/reconnect.
 
         JsonArray volumes = doc["trackVolumes"];
         if (volumes) {
@@ -1164,7 +1162,6 @@ static void onWiFiDisconnected(void) {
         wifiConnected = false;
         udpStarted = false;
         masterAlive = false;
-        sessionCleanSent = false;
         p4.wifi_connected = false;
         p4.master_connected = false;
         // Clear FX latches so they are re-sent after reconnect (LP filter, etc.)
@@ -1244,9 +1241,10 @@ void udp_handler_process(void) {
     // --- Master timeout ---
     if (masterAlive && (now - lastMasterPacket > MASTER_TIMEOUT_MS)) {
         masterAlive = false;
-        sessionCleanSent = false;
         p4.master_connected = false;
-        P4_LOG_PRINTLN("[UDP] Master timeout!");
+        static uint32_t s_master_timeout_count = 0;
+        s_master_timeout_count++;
+        P4_LOG_PRINTF("[UDP] Master timeout! count=%lu\n", (unsigned long)s_master_timeout_count);
     }
 
     // --- Re-request sync if no response ---

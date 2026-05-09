@@ -88,6 +88,10 @@ void loop() {
     // Drain pad event queue FIRST — lowest latency pad→Master path (Core 1, no mutex)
     ui_process_pad_queue();
 
+    // Send deferred UI control commands outside the LVGL task so button
+    // feedback paints immediately even if WiFi/UDP stalls briefly.
+    ui_process_control_queue();
+
     // Process WiFi/UDP from Master (primary connection)
     udp_handler_process();
 

@@ -42,6 +42,21 @@ static std::atomic<uint8_t> s_pad_qh{0};
 static std::atomic<uint8_t> s_pad_qt{0};
 static std::atomic<uint32_t> s_pad_q_drops{0};
 
+static std::atomic<uint16_t> s_ctrl_mute_dirty{0};
+static std::atomic<uint16_t> s_ctrl_mute_values{0};
+static std::atomic<bool>     s_ctrl_mute_mask_pending{false};
+static std::atomic<uint16_t> s_ctrl_mute_mask{0};
+static std::atomic<bool>     s_ctrl_solo_mask_pending{false};
+static std::atomic<uint16_t> s_ctrl_solo_mask{0};
+static std::atomic<uint32_t> s_ctrl_mute_enqueue_ms[16] = {};
+static std::atomic<uint32_t> s_ctrl_mute_mask_enqueue_ms{0};
+static std::atomic<uint32_t> s_ctrl_solo_mask_enqueue_ms{0};
+
+static const uint32_t MUTE_DEBOUNCE_TRACK_MS = 180;
+static const uint32_t MUTE_DEBOUNCE_GLOBAL_MS = 60;
+static const uint32_t SOLO_DEBOUNCE_TRACK_MS = 220;
+static const uint32_t SOLO_DEBOUNCE_GLOBAL_MS = 70;
+
 // Direct touch bypass: flag used by touch_task to early-out when not on LIVE
 static std::atomic<bool> g_live_screen_active{false};
 
@@ -54,6 +69,29 @@ static inline void enqueue_pad_event(uint8_t pad, uint8_t velocity) {
     }
     s_pad_q[h & 0x1F] = (uint16_t)((velocity << 8) | pad);
     s_pad_qh.store(h + 1, std::memory_order_release);
+}
+
+static inline void enqueue_mute_control(uint8_t track, bool muted) {
+    if (track >= 16) return;
+    uint16_t bit = (uint16_t)(1U << track);
+    uint16_t values = s_ctrl_mute_values.load(std::memory_order_relaxed);
+    values = muted ? (uint16_t)(values | bit) : (uint16_t)(values & ~bit);
+    s_ctrl_mute_values.store(values, std::memory_order_release);
+    s_ctrl_mute_enqueue_ms[track].store(millis(), std::memory_order_release);
+    s_ctrl_mute_dirty.fetch_or(bit, std::memory_order_release);
+}
+
+static inline void enqueue_mute_mask_control(uint16_t mask) {
+    s_ctrl_mute_dirty.store(0, std::memory_order_release);
+    s_ctrl_mute_mask.store(mask, std::memory_order_release);
+    s_ctrl_mute_mask_enqueue_ms.store(millis(), std::memory_order_release);
+    s_ctrl_mute_mask_pending.store(true, std::memory_order_release);
+}
+
+static inline void enqueue_solo_mask_control(uint16_t mask) {
+    s_ctrl_solo_mask.store(mask, std::memory_order_release);
+    s_ctrl_solo_mask_enqueue_ms.store(millis(), std::memory_order_release);
+    s_ctrl_solo_mask_pending.store(true, std::memory_order_release);
 }
 
 // =============================================================================
@@ -1850,11 +1888,20 @@ static void update_live_screen(void) {
     bool step_changed = (p4.current_step != prev_sync_step);
     if (step_changed) prev_sync_step = p4.current_step;
     static uint8_t pad_prev_band[16] = {};
+    static bool pad_prev_muted_for_flash[16] = {};
     for (int i = 0; i < 16; i++) {
         if (!live_pad_btns[i]) continue;
 
+        bool muted = p4.track_muted[i];
+        bool muted_changed = (muted != pad_prev_muted_for_flash[i]);
+        if (muted_changed) {
+            pad_prev_muted_for_flash[i] = muted;
+            pad_prev_band[i] = 0xFF;
+        }
+
         uint8_t band = 0;
-        uint8_t vel  = s_pad_flash_vel[i];
+        uint8_t vel  = muted ? 0 : s_pad_flash_vel[i];
+        if (muted) s_pad_flash_vel[i] = 0;
         if (vel) {
             unsigned long el = now - s_pad_flash_start_ms[i];
             if (el >= (unsigned long)FADE_MS) {
@@ -1869,13 +1916,31 @@ static void update_live_screen(void) {
         }
         // Sequencer sync floor: if this pad is active on the current step,
         // render at mid brightness so the groove is always visible.
-        if (sync_pads_active && p4.is_playing && p4.steps[i][p4.current_step]) {
+        if (!muted && sync_pads_active && p4.is_playing && p4.steps[i][p4.current_step]) {
             if (band < 4) band = 4;
         }
         if (band == pad_prev_band[i]) continue;
         pad_prev_band[i] = band;
 
         lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[i]);
+
+        if (muted) {
+            lv_obj_set_style_bg_color(live_pad_btns[i], RED808_SURFACE, 0);
+            lv_obj_set_style_bg_grad_color(live_pad_btns[i], RED808_PANEL, 0);
+            lv_obj_set_style_bg_opa(live_pad_btns[i], LV_OPA_70, 0);
+            lv_obj_set_style_border_width(live_pad_btns[i], 3, 0);
+            lv_obj_set_style_border_color(live_pad_btns[i], RED808_TEXT_DIM, 0);
+            lv_obj_set_style_border_opa(live_pad_btns[i], LV_OPA_50, 0);
+            if (live_pad_accent_strips[i]) {
+                lv_obj_set_style_bg_color(live_pad_accent_strips[i], RED808_TEXT_DIM, 0);
+                lv_obj_set_style_bg_opa(live_pad_accent_strips[i], LV_OPA_40, 0);
+            }
+            if (live_pad_labels[i])
+                lv_obj_set_style_text_color(live_pad_labels[i], RED808_TEXT_DIM, 0);
+            if (live_pad_num_labels[i])
+                lv_obj_set_style_text_color(live_pad_num_labels[i], RED808_TEXT_DIM, 0);
+            continue;
+        }
 
         if (band == 0) {
             // Idle: dark surface + colored ring
@@ -1925,7 +1990,7 @@ static void update_live_screen(void) {
         if (!live_pad_btns[i]) continue;
         bool muted = p4.track_muted[i];
         bool solo = p4.track_solo[i];
-        bool step_lit = p4.is_playing && p4.steps[i][p4.current_step];
+        bool step_lit = !muted && p4.is_playing && p4.steps[i][p4.current_step];
         if (muted == prev_muted[i] && solo == prev_solo[i] &&
             step_lit == prev_step_lit[i] && p4.is_playing == prev_live_playing) {
             continue;
@@ -2585,12 +2650,12 @@ static void seq_mute_cb(lv_event_t* e) {
         static uint32_t last_ms[16] = {};
         static uint32_t last_any_ms = 0;
         uint32_t now = millis();
-        if (now - last_ms[track] < 200) {
-            Serial.printf("[MUTE] DROPPED dup t=%d dt=%lu\n", track, (unsigned long)(now - last_ms[track]));
+        if (now - last_ms[track] < MUTE_DEBOUNCE_TRACK_MS) {
+            P4_LOG_PRINTF("[MUTE] DROPPED dup t=%d dt=%lu\n", track, (unsigned long)(now - last_ms[track]));
             return;
         }
-        if (now - last_any_ms < 60) {
-            Serial.printf("[MUTE] DROPPED global t=%d dt=%lu\n", track, (unsigned long)(now - last_any_ms));
+        if (now - last_any_ms < MUTE_DEBOUNCE_GLOBAL_MS) {
+            P4_LOG_PRINTF("[MUTE] DROPPED global t=%d dt=%lu\n", track, (unsigned long)(now - last_any_ms));
             return;
         }
         last_ms[track] = now;
@@ -2600,13 +2665,14 @@ static void seq_mute_cb(lv_event_t* e) {
         p4.track_muted[track] = next;
         static uint32_t s_mute_clicks = 0;
         s_mute_clicks++;
-        Serial.printf("[MUTE] click #%lu t=%d -> %d\n",
-                      (unsigned long)s_mute_clicks, track, (int)next);
+        P4_LOG_PRINTF("[MUTE] click #%lu t=%d -> %d\n",
+                  (unsigned long)s_mute_clicks, track, (int)next);
         char tb[48];
         snprintf(tb, sizeof(tb), "MUTE T%d %s #%lu",
                  track + 1, next ? "ON" : "OFF", (unsigned long)s_mute_clicks);
         ui_show_toast(tb, next ? RED808_ERROR : RED808_SUCCESS);
-        if (ui_use_udp_transport()) udp_send_mute(track, next);
+        if (ui_use_udp_transport()) enqueue_mute_control((uint8_t)track, next);
+        P4_LOG_PRINTF("[LAT][MUTE] cb->enqueue t=%d state=%d\n", track, (int)next);
         // Relay mute to S3 so the sequencer trigger engine honors it.
         uart_send_to_s3(MSG_TRACK, TRK_MUTE_BIT | (track & 0x0F), next ? 1 : 0);
     }
@@ -2623,18 +2689,18 @@ static void seq_solo_cb(lv_event_t* e) {
     static uint32_t last_ms[16] = {};
     static uint32_t last_any_ms = 0;
     uint32_t nowDbg = millis();
-    if (nowDbg - last_ms[track] < 300) {
-        Serial.printf("[SOLO] DROPPED dup t=%d dt=%lu\n", track, (unsigned long)(nowDbg - last_ms[track]));
+    if (nowDbg - last_ms[track] < SOLO_DEBOUNCE_TRACK_MS) {
+        P4_LOG_PRINTF("[SOLO] DROPPED dup t=%d dt=%lu\n", track, (unsigned long)(nowDbg - last_ms[track]));
         return;
     }
-    if (nowDbg - last_any_ms < 80) {
-        Serial.printf("[SOLO] DROPPED global t=%d dt=%lu\n", track, (unsigned long)(nowDbg - last_any_ms));
+    if (nowDbg - last_any_ms < SOLO_DEBOUNCE_GLOBAL_MS) {
+        P4_LOG_PRINTF("[SOLO] DROPPED global t=%d dt=%lu\n", track, (unsigned long)(nowDbg - last_any_ms));
         return;
     }
     last_ms[track] = nowDbg;
     last_any_ms = nowDbg;
     bool wasSolo = p4.track_solo[track];
-    Serial.printf("[SOLO] click t=%d wasSolo=%d\n", track, (int)wasSolo);
+    P4_LOG_PRINTF("[SOLO] click t=%d wasSolo=%d\n", track, (int)wasSolo);
 
     // Visible feedback so we can confirm the callback fires.
     static uint32_t s_solo_clicks = 0;
@@ -2660,8 +2726,8 @@ static void seq_solo_cb(lv_event_t* e) {
         }
         // Single atomic UDP packet — no flicker from partial state_sync.
         if (ui_use_udp_transport()) {
-            udp_send_mute_mask(0);
-            udp_send_solo_mask(0);
+            enqueue_mute_mask_control(0);
+            enqueue_solo_mask_control(0);
         }
     } else {
         // Engage solo: if first time, remember current mute state.
@@ -2681,8 +2747,8 @@ static void seq_solo_cb(lv_event_t* e) {
                             shouldMute ? 1 : 0);
         }
         if (ui_use_udp_transport()) {
-            udp_send_mute_mask(muteMask);
-            udp_send_solo_mask((uint16_t)(1u << track));
+            enqueue_mute_mask_control(muteMask);
+            enqueue_solo_mask_control((uint16_t)(1u << track));
         }
     }
 }
@@ -3077,7 +3143,7 @@ static void create_sequencer_screen(void) {
         lv_obj_set_style_bg_opa(seq_mute_btns[t], (lv_opa_t)140, 0);
         lv_obj_set_style_border_opa(seq_mute_btns[t], LV_OPA_60, 0);
         lv_obj_set_style_pad_all(seq_mute_btns[t], 0, 0);
-        lv_obj_add_event_cb(seq_mute_btns[t], seq_mute_cb, LV_EVENT_PRESSED, (void*)(intptr_t)t);
+        lv_obj_add_event_cb(seq_mute_btns[t], seq_mute_cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
 
         // Track label: "01\nBD" — number above, name below
         seq_track_labels[t] = lv_label_create(seq_mute_btns[t]);
@@ -3127,7 +3193,7 @@ static void create_sequencer_screen(void) {
         lv_obj_set_pos(seq_solo_btns[t], SEQ_SOLO_X, rowY);
         apply_control_button_style(seq_solo_btns[t], tc, false, 4);
         lv_obj_set_style_pad_all(seq_solo_btns[t], 0, 0);
-        lv_obj_add_event_cb(seq_solo_btns[t], seq_solo_cb, LV_EVENT_PRESSED, (void*)(intptr_t)t);
+        lv_obj_add_event_cb(seq_solo_btns[t], seq_solo_cb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
         seq_solo_labels[t] = lv_label_create(seq_solo_btns[t]);
         lv_label_set_text(seq_solo_labels[t], "S");
         lv_obj_set_style_text_font(seq_solo_labels[t], &lv_font_montserrat_12, 0);
@@ -3280,18 +3346,15 @@ static void update_sequencer_screen(void) {
     }
     prev_step = step;
 
-    // ── Move / show glowing playhead line — only when changed ──
+    // ── Move / show glowing playhead line — disabled: the full-height overlay
+    // sweeps over muted rows and reads as mute flicker. Per-cell current-step
+    // highlighting below remains active for unmuted tracks only.
     static int  prev_ph_step    = -2;
     static bool prev_ph_playing = false;
     if (seq_playhead_line && (step != prev_ph_step || playing != prev_ph_playing)) {
         prev_ph_step    = step;
         prev_ph_playing = playing;
-        if (playing && step >= 0 && step < 16) {
-            lv_obj_set_x(seq_playhead_line, seq_step_x[step]);
-            lv_obj_clear_flag(seq_playhead_line, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(seq_playhead_line, LV_OBJ_FLAG_HIDDEN);
-        }
+        lv_obj_add_flag(seq_playhead_line, LV_OBJ_FLAG_HIDDEN);
     }
 
     // ── Status bar step counter — only when changed ──
@@ -3382,7 +3445,7 @@ static void update_sequencer_screen(void) {
         for (int s = 0; s < 16; s++) {
             if (!seq_step_btns[t][s]) continue;
             bool active = p4.steps[t][s];
-            bool is_cur = playing && (step == s);
+            bool is_cur = !muted && playing && (step == s);
             uint8_t cell_key = (uint8_t)((active ? 4 : 0) | (is_cur ? 2 : 0) | (muted ? 1 : 0));
             if (cell_key == prev_cell_key[t][s]) continue;
             prev_cell_key[t][s] = cell_key;
@@ -6268,6 +6331,44 @@ static uint32_t s_pad_noteoff_at[16]    = {0};
 static int8_t   s_pad_noteoff_engine[16] = {-1, -1, -1, -1, -1, -1, -1, -1,
                                            -1, -1, -1, -1, -1, -1, -1, -1};
 
+void ui_process_control_queue(void) {
+    if (s_ctrl_mute_mask_pending.exchange(false, std::memory_order_acquire)) {
+        uint16_t mask = s_ctrl_mute_mask.load(std::memory_order_acquire);
+        uint32_t tEnq = s_ctrl_mute_mask_enqueue_ms.exchange(0, std::memory_order_acq_rel);
+        if (tEnq) {
+            P4_LOG_PRINTF("[LAT][MUTE_MASK] enqueue->udp=%lu ms mask=0x%04X\n",
+                          (unsigned long)(millis() - tEnq), (unsigned)mask);
+        }
+        udp_send_mute_mask(mask);
+    }
+
+    if (s_ctrl_solo_mask_pending.exchange(false, std::memory_order_acquire)) {
+        uint16_t mask = s_ctrl_solo_mask.load(std::memory_order_acquire);
+        uint32_t tEnq = s_ctrl_solo_mask_enqueue_ms.exchange(0, std::memory_order_acq_rel);
+        if (tEnq) {
+            P4_LOG_PRINTF("[LAT][SOLO_MASK] enqueue->udp=%lu ms mask=0x%04X\n",
+                          (unsigned long)(millis() - tEnq), (unsigned)mask);
+        }
+        udp_send_solo_mask(mask);
+    }
+
+    uint16_t dirty = s_ctrl_mute_dirty.exchange(0, std::memory_order_acquire);
+    if (dirty) {
+        uint16_t values = s_ctrl_mute_values.load(std::memory_order_acquire);
+        for (uint8_t track = 0; track < 16; track++) {
+            uint16_t bit = (uint16_t)(1U << track);
+            if (dirty & bit) {
+                uint32_t tEnq = s_ctrl_mute_enqueue_ms[track].exchange(0, std::memory_order_acq_rel);
+                if (tEnq) {
+                    P4_LOG_PRINTF("[LAT][MUTE] enqueue->udp=%lu ms t=%u\n",
+                                  (unsigned long)(millis() - tEnq), (unsigned)track);
+                }
+                udp_send_mute(track, (values & bit) != 0);
+            }
+        }
+    }
+}
+
 void ui_process_pad_queue(void) {
     uint32_t now_ms = millis();
     uint8_t t = s_pad_qt.load(std::memory_order_relaxed);
@@ -6448,8 +6549,12 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
                 s_16l_src_pad = (uint8_t)p;   // remember for future 16L
             }
             s_pad_inst_focus_pad = (uint8_t)p;
-            enqueue_pad_event(send_pad, send_vel);
-            ui_pad_flash_start(p, vel);
+            if (send_pad < 16 && !p4.track_muted[send_pad]) {
+                enqueue_pad_event(send_pad, send_vel);
+                ui_pad_flash_start(p, vel);
+            } else {
+                s_pad_flash_vel[p] = 0;
+            }
 
             // Arm note-repeat timer
             s_pad_repeat_next_ms[p] = (nr_interval && s_nr_idx)
@@ -6468,8 +6573,12 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
                 send_vel = (uint8_t)(((p + 1) * 127) / 16);
                 if (send_vel < 8) send_vel = 8;
             }
-            enqueue_pad_event(send_pad, send_vel);
-            ui_pad_flash_start(p, vel);
+            if (send_pad < 16 && !p4.track_muted[send_pad]) {
+                enqueue_pad_event(send_pad, send_vel);
+                ui_pad_flash_start(p, vel);
+            } else {
+                s_pad_flash_vel[p] = 0;
+            }
             // Schedule next tick; if we fell behind, catch up without drifting
             // into the far past (e.g. after a blocked frame).
             unsigned long next = s_pad_repeat_next_ms[p] + nr_interval;
