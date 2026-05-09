@@ -187,8 +187,32 @@ static inline void apply_master_step_sync(int step) {
     int normalized = clamp_int(step, 0, 63) % 16;
     p4.current_step = normalized;
     lastMasterStepSyncMs = millis();
+    // Keep a phase-locked local clock and slightly compensate network lag
+    // so UI step follows audio closer on remote-master sessions.
+    static uint32_t s_stepPhaseUs = 0;
+    float bpm = p4.bpm_int + p4.bpm_frac * 0.1f;
+    if (bpm < 40.0f) bpm = 120.0f;
+    uint32_t stepIntervalUs = (uint32_t)(60000000.0f / bpm / 4.0f);
+    // Tempo-aware compensation: bias a bit earlier so ACTIVE STEP UI aligns
+    // better with perceived audio onset on WiFi sessions.
+    uint32_t compUs = (stepIntervalUs * 45U) / 100U;
+    const uint32_t COMP_MIN_US = 24000;
+    const uint32_t COMP_MAX_US = 90000;
+    if (compUs < COMP_MIN_US) compUs = COMP_MIN_US;
+    if (compUs > COMP_MAX_US) compUs = COMP_MAX_US;
+    if (compUs > (stepIntervalUs * 3U) / 5U) compUs = (stepIntervalUs * 3U) / 5U;
+    s_stepPhaseUs = micros() - compUs;
+    // Share phase with local runner (function-static in run_local_step_clock).
+    extern uint32_t udp_step_phase_us_bridge;
+    extern bool udp_step_phase_valid_bridge;
+    udp_step_phase_us_bridge = s_stepPhaseUs;
+    udp_step_phase_valid_bridge = true;
     uart_send_to_s3(MSG_SYSTEM, SYS_STEP, (uint8_t)normalized);
 }
+
+// Bridge vars used between apply_master_step_sync() and run_local_step_clock().
+uint32_t udp_step_phase_us_bridge = 0;
+bool udp_step_phase_valid_bridge = false;
 
 static bool fetch_pattern_http(int pattern) {
     if (!wifiConnected) return false;
@@ -1405,11 +1429,9 @@ bool udp_master_connected(void) { return masterAlive; }
 static void run_local_step_clock(unsigned long now) {
     static uint32_t lastStepUs = 0;
     static bool prev_playing = false;
-
-    // Master step sync is authoritative while fresh; local clock is fallback.
-    if (masterAlive && (now - lastMasterStepSyncMs) < 1200) {
-        prev_playing = p4.is_playing;
-        return;
+    if (udp_step_phase_valid_bridge) {
+        lastStepUs = udp_step_phase_us_bridge;
+        udp_step_phase_valid_bridge = false;
     }
 
     if (!p4.is_playing) {
@@ -1420,7 +1442,6 @@ static void run_local_step_clock(unsigned long now) {
     if (!prev_playing) {
         lastStepUs = micros();
         prev_playing = true;
-        p4.current_step = 0;
         uart_send_to_s3(MSG_SYSTEM, SYS_STEP, (uint8_t)p4.current_step);
     }
     float bpm = p4.bpm_int + p4.bpm_frac * 0.1f;

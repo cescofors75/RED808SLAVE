@@ -581,7 +581,7 @@ static void xtra_refresh_panel(void);
 static uint8_t xtra_backing_pad_for_slot(int slot) {
     if (slot < 0) slot = 0;
     if (slot > 3) slot = 3;
-    return (uint8_t)(12 + slot);
+    return (uint8_t)(16 + slot);
 }
 
 static void xtra_begin_load_for_slot(int slot) {
@@ -589,8 +589,7 @@ static void xtra_begin_load_for_slot(int slot) {
     s_xtra_pending_slot = slot;
     s_sd_for_xtra = true;
     p4sd.selected_is_midi = false;
-    p4sd.selected_pad = s_xtra_slots[slot].used ? s_xtra_slots[slot].pad : xtra_backing_pad_for_slot(slot);
-    if (p4sd.selected_pad > 15) p4sd.selected_pad = xtra_backing_pad_for_slot(slot);
+    p4sd.selected_pad = xtra_backing_pad_for_slot(slot);
     ui_show_toast("XTRA: elige WAV y LOAD", RED808_CYAN);
     ui_navigate_to(9);
 }
@@ -634,7 +633,8 @@ static void xtra_load_state(void) {
         int parsed = sscanf(line.c_str(), "%d,%u,%23[^\n]", &used, &pad, name);
         if (parsed >= 2) {
             s_xtra_slots[idx].used = (used != 0);
-            s_xtra_slots[idx].pad = (uint8_t)constrain((int)pad, 0, 15);
+            // Enforce fixed XTRA backing slots (16..19) regardless of legacy file values.
+            s_xtra_slots[idx].pad = xtra_backing_pad_for_slot(idx);
             if (parsed == 3) {
                 strncpy(s_xtra_slots[idx].name, name, sizeof(s_xtra_slots[idx].name) - 1);
                 s_xtra_slots[idx].name[sizeof(s_xtra_slots[idx].name) - 1] = '\0';
@@ -679,7 +679,7 @@ static void xtra_delete_cb(lv_event_t* e) {
     if (slot < 0 || slot >= 4) return;
     if (!s_xtra_slots[slot].used) return;
     uint8_t pad = s_xtra_slots[slot].pad;
-    if (pad < 16) {
+    if (pad < 24) {
         pad_inst_unload_daisy_sample(pad);
     }
     memset(&s_xtra_slots[slot], 0, sizeof(XtraPadSlot));
@@ -694,11 +694,9 @@ static void xtra_slot_cb(lv_event_t* e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     if (s_xtra_slots[slot].used) {
         uint8_t pad = s_xtra_slots[slot].pad;
-        if (pad < 16) {
+        if (pad < 24) {
             // Trigger immediately from XTRA screen (no dependency on LIVE queue path).
             if (p4.wifi_connected || p4.master_connected) udp_send_trigger(pad, 110);
-            uart_send_to_s3(MSG_TOUCH_CMD, TCMD_PAD_TAP, pad);
-            dsp_notify_pad(pad, 110);
             ui_show_toast("XTRA trigger", RED808_SUCCESS);
         }
         return;
@@ -4560,13 +4558,6 @@ static void sd_load_btn_cb(lv_event_t* e) {
             strncpy(slot.name, p4sd.selected_file, sizeof(slot.name) - 1);
             slot.name[sizeof(slot.name) - 1] = '\0';
             trim_wav_extension(slot.name);
-            // Ensure backing pad is sampler so manual XTRA trigger always plays sample.
-            s_pad_inst_sel[backingPad] = 0;
-            s_pad_inst_pending[backingPad] = 0;
-            s_pad_inst_local_ms[backingPad] = millis();
-            if (udp_wifi_connected() || udp_master_connected()) {
-                udp_send_set_track_engine(backingPad, -1);
-            }
             xtra_save_state();
             xtra_refresh_panel();
             s_xtra_pending_slot = -1;
