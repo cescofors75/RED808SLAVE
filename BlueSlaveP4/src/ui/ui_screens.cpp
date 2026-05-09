@@ -12,6 +12,7 @@
 #include "config.h"
 #include <Arduino.h>
 #include <SD_MMC.h>
+#include <SPIFFS.h>
 #include <WiFi.h>
 #include <atomic>
 #include <math.h>
@@ -528,6 +529,11 @@ static lv_obj_t* grid_inst_prev_btn = NULL;
 static lv_obj_t* grid_inst_next_btn = NULL;
 static lv_obj_t* grid_inst_lbl = NULL;
 static lv_obj_t* grid_inst_edit_btn = NULL;
+static lv_obj_t* grid_xtra_btns[4] = {};
+static lv_obj_t* grid_xtra_lbls[4] = {};
+static lv_obj_t* grid_xtra_change_btns[4] = {};
+static lv_obj_t* grid_xtra_delete_btns[4] = {};
+static int s_xtra_pending_slot = -1;
 static lv_obj_t* s_pad_inst_modal = NULL;
 static lv_obj_t* s_pad_inst_modal_pad_lbl = NULL;
 static lv_obj_t* s_pad_inst_modal_inst_lbl = NULL;
@@ -555,6 +561,150 @@ static uint8_t s_pad_kit_assigned[16] = {0};
 // deduplicar envíos: solo se manda CMD_SYNTH_PRESET si difiere.
 static int8_t s_engine_kit_last_applied[3] = {-1,-1,-1};
 static volatile uint8_t s_pad_inst_focus_pad = 0;
+static unsigned long s_pad_inst_local_ms[16] = {};
+static const unsigned long PAD_INST_OWNERSHIP_MS = 1800;
+static void pad_inst_modal_refresh(void);
+static bool pad_inst_unload_daisy_sample(uint8_t pad);
+
+struct XtraPadSlot {
+    bool used;
+    uint8_t pad;
+    char name[24];
+};
+
+static XtraPadSlot s_xtra_slots[4] = {};
+static const char* XTRA_PADS_STATE_FILE = "/xtra_pads.txt";
+static bool s_sd_for_xtra = false;
+
+static void xtra_refresh_panel(void);
+
+static uint8_t xtra_backing_pad_for_slot(int slot) {
+    if (slot < 0) slot = 0;
+    if (slot > 3) slot = 3;
+    return (uint8_t)(12 + slot);
+}
+
+static void xtra_begin_load_for_slot(int slot) {
+    if (slot < 0 || slot >= 4) return;
+    s_xtra_pending_slot = slot;
+    s_sd_for_xtra = true;
+    p4sd.selected_is_midi = false;
+    p4sd.selected_pad = s_xtra_slots[slot].used ? s_xtra_slots[slot].pad : xtra_backing_pad_for_slot(slot);
+    if (p4sd.selected_pad > 15) p4sd.selected_pad = xtra_backing_pad_for_slot(slot);
+    ui_show_toast("XTRA: elige WAV y LOAD", RED808_CYAN);
+    ui_navigate_to(9);
+}
+
+static void trim_wav_extension(char* name) {
+    if (!name) return;
+    size_t n = strlen(name);
+    if (n > 4) {
+        const char* ext = name + n - 4;
+        if (strcasecmp(ext, ".wav") == 0) {
+            name[n - 4] = '\0';
+        }
+    }
+}
+
+static void xtra_save_state(void) {
+    File f = SPIFFS.open(XTRA_PADS_STATE_FILE, FILE_WRITE);
+    if (!f) return;
+    for (int i = 0; i < 4; i++) {
+        const XtraPadSlot& s = s_xtra_slots[i];
+        f.printf("%d,%u,%s\n", s.used ? 1 : 0, (unsigned)s.pad, s.name);
+    }
+    f.close();
+}
+
+static void xtra_load_state(void) {
+    memset(s_xtra_slots, 0, sizeof(s_xtra_slots));
+    File f = SPIFFS.open(XTRA_PADS_STATE_FILE, FILE_READ);
+    if (!f) return;
+    int idx = 0;
+    while (f.available() && idx < 4) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0) {
+            idx++;
+            continue;
+        }
+        int used = 0;
+        unsigned pad = 0;
+        char name[24] = {0};
+        int parsed = sscanf(line.c_str(), "%d,%u,%23[^\n]", &used, &pad, name);
+        if (parsed >= 2) {
+            s_xtra_slots[idx].used = (used != 0);
+            s_xtra_slots[idx].pad = (uint8_t)constrain((int)pad, 0, 15);
+            if (parsed == 3) {
+                strncpy(s_xtra_slots[idx].name, name, sizeof(s_xtra_slots[idx].name) - 1);
+                s_xtra_slots[idx].name[sizeof(s_xtra_slots[idx].name) - 1] = '\0';
+                trim_wav_extension(s_xtra_slots[idx].name);
+            }
+        }
+        idx++;
+    }
+    f.close();
+}
+
+static void xtra_refresh_panel(void) {
+    for (int i = 0; i < 4; i++) {
+        if (!grid_xtra_btns[i] || !grid_xtra_lbls[i]) continue;
+        if (s_xtra_slots[i].used) {
+            lv_obj_set_style_bg_color(grid_xtra_btns[i], RED808_ACCENT, 0);
+            lv_obj_set_style_border_color(grid_xtra_btns[i], RED808_CYAN, 0);
+            lv_obj_set_style_bg_opa(grid_xtra_btns[i], LV_OPA_COVER, 0);
+            lv_label_set_text(grid_xtra_lbls[i],
+                              s_xtra_slots[i].name[0] ? s_xtra_slots[i].name : "XTRA");
+            if (grid_xtra_change_btns[i]) lv_obj_clear_state(grid_xtra_change_btns[i], LV_STATE_DISABLED);
+            if (grid_xtra_delete_btns[i]) lv_obj_clear_state(grid_xtra_delete_btns[i], LV_STATE_DISABLED);
+        } else {
+            lv_obj_set_style_bg_color(grid_xtra_btns[i], RED808_SURFACE, 0);
+            lv_obj_set_style_border_color(grid_xtra_btns[i], RED808_BORDER, 0);
+            lv_obj_set_style_bg_opa(grid_xtra_btns[i], LV_OPA_80, 0);
+            lv_label_set_text(grid_xtra_lbls[i], "+ ADD");
+            if (grid_xtra_change_btns[i]) lv_obj_add_state(grid_xtra_change_btns[i], LV_STATE_DISABLED);
+            if (grid_xtra_delete_btns[i]) lv_obj_add_state(grid_xtra_delete_btns[i], LV_STATE_DISABLED);
+        }
+    }
+}
+
+static void xtra_change_cb(lv_event_t* e) {
+    int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    if (slot < 0 || slot >= 4) return;
+    xtra_begin_load_for_slot(slot);
+}
+
+static void xtra_delete_cb(lv_event_t* e) {
+    int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    if (slot < 0 || slot >= 4) return;
+    if (!s_xtra_slots[slot].used) return;
+    uint8_t pad = s_xtra_slots[slot].pad;
+    if (pad < 16) {
+        pad_inst_unload_daisy_sample(pad);
+    }
+    memset(&s_xtra_slots[slot], 0, sizeof(XtraPadSlot));
+    xtra_save_state();
+    xtra_refresh_panel();
+    ui_show_toast("XTRA borrado", RED808_WARNING);
+}
+
+static void xtra_slot_cb(lv_event_t* e) {
+    int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    if (slot < 0 || slot >= 4) return;
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    if (s_xtra_slots[slot].used) {
+        uint8_t pad = s_xtra_slots[slot].pad;
+        if (pad < 16) {
+            // Trigger immediately from XTRA screen (no dependency on LIVE queue path).
+            if (p4.wifi_connected || p4.master_connected) udp_send_trigger(pad, 110);
+            uart_send_to_s3(MSG_TOUCH_CMD, TCMD_PAD_TAP, pad);
+            dsp_notify_pad(pad, 110);
+            ui_show_toast("XTRA trigger", RED808_SUCCESS);
+        }
+        return;
+    }
+    xtra_begin_load_for_slot(slot);
+}
 
 // Devuelve idx 0..2 si el instrumento es engine drum (808/909/505), -1 si no.
 static int8_t pad_inst_drum_engine_idx(uint8_t inst_idx) {
@@ -575,6 +725,20 @@ static int8_t pad_inst_engine_code(uint8_t inst_idx) {
         case 6: return 6; // FM2
         case 7: return 5; // SH101
         default: return -1;
+    }
+}
+
+static uint8_t pad_inst_idx_from_engine_code(int8_t engine) {
+    switch (engine) {
+        case -1: return 0; // Sampler
+        case 0: return 1;  // 808
+        case 1: return 2;  // 909
+        case 2: return 3;  // 505
+        case 3: return 4;  // 303
+        case 4: return 5;  // WT
+        case 6: return 6;  // FM2
+        case 5: return 7;  // SH101
+        default: return 0;
     }
 }
 
@@ -599,12 +763,42 @@ static void pad_inst_apply_to_master(uint8_t pad) {
     uint8_t inst = s_pad_inst_sel[pad];
     if (inst > 7) inst = 0;
     int8_t engine = pad_inst_engine_code(inst);
+    s_pad_inst_local_ms[pad] = millis();
     if (udp_wifi_connected() || udp_master_connected()) {
         udp_send_set_track_engine(pad, engine);
         // Audible feedback to confirm assignment. Hand the trigger over to the
         // pad queue so the melodic note-off scheduler also runs (avoids 303
         // hanging after the assignment-confirmation tap).
         enqueue_pad_event(pad, 110);
+    }
+}
+
+void ui_pad_sound_sync_track_engines(const int8_t engines[16]) {
+    if (!engines) return;
+    unsigned long nowMs = millis();
+    bool anyChanged = false;
+    for (int pad = 0; pad < 16; pad++) {
+        if (nowMs - s_pad_inst_local_ms[pad] < PAD_INST_OWNERSHIP_MS) {
+            continue;
+        }
+        uint8_t incomingInst = pad_inst_idx_from_engine_code(engines[pad]);
+        uint8_t oldAssigned = s_pad_inst_sel[pad];
+        if (oldAssigned == incomingInst) {
+            continue;
+        }
+        s_pad_inst_sel[pad] = incomingInst;
+        if (s_pad_inst_pending[pad] == oldAssigned) {
+            // Keep pending in lockstep only when user isn't editing that pad.
+            s_pad_inst_pending[pad] = incomingInst;
+        }
+        pad_inst_refresh_pad_badge((uint8_t)pad);
+        anyChanged = true;
+    }
+    if (anyChanged) {
+        pad_inst_refresh_controls();
+        if (s_pad_inst_modal) {
+            pad_inst_modal_refresh();
+        }
     }
 }
 
@@ -708,6 +902,11 @@ static void pad_touch_cb(lv_event_t* e) {
 static void grid_nav_cb(lv_event_t* e) {
     int screen_id = (int)(intptr_t)lv_event_get_user_data(e);
     ui_navigate_to(screen_id);
+}
+
+static void live_step_nav_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    ui_navigate_to(3);
 }
 
 static void grid_sync_cb(lv_event_t* e) {
@@ -1627,29 +1826,23 @@ static void create_live_screen(void) {
     lv_obj_align(grid_home_vol_lbl, LV_ALIGN_BOTTOM_MID, 0, -10);
     live_home_panels[live_home_panel_count++] = home_cell;
 
-    // --- Row 1: Screen Navigation ---
-    // v2.6 — added PIANO as 4th nav (id=10). SYNC button moved to [7,2].
-    static const char* nav_texts[] = {"STEPS", "FX", "MIXER", "PIANO"};
-    static const int   nav_screens[] = {3, 8, 7, 10};
-    lv_color_t         nav_colors[] = {RED808_CYAN, RED808_INFO, RED808_SUCCESS, RED808_ACCENT};
-    for (int i = 0; i < 4; i++) {
-        b = create_ctrl_btn(scr_live, COL_X(4 + i), ROW_Y(1), CW, CH,
+    // --- Row 1: STEP + Navigation ---
+    // [5..7,1] Screen navigation
+    static const char* nav_texts[] = {"FX", "MIXER", "PIANO"};
+    static const int   nav_screens[] = {8, 7, 10};
+    lv_color_t         nav_colors[] = {RED808_INFO, RED808_SUCCESS, RED808_ACCENT};
+    for (int i = 0; i < 3; i++) {
+        b = create_ctrl_btn(scr_live, COL_X(5 + i), ROW_Y(1), CW, CH,
                              nav_texts[i], nav_colors[i], &lv_font_montserrat_20);
         lv_obj_add_event_cb(b, grid_nav_cb, LV_EVENT_CLICKED, (void*)(intptr_t)nav_screens[i]);
         live_home_panels[live_home_panel_count++] = b;
     }
 
-    // --- Row 2: System ---
-    // [4,2] SD CARD
+    // --- Row 2: XTRA / PAD SOUND / PAD GRID / SYNC ---
+    // [4,2] XTRA PADS
     b = create_ctrl_btn(scr_live, COL_X(4), ROW_Y(2), CW, CH,
-                         LV_SYMBOL_DRIVE "\nSD", RED808_CYAN, &lv_font_montserrat_18);
-    lv_obj_add_event_cb(b, grid_nav_cb, LV_EVENT_CLICKED, (void*)(intptr_t)9);
-    live_home_panels[live_home_panel_count++] = b;
-
-    // [5,2] THEME
-    b = create_ctrl_btn(scr_live, COL_X(5), ROW_Y(2), CW, CH,
-                         "THEME\n" LV_SYMBOL_RIGHT, RED808_ACCENT2, &lv_font_montserrat_18);
-    lv_obj_add_event_cb(b, grid_theme_cb, LV_EVENT_CLICKED, NULL);
+                         "XTRA\nPADS", RED808_INFO, &lv_font_montserrat_20);
+    lv_obj_add_event_cb(b, grid_nav_cb, LV_EVENT_CLICKED, (void*)(intptr_t)6);
     live_home_panels[live_home_panel_count++] = b;
 
     // [6,2] PAD GRID — selector de visualización (1/2/4/8/16 pads)
@@ -1661,8 +1854,7 @@ static void create_live_screen(void) {
     lv_obj_add_event_cb(grid_nr_btn, grid_pad_mode_cb, LV_EVENT_CLICKED, NULL);
     live_home_panels[live_home_panel_count++] = grid_nr_btn;
 
-    // [7,2] SYNC PADS toggle — flash pads in sync with sequencer steps.
-    // Replaces the old "16 LVL" cell (was unused / placeholder).
+    // [7,2] SYNC PADS ON/OFF
     grid_sync_btn = create_ctrl_btn(scr_live, COL_X(7), ROW_Y(2), CW, CH,
                                     sync_pads_active ? "SYNC\nON" : "SYNC\nOFF",
                                     sync_pads_active ? RED808_SUCCESS : RED808_SURFACE,
@@ -1722,19 +1914,21 @@ static void create_live_screen(void) {
     lv_obj_set_style_text_color(grid_vol_lbl, RED808_ACCENT, 0);
     lv_obj_align(grid_vol_lbl, LV_ALIGN_CENTER, 0, -12);
 
-    // [5,3] STEP ACTIVO + mini secuencer
+    // [4,1] STEP ACTIVO + mini secuencer
     lv_obj_t* step_panel = lv_obj_create(scr_live);
     lv_obj_set_size(step_panel, CW, CH);
-    lv_obj_set_pos(step_panel, COL_X(5), ROW_Y(3));
+    lv_obj_set_pos(step_panel, COL_X(4), ROW_Y(1));
     lv_obj_set_style_radius(step_panel, 14, 0);
     lv_obj_set_style_bg_color(step_panel, RED808_PANEL, 0);
     lv_obj_set_style_bg_grad_color(step_panel, RED808_SURFACE, 0);
     lv_obj_set_style_bg_grad_dir(step_panel, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_bg_opa(step_panel, LV_OPA_90, 0);
     lv_obj_set_style_border_width(step_panel, 1, 0);
-    lv_obj_set_style_border_color(step_panel, RED808_BORDER, 0);
+    lv_obj_set_style_border_color(step_panel, RED808_CYAN, 0);
     lv_obj_set_style_pad_all(step_panel, 6, 0);
     lv_obj_clear_flag(step_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(step_panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(step_panel, live_step_nav_cb, LV_EVENT_CLICKED, NULL);
     live_home_panels[live_home_panel_count++] = step_panel;
 
     lv_obj_t* step_title = lv_label_create(step_panel);
@@ -1770,10 +1964,10 @@ static void create_live_screen(void) {
         lv_obj_clear_flag(grid_step_dots[i], LV_OBJ_FLAG_CLICKABLE);
     }
 
-    // [6,3] Instrumentos PADS (casilla libre)
+    // [5,2] PAD SOUND
     lv_obj_t* inst_panel = lv_obj_create(scr_live);
     lv_obj_set_size(inst_panel, CW, CH);
-    lv_obj_set_pos(inst_panel, COL_X(6), ROW_Y(3));
+    lv_obj_set_pos(inst_panel, COL_X(5), ROW_Y(2));
     lv_obj_set_style_radius(inst_panel, 14, 0);
     lv_obj_set_style_bg_color(inst_panel, RED808_PANEL, 0);
     lv_obj_set_style_bg_grad_color(inst_panel, RED808_SURFACE, 0);
@@ -1805,6 +1999,18 @@ static void create_live_screen(void) {
     lv_obj_add_event_cb(grid_inst_edit_btn, grid_pad_inst_popup_cb, LV_EVENT_CLICKED, NULL);
 
     pad_inst_refresh_controls();
+
+    // [5,3] SD CARD
+    b = create_ctrl_btn(scr_live, COL_X(5), ROW_Y(3), CW, CH,
+                         LV_SYMBOL_DRIVE "\nSD", RED808_CYAN, &lv_font_montserrat_18);
+    lv_obj_add_event_cb(b, grid_nav_cb, LV_EVENT_CLICKED, (void*)(intptr_t)9);
+    live_home_panels[live_home_panel_count++] = b;
+
+    // [6,3] THEME
+    b = create_ctrl_btn(scr_live, COL_X(6), ROW_Y(3), CW, CH,
+                         "THEME\n" LV_SYMBOL_RIGHT, RED808_ACCENT2, &lv_font_montserrat_18);
+    lv_obj_add_event_cb(b, grid_theme_cb, LV_EVENT_CLICKED, NULL);
+    live_home_panels[live_home_panel_count++] = b;
 
     // [7,3] BPM control
     lv_obj_t* bpm_panel = lv_obj_create(scr_live);
@@ -3754,6 +3960,7 @@ static lv_obj_t* sd_status_lbl  = NULL;
 static lv_obj_t* sd_path_lbl    = NULL;
 static lv_obj_t* sd_file_list   = NULL;
 static lv_obj_t* sd_selected_lbl = NULL;
+static lv_obj_t* sd_assign_lbl = NULL;
 static lv_obj_t* sd_pad_btns[16] = {};
 static lv_obj_t* sd_load_btn    = NULL;
 static lv_obj_t* sd_load_lbl    = NULL;
@@ -3917,6 +4124,9 @@ static void sd_mem_refresh_list(void) {
 }
 
 static void sd_refresh_source(void) {
+    if (s_sd_for_xtra) {
+        sd_source = 0;
+    }
     if (sd_source == 1) {
         sd_mem_refresh_list();
         sd_switch_panel_mode(true);
@@ -3939,6 +4149,10 @@ static void sd_mem_file_btn_cb(lv_event_t* e) {
 
 static void sd_source_btn_cb(lv_event_t* e) {
     int src = (int)(intptr_t)lv_event_get_user_data(e);
+    if (s_sd_for_xtra && src != 0) {
+        ui_show_toast("XTRA usa solo SD WAV", RED808_WARNING);
+        return;
+    }
     if (src == sd_source) return;
     sd_source = src;
     sd_mem_selected = -1;
@@ -4009,6 +4223,7 @@ static void sd_back_btn_cb(lv_event_t* e) {
 }
 
 static void sd_pad_btn_cb(lv_event_t* e) {
+    if (s_sd_for_xtra) return;
     int pad = (int)(intptr_t)lv_event_get_user_data(e);
     if (pad < 0 || pad >= 16) return;
     p4sd.selected_pad = pad;
@@ -4243,6 +4458,13 @@ static void sd_load_btn_cb(lv_event_t* e) {
     if (p4sd.selected_file[0] == '\0') return;
     if (p4sd.selected_is_midi) return;
 
+    int xtraSlot = -1;
+    if (s_xtra_pending_slot >= 0 && s_xtra_pending_slot < 4) {
+        xtraSlot = s_xtra_pending_slot;
+        // XTRA uses a fixed internal backing pad per slot to avoid user confusion.
+        p4sd.selected_pad = xtra_backing_pad_for_slot(xtraSlot);
+    }
+
     if (sd_status_lbl) {
         lv_label_set_text_fmt(sd_status_lbl, "UPLOAD PAD %02d...", p4sd.selected_pad + 1);
         lv_obj_set_style_text_color(sd_status_lbl, RED808_CYAN, 0);
@@ -4329,6 +4551,32 @@ static void sd_load_btn_cb(lv_event_t* e) {
             lv_label_set_text(sd_status_lbl, msg);
             lv_obj_set_style_text_color(sd_status_lbl, RED808_SUCCESS, 0);
         }
+
+        if (xtraSlot >= 0 && xtraSlot < 4) {
+            XtraPadSlot& slot = s_xtra_slots[xtraSlot];
+            uint8_t backingPad = xtra_backing_pad_for_slot(xtraSlot);
+            slot.used = true;
+            slot.pad = backingPad;
+            strncpy(slot.name, p4sd.selected_file, sizeof(slot.name) - 1);
+            slot.name[sizeof(slot.name) - 1] = '\0';
+            trim_wav_extension(slot.name);
+            // Ensure backing pad is sampler so manual XTRA trigger always plays sample.
+            s_pad_inst_sel[backingPad] = 0;
+            s_pad_inst_pending[backingPad] = 0;
+            s_pad_inst_local_ms[backingPad] = millis();
+            if (udp_wifi_connected() || udp_master_connected()) {
+                udp_send_set_track_engine(backingPad, -1);
+            }
+            xtra_save_state();
+            xtra_refresh_panel();
+            s_xtra_pending_slot = -1;
+            s_sd_for_xtra = false;
+            ui_show_toast("XTRA cargado", RED808_SUCCESS);
+            ui_navigate_to(6);
+            return;
+        }
+
+        // Normal SD->Daisy upload path (non-XTRA)
     } else {
         char msg[64];
         if (!write_ok) snprintf(msg, sizeof(msg), "Upload cortado");
@@ -4343,6 +4591,19 @@ static void sd_load_btn_cb(lv_event_t* e) {
 
 static void sd_refresh_ui(void) {
     if (!sd_file_list) return;
+
+    if (sd_assign_lbl) {
+        lv_label_set_text(sd_assign_lbl, s_sd_for_xtra ? "XTRA SLOT TARGET" : "ASSIGN TO PAD");
+    }
+    for (int i = 0; i < 16; i++) {
+        if (!sd_pad_btns[i]) continue;
+        if (s_sd_for_xtra) lv_obj_add_flag(sd_pad_btns[i], LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_clear_flag(sd_pad_btns[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (sd_load_lbl) {
+        lv_label_set_text(sd_load_lbl,
+            s_sd_for_xtra ? LV_SYMBOL_UPLOAD "  LOAD XTRA" : LV_SYMBOL_UPLOAD "  LOAD TO PAD");
+    }
     lv_obj_clean(sd_file_list);
 
     // ── MEM branch: list P4's own /mid/*.mid from SPIFFS ────────────────
@@ -4601,11 +4862,11 @@ static void create_sdcard_screen(void) {
     lv_obj_clear_flag(sd_wav_section, LV_OBJ_FLAG_SCROLLABLE);
 
     // "ASSIGN TO PAD" title
-    lv_obj_t* assign_lbl = lv_label_create(sd_wav_section);
-    lv_label_set_text(assign_lbl, "ASSIGN TO PAD");
-    lv_obj_set_style_text_font(assign_lbl, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(assign_lbl, RED808_ACCENT, 0);
-    lv_obj_set_pos(assign_lbl, 8, 4);
+    sd_assign_lbl = lv_label_create(sd_wav_section);
+    lv_label_set_text(sd_assign_lbl, "ASSIGN TO PAD");
+    lv_obj_set_style_text_font(sd_assign_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(sd_assign_lbl, RED808_ACCENT, 0);
+    lv_obj_set_pos(sd_assign_lbl, 8, 4);
 
     // 4x4 pad grid — fit within RIGHT_W
     int pad_gap = 6;
@@ -6117,7 +6378,82 @@ static void create_piano_params_screen(void) {
 // PERFORMANCE SCREEN (placeholder)
 // =============================================================================
 static void create_performance_screen(void) {
-    scr_performance = NULL;  // unused screen — stub
+    scr_performance = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr_performance, RED808_BG, 0);
+    lv_obj_clear_flag(scr_performance, LV_OBJ_FLAG_SCROLLABLE);
+    ui_create_header(scr_performance);
+
+    int W = ui_layout_w();
+
+    lv_obj_t* title = lv_label_create(scr_performance);
+    lv_label_set_text(title, "XTRA PADS");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_color(title, RED808_CYAN, 0);
+    lv_obj_set_pos(title, 20, 72);
+
+    lv_obj_t* sub = lv_label_create(scr_performance);
+    lv_label_set_text(sub, "Banco local por P4 (sin asignacion a los 16 pads)");
+    lv_obj_set_style_text_font(sub, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(sub, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(sub, 20, 114);
+
+    lv_obj_t* hint = lv_label_create(scr_performance);
+    lv_label_set_text(hint, "Tap: suena. CAMBIAR: carga WAV. BORRAR: elimina slot.");
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(hint, RED808_WARNING, 0);
+    lv_obj_set_pos(hint, 20, 142);
+
+    const int start_x = 20;
+    const int start_y = 180;
+    const int pad_w = (W - 20 * 2 - 16) / 2;
+    const int pad_h = 150;
+    for (int i = 0; i < 4; i++) {
+        int col = i % 2;
+        int row = i / 2;
+        grid_xtra_btns[i] = lv_btn_create(scr_performance);
+        int main_w = pad_w - 96;
+        if (main_w < 120) main_w = 120;
+        lv_obj_set_size(grid_xtra_btns[i], main_w, pad_h);
+        lv_obj_set_pos(grid_xtra_btns[i], start_x + col * (pad_w + 16), start_y + row * (pad_h + 14));
+        lv_obj_set_style_radius(grid_xtra_btns[i], 12, 0);
+        lv_obj_set_style_border_width(grid_xtra_btns[i], 2, 0);
+        lv_obj_set_style_bg_opa(grid_xtra_btns[i], LV_OPA_80, 0);
+        lv_obj_add_event_cb(grid_xtra_btns[i], xtra_slot_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+
+        grid_xtra_lbls[i] = lv_label_create(grid_xtra_btns[i]);
+        lv_label_set_text(grid_xtra_lbls[i], "+ ADD");
+        lv_obj_set_width(grid_xtra_lbls[i], main_w - 14);
+        lv_obj_set_style_text_font(grid_xtra_lbls[i], &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_align(grid_xtra_lbls[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(grid_xtra_lbls[i]);
+
+        int card_x = start_x + col * (pad_w + 16);
+        int card_y = start_y + row * (pad_h + 14);
+        int side_x = card_x + main_w + 8;
+
+        grid_xtra_change_btns[i] = lv_btn_create(scr_performance);
+        lv_obj_set_size(grid_xtra_change_btns[i], 88, 68);
+        lv_obj_set_pos(grid_xtra_change_btns[i], side_x, card_y);
+        apply_control_button_style(grid_xtra_change_btns[i], RED808_CYAN, false, 8);
+        lv_obj_add_event_cb(grid_xtra_change_btns[i], xtra_change_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        lv_obj_t* ch_lbl = lv_label_create(grid_xtra_change_btns[i]);
+        lv_label_set_text(ch_lbl, "CAMBIAR");
+        lv_obj_set_style_text_font(ch_lbl, &lv_font_montserrat_12, 0);
+        lv_obj_center(ch_lbl);
+
+        grid_xtra_delete_btns[i] = lv_btn_create(scr_performance);
+        lv_obj_set_size(grid_xtra_delete_btns[i], 88, 68);
+        lv_obj_set_pos(grid_xtra_delete_btns[i], side_x, card_y + pad_h - 68);
+        apply_control_button_style(grid_xtra_delete_btns[i], RED808_WARNING, false, 8);
+        lv_obj_add_event_cb(grid_xtra_delete_btns[i], xtra_delete_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        lv_obj_t* del_lbl = lv_label_create(grid_xtra_delete_btns[i]);
+        lv_label_set_text(del_lbl, "BORRAR");
+        lv_obj_set_style_text_font(del_lbl, &lv_font_montserrat_12, 0);
+        lv_obj_center(del_lbl);
+    }
+
+    xtra_load_state();
+    xtra_refresh_panel();
 }
 
 // =============================================================================
@@ -6154,7 +6490,7 @@ static void ui_reload_themed_screens(void) {
     if (scr_fx)          { lv_obj_del(scr_fx);          scr_fx          = NULL; }
     if (scr_volumes)     { lv_obj_del(scr_volumes);     scr_volumes     = NULL; }
     if (scr_sdcard)      { lv_obj_del(scr_sdcard);      scr_sdcard      = NULL; }
-    // scr_performance is NULL (stubbed)
+    if (scr_performance) { lv_obj_del(scr_performance); scr_performance = NULL; }
 
     // Clear widget pointers (prevent stale access in update functions)
     header_bar = NULL; hdr_bpm_label = NULL; hdr_pattern_label = NULL;
@@ -6266,6 +6602,7 @@ static void ui_reload_themed_screens(void) {
 
     // Restore navigation (go to live if was on unknown screen)
     int nav_to = (saved_screen == 9) ? 9 : 2;  // stay in sdcard if we were there
+    if (saved_screen == 6) nav_to = 6;
     if (saved_screen == 3) nav_to = 3;
     if (saved_screen == 7) nav_to = 7;
     if (saved_screen == 8) nav_to = 8;
@@ -6276,12 +6613,13 @@ static void ui_reload_themed_screens(void) {
 void ui_navigate_to(int screen_id) {
     lv_obj_t* targets[] = {
         scr_boot, NULL, scr_live, scr_sequencer, NULL,
-        NULL, NULL, scr_volumes, scr_fx, scr_sdcard,
+        NULL, scr_performance, scr_volumes, scr_fx, scr_sdcard,
         scr_piano,        /* 10 = PIANO (replaces stubbed performance slot) */
         scr_piano_params  /* 11 = PIANO PARAMS (synth editor) */
     };
     int count = sizeof(targets) / sizeof(targets[0]);
     if (screen_id >= 0 && screen_id < count && targets[screen_id]) {
+        if (screen_id != 9) s_sd_for_xtra = false;
         bool keep_piano_preview = s_piano_play_active &&
             ((active_screen == 10 && screen_id == 11) || (active_screen == 11 && screen_id == 10));
         // Before leaving most screens, stop active synths to prevent stuck notes.
@@ -6604,7 +6942,8 @@ void ui_update_current_screen(void) {
     static unsigned long last_active_update_ms = 0;
     uint32_t period_ms = 33;
     lv_obj_t* active = lv_scr_act();
-    if (active == scr_live || active == scr_sequencer) period_ms = 16;
+    if (active == scr_live) period_ms = 16;
+    else if (active == scr_sequencer) period_ms = 8;
     else if (active == scr_sdcard) period_ms = p4sd.needs_refresh ? 16 : 100;
     else if (active == scr_piano || active == scr_piano_params) period_ms = 50;
     if (now - last_active_update_ms < period_ms) return;

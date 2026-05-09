@@ -62,3 +62,7 @@ void ui_sequencer_load_external_pattern(const bool steps[16][64], int raw_len);
 
 // Sync pads state (called from UART handler)
 void ui_live_set_sync_p4(bool on);
+
+// Apply authoritative per-track synth engine state (track 0..15).
+// Engine mapping matches setTrackSynthEngine: -1 sampler, 0..6 synth engines.
+void ui_pad_sound_sync_track_engines(const int8_t engines[16]);

@@ -43,12 +43,14 @@ static bool sessionCleanSent = false;
 // window (the broadcast can race with our own UDP commands).
 static unsigned long lastLocalMuteMs[16] = {};
 static unsigned long lastLocalSoloMs[16] = {};
+static unsigned long lastLocalTrackVolMs[16] = {};
 // Master broadcasts state_sync every 2 s. Pick a window > broadcast period so
 // any state_sync arriving right after a P4-initiated SOLO/UNMUTE-ALL is
 // suppressed (the master already has the correct state — re-applying it just
 // causes UI flicker). Keep it below 2 s to improve responsiveness while still
 // filtering near-race packets.
 static const unsigned long LOCAL_OWNERSHIP_MS = 1800;
+static const unsigned long LOCAL_STEP_OWNERSHIP_MS = 700;
 static int pendingPatternRequest = -1;
 static unsigned long pendingPatternLastTxMs = 0;
 static uint8_t pendingPatternRetries = 0;
@@ -56,6 +58,9 @@ static bool patternRowGrid[16][64] = {};
 static uint16_t patternRowMask = 0;
 static int patternRowPattern = -1;
 static int patternRowStepCount = 16;
+static unsigned long lastLocalStepMs[16][64] = {};
+static unsigned long lastMasterStepSyncMs = 0;
+static unsigned long lastLocalFxMs[6] = {};
 
 // JSON parse buffer
 static char rxBuf[8192];
@@ -64,6 +69,61 @@ static int clamp_int(int value, int lo, int hi) {
     if (value < lo) return lo;
     if (value > hi) return hi;
     return value;
+}
+
+enum FxOwnershipIndex : int {
+    FX_OWN_FILTER_TYPE = 0,
+    FX_OWN_CUTOFF,
+    FX_OWN_RESONANCE,
+    FX_OWN_DISTORTION,
+    FX_OWN_BITCRUSH,
+    FX_OWN_SAMPLE_RATE,
+};
+
+static inline bool is_track_volume_owned_recent(int track, unsigned long nowMs) {
+    if (track < 0 || track >= 16) return false;
+    return (nowMs - lastLocalTrackVolMs[track]) < LOCAL_OWNERSHIP_MS;
+}
+
+static inline bool is_fx_owned_recent(FxOwnershipIndex idx, unsigned long nowMs) {
+    return (nowMs - lastLocalFxMs[(int)idx]) < LOCAL_OWNERSHIP_MS;
+}
+
+static inline void mark_local_track_volume(int track) {
+    if (track < 0 || track >= 16) return;
+    lastLocalTrackVolMs[track] = millis();
+}
+
+static inline void mark_local_fx(FxOwnershipIndex idx) {
+    lastLocalFxMs[(int)idx] = millis();
+}
+
+static inline void forward_fx_filter_type_to_s3(int type) {
+    uart_send_to_s3(MSG_FX, FX_FILTER_TYPE, (uint8_t)clamp_int(type, 0, 4));
+}
+
+static inline void forward_fx_cutoff_to_s3(int cutoffHz) {
+    int v = clamp_int(cutoffHz, 20, 20000);
+    uart_send_to_s3(MSG_FX, FX_CUTOFF_H, (uint8_t)((v >> 8) & 0xFF));
+    uart_send_to_s3(MSG_FX, FX_CUTOFF_L, (uint8_t)(v & 0xFF));
+}
+
+static inline void forward_fx_resonance_to_s3(int resonanceX10) {
+    uart_send_to_s3(MSG_FX, FX_RESONANCE, (uint8_t)clamp_int(resonanceX10, 10, 100));
+}
+
+static inline void forward_fx_distortion_to_s3(int distortionPct) {
+    uart_send_to_s3(MSG_FX, FX_DISTORTION, (uint8_t)clamp_int(distortionPct, 0, 100));
+}
+
+static inline void forward_fx_bitcrush_to_s3(int bits) {
+    uart_send_to_s3(MSG_FX, FX_BITCRUSH, (uint8_t)clamp_int(bits, 4, 16));
+}
+
+static inline void forward_fx_samplerate_to_s3(int sampleRateHz) {
+    int v = clamp_int(sampleRateHz, 1000, 44100);
+    uart_send_to_s3(MSG_FX, FX_SAMPLERATE_H, (uint8_t)((v >> 8) & 0xFF));
+    uart_send_to_s3(MSG_FX, FX_SAMPLERATE_L, (uint8_t)(v & 0xFF));
 }
 
 static float clamp_float(float value, float lo, float hi) {
@@ -103,6 +163,31 @@ static void decode_pattern_row_hex(const char* row, bool* dest, int stepCount) {
             dest[step] = ((value >> bit) & 0x01) != 0;
         }
     }
+}
+
+static void apply_step_ownership_window(bool steps[16][64], int stepCount) {
+    unsigned long nowMs = millis();
+    int maxStep = clamp_int(stepCount, 16, 64);
+    for (int t = 0; t < 16; t++) {
+        for (int s = 0; s < maxStep; s++) {
+            if (nowMs - lastLocalStepMs[t][s] < LOCAL_STEP_OWNERSHIP_MS) {
+                steps[t][s] = p4.steps[t][s];
+            }
+        }
+    }
+}
+
+static inline void mark_local_step_edit(int track, int step) {
+    if (track < 0 || track >= 16) return;
+    if (step < 0 || step >= 64) return;
+    lastLocalStepMs[track][step] = millis();
+}
+
+static inline void apply_master_step_sync(int step) {
+    int normalized = clamp_int(step, 0, 63) % 16;
+    p4.current_step = normalized;
+    lastMasterStepSyncMs = millis();
+    uart_send_to_s3(MSG_SYSTEM, SYS_STEP, (uint8_t)normalized);
 }
 
 static bool fetch_pattern_http(int pattern) {
@@ -262,9 +347,14 @@ static bool fetch_master_state_http(void) {
 
     JsonArray volumes = doc["trackVolumes"];
     if (volumes) {
+        unsigned long nowMs = millis();
         int track = 0;
         for (JsonVariant value : volumes) {
             if (track >= 16) break;
+            if (is_track_volume_owned_recent(track, nowMs)) {
+                track++;
+                continue;
+            }
             int vol = clamp_int(value.as<int>(), 0, 150);
             p4.track_volume[track] = vol;
             uart_send_to_s3(MSG_TRACK, TRK_VOLUME | (track & 0x0F), (uint8_t)vol);
@@ -272,16 +362,48 @@ static bool fetch_master_state_http(void) {
         }
     }
 
+    JsonArray trackSynthEngines = doc["trackSynthEngines"];
+    if (trackSynthEngines) {
+        int8_t engines[16];
+        for (int t = 0; t < 16; t++) engines[t] = -1;
+        int track = 0;
+        for (JsonVariant value : trackSynthEngines) {
+            if (track >= 16) break;
+            engines[track] = (int8_t)clamp_int(value.as<int>(), -1, 6);
+            track++;
+        }
+        ui_pad_sound_sync_track_engines(engines);
+    }
+
     JsonObject fx = doc["fx"];
     if (fx) {
-        p4.filter_type = clamp_int(fx["filterType"] | p4.filter_type, 0, 4);
-        p4.cutoff_hz = clamp_int(fx["filterCutoff"] | p4.cutoff_hz, 20, 20000);
-        float resonance = clamp_float(fx["filterResonance"] | ((float)p4.resonance_x10 / 10.0f), 1.0f, 10.0f);
-        p4.resonance_x10 = (int)(resonance * 10.0f);
-        float distortion = clamp_float(fx["distortion"] | ((float)p4.distortion_pct / 100.0f), 0.0f, 1.0f);
-        p4.distortion_pct = (int)(distortion * 100.0f);
-        p4.bitcrush_bits = clamp_int(fx["bitCrush"] | p4.bitcrush_bits, 4, 16);
-        p4.sample_rate_hz = clamp_int(fx["sampleRate"] | p4.sample_rate_hz, 1000, 48000);
+        unsigned long nowMs = millis();
+        if (!is_fx_owned_recent(FX_OWN_FILTER_TYPE, nowMs)) {
+            p4.filter_type = clamp_int(fx["filterType"] | p4.filter_type, 0, 4);
+            forward_fx_filter_type_to_s3(p4.filter_type);
+        }
+        if (!is_fx_owned_recent(FX_OWN_CUTOFF, nowMs)) {
+            p4.cutoff_hz = clamp_int(fx["filterCutoff"] | p4.cutoff_hz, 20, 20000);
+            forward_fx_cutoff_to_s3(p4.cutoff_hz);
+        }
+        if (!is_fx_owned_recent(FX_OWN_RESONANCE, nowMs)) {
+            float resonance = clamp_float(fx["filterResonance"] | ((float)p4.resonance_x10 / 10.0f), 1.0f, 10.0f);
+            p4.resonance_x10 = (int)(resonance * 10.0f);
+            forward_fx_resonance_to_s3(p4.resonance_x10);
+        }
+        if (!is_fx_owned_recent(FX_OWN_DISTORTION, nowMs)) {
+            float distortion = clamp_float(fx["distortion"] | ((float)p4.distortion_pct / 100.0f), 0.0f, 1.0f);
+            p4.distortion_pct = (int)(distortion * 100.0f);
+            forward_fx_distortion_to_s3(p4.distortion_pct);
+        }
+        if (!is_fx_owned_recent(FX_OWN_BITCRUSH, nowMs)) {
+            p4.bitcrush_bits = clamp_int(fx["bitCrush"] | p4.bitcrush_bits, 4, 16);
+            forward_fx_bitcrush_to_s3(p4.bitcrush_bits);
+        }
+        if (!is_fx_owned_recent(FX_OWN_SAMPLE_RATE, nowMs)) {
+            p4.sample_rate_hz = clamp_int(fx["sampleRate"] | p4.sample_rate_hz, 1000, 48000);
+            forward_fx_samplerate_to_s3(p4.sample_rate_hz);
+        }
     }
 
     const char* kit = doc["kit"] | "";
@@ -483,6 +605,7 @@ void udp_send_get_pattern(int pattern) {
 }
 
 void udp_send_set_step(int track, int step, bool active) {
+    mark_local_step_edit(track, step);
     char buf[96];
     snprintf(buf, sizeof(buf),
              "{\"cmd\":\"setStep\",\"track\":%d,\"step\":%d,\"active\":%s}",
@@ -564,6 +687,7 @@ void udp_send_set_live_volume(int value) {
 }
 
 void udp_send_set_track_volume(int track, int volume) {
+    mark_local_track_volume(track);
     char buf[96];
     snprintf(buf, sizeof(buf),
              "{\"cmd\":\"setTrackVolume\",\"track\":%d,\"volume\":%d}",
@@ -584,24 +708,28 @@ void udp_send_set_track_engine(int track, int engine) {
 }
 
 void udp_send_set_filter(int type) {
+    mark_local_fx(FX_OWN_FILTER_TYPE);
     char buf[64];
     snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilter\",\"type\":%d}", type);
     sendJson(buf);
 }
 
 void udp_send_set_filter_cutoff(int hz) {
+    mark_local_fx(FX_OWN_CUTOFF);
     char buf[64];
     snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterCutoff\",\"value\":%d}", hz);
     sendJson(buf);
 }
 
 void udp_send_set_filter_resonance(float val) {
+    mark_local_fx(FX_OWN_RESONANCE);
     char buf[64];
     snprintf(buf, sizeof(buf), "{\"cmd\":\"setFilterResonance\",\"value\":%.1f}", val);
     sendJson(buf);
 }
 
 void udp_send_set_distortion(float val) {
+    mark_local_fx(FX_OWN_DISTORTION);
     char buf[64];
     snprintf(buf, sizeof(buf), "{\"cmd\":\"setDistortion\",\"value\":%.2f}", val);
     sendJson(buf);
@@ -704,6 +832,9 @@ void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
         }
         case 1: {  // CRUSH macro: bit depth and sample-rate reduction, no gain boost.
             if (muted || value == 0) {
+                mark_local_fx(FX_OWN_BITCRUSH);
+                mark_local_fx(FX_OWN_SAMPLE_RATE);
+                mark_local_fx(FX_OWN_DISTORTION);
                 sendJson("{\"cmd\":\"setBitCrush\",\"value\":16}");
                 sendJson("{\"cmd\":\"setSampleRate\",\"value\":0}");
                 sendJson("{\"cmd\":\"setDistortion\",\"value\":0.0}");
@@ -712,10 +843,13 @@ void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
             int bits = clamp_int((int)(16.0f - norm * 8.0f + 0.5f), 8, 16);
             int sr = clamp_int((int)(32000.0f - norm * 22000.0f + 0.5f), 9000, 32000);
             float dist = norm * 0.18f;
+            mark_local_fx(FX_OWN_BITCRUSH);
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setBitCrush\",\"value\":%d}", bits);
             sendJson(buf);
+            mark_local_fx(FX_OWN_SAMPLE_RATE);
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setSampleRate\",\"value\":%d}", sr);
             sendJson(buf);
+            mark_local_fx(FX_OWN_DISTORTION);
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setDistortion\",\"value\":%.3f}", dist);
             sendJson(buf);
             break;
@@ -807,6 +941,10 @@ static void processJson(const char* json, int len) {
         p4.is_playing = playing;
         uart_send_to_s3(MSG_SYSTEM, SYS_PLAY_STATE, playing ? 1 : 0);
 
+        if (doc["step"].is<int>()) {
+            apply_master_step_sync(doc["step"].as<int>());
+        }
+
         float bpm = clamp_float(doc["tempo"] | (float)(p4.bpm_int + p4.bpm_frac * 0.1f), 40.0f, 240.0f);
         p4.bpm_int = (int)bpm;
         p4.bpm_frac = (int)((bpm - p4.bpm_int) * 10.0f);
@@ -828,9 +966,14 @@ static void processJson(const char* json, int len) {
 
         JsonArray volumes = doc["trackVolumes"];
         if (volumes) {
+            unsigned long nowMs = millis();
             int track = 0;
             for (JsonVariant value : volumes) {
                 if (track >= 16) break;
+                if (is_track_volume_owned_recent(track, nowMs)) {
+                    track++;
+                    continue;
+                }
                 int vol = clamp_int(value.as<int>(), 0, 150);
                 if (p4.track_volume[track] != vol) {
                     p4.track_volume[track] = vol;
@@ -840,16 +983,48 @@ static void processJson(const char* json, int len) {
             }
         }
 
+        JsonArray trackSynthEngines = doc["trackSynthEngines"];
+        if (trackSynthEngines) {
+            int8_t engines[16];
+            for (int t = 0; t < 16; t++) engines[t] = -1;
+            int track = 0;
+            for (JsonVariant value : trackSynthEngines) {
+                if (track >= 16) break;
+                engines[track] = (int8_t)clamp_int(value.as<int>(), -1, 6);
+                track++;
+            }
+            ui_pad_sound_sync_track_engines(engines);
+        }
+
         JsonObject fx = doc["fx"];
         if (fx) {
-            p4.filter_type = clamp_int(fx["filterType"] | p4.filter_type, 0, 4);
-            p4.cutoff_hz = clamp_int(fx["filterCutoff"] | p4.cutoff_hz, 20, 20000);
-            float resonance = clamp_float(fx["filterResonance"] | ((float)p4.resonance_x10 / 10.0f), 1.0f, 10.0f);
-            p4.resonance_x10 = (int)(resonance * 10.0f);
-            float distortion = clamp_float(fx["distortion"] | ((float)p4.distortion_pct / 100.0f), 0.0f, 1.0f);
-            p4.distortion_pct = (int)(distortion * 100.0f);
-            p4.bitcrush_bits = clamp_int(fx["bitCrush"] | p4.bitcrush_bits, 4, 16);
-            p4.sample_rate_hz = clamp_int(fx["sampleRate"] | p4.sample_rate_hz, 1000, 48000);
+            unsigned long nowMs = millis();
+            if (!is_fx_owned_recent(FX_OWN_FILTER_TYPE, nowMs)) {
+                p4.filter_type = clamp_int(fx["filterType"] | p4.filter_type, 0, 4);
+                forward_fx_filter_type_to_s3(p4.filter_type);
+            }
+            if (!is_fx_owned_recent(FX_OWN_CUTOFF, nowMs)) {
+                p4.cutoff_hz = clamp_int(fx["filterCutoff"] | p4.cutoff_hz, 20, 20000);
+                forward_fx_cutoff_to_s3(p4.cutoff_hz);
+            }
+            if (!is_fx_owned_recent(FX_OWN_RESONANCE, nowMs)) {
+                float resonance = clamp_float(fx["filterResonance"] | ((float)p4.resonance_x10 / 10.0f), 1.0f, 10.0f);
+                p4.resonance_x10 = (int)(resonance * 10.0f);
+                forward_fx_resonance_to_s3(p4.resonance_x10);
+            }
+            if (!is_fx_owned_recent(FX_OWN_DISTORTION, nowMs)) {
+                float distortion = clamp_float(fx["distortion"] | ((float)p4.distortion_pct / 100.0f), 0.0f, 1.0f);
+                p4.distortion_pct = (int)(distortion * 100.0f);
+                forward_fx_distortion_to_s3(p4.distortion_pct);
+            }
+            if (!is_fx_owned_recent(FX_OWN_BITCRUSH, nowMs)) {
+                p4.bitcrush_bits = clamp_int(fx["bitCrush"] | p4.bitcrush_bits, 4, 16);
+                forward_fx_bitcrush_to_s3(p4.bitcrush_bits);
+            }
+            if (!is_fx_owned_recent(FX_OWN_SAMPLE_RATE, nowMs)) {
+                p4.sample_rate_hz = clamp_int(fx["sampleRate"] | p4.sample_rate_hz, 1000, 48000);
+                forward_fx_samplerate_to_s3(p4.sample_rate_hz);
+            }
         }
 
         const char* kit = doc["kit"] | "";
@@ -908,6 +1083,7 @@ static void processJson(const char* json, int len) {
                 }
                 track++;
             }
+            apply_step_ownership_window(raw_steps, raw_len);
             ui_sequencer_load_external_pattern(raw_steps, raw_len);
         } else if (data) {
             bool nestedRows = false;
@@ -960,6 +1136,7 @@ static void processJson(const char* json, int len) {
                     idx++;
                 }
             }
+            apply_step_ownership_window(raw_steps, raw_len);
             ui_sequencer_load_external_pattern(raw_steps, raw_len);
         } else {
             p4.current_pattern = pat;
@@ -991,6 +1168,7 @@ static void processJson(const char* json, int len) {
         patternRowMask |= (uint16_t)(1U << track);
         p4.current_pattern = pat;
         if (patternRowMask == 0xFFFFU) {
+            apply_step_ownership_window(patternRowGrid, raw_len);
             ui_sequencer_load_external_pattern(patternRowGrid, raw_len);
             pendingPatternRequest = -1;
             pendingPatternRetries = 0;
@@ -1027,7 +1205,9 @@ static void processJson(const char* json, int len) {
     }
     // ----- Step update (visual tick from Master) -----
     else if (strcmp(cmd, "step_update") == 0 || strcmp(cmd, "step_sync") == 0) {
-        // P4 local clock is authoritative; ignore Master step hints.
+        if (doc["step"].is<int>()) {
+            apply_master_step_sync(doc["step"].as<int>());
+        }
     }
     // ----- Volume -----
     else if (strcmp(cmd, "volume_sync") == 0 || strcmp(cmd, "master_volume_sync") == 0 ||
@@ -1056,9 +1236,14 @@ static void processJson(const char* json, int len) {
         else if (doc["volumes"].is<JsonArray>()) arr = doc["volumes"].as<JsonArray>();
         else if (doc["data"].is<JsonArray>())    arr = doc["data"].as<JsonArray>();
         if (arr) {
+            unsigned long nowMs = millis();
             int i = 0;
             for (JsonVariant v : arr) {
                 if (i >= 16) break;
+                if (is_track_volume_owned_recent(i, nowMs)) {
+                    i++;
+                    continue;
+                }
                 p4.track_volume[i] = clamp_int(v.as<int>(), 0, 150);
                 uart_send_to_s3(MSG_TRACK, TRK_VOLUME | (i & 0x0F), (uint8_t)p4.track_volume[i]);
                 i++;
@@ -1069,30 +1254,58 @@ static void processJson(const char* json, int len) {
         int trk = doc["track"] | 0;
         int vol = clamp_int(doc["volume"] | doc["value"] | 75, 0, 150);
         if (trk >= 0 && trk < 16) {
+            unsigned long nowMs = millis();
+            if (is_track_volume_owned_recent(trk, nowMs)) {
+                return;
+            }
             p4.track_volume[trk] = vol;
             uart_send_to_s3(MSG_TRACK, TRK_VOLUME | (trk & 0x0F), (uint8_t)vol);
         }
     }
     // ----- FX -----
     else if (strcmp(cmd, "setFilter") == 0) {
-        p4.filter_type = clamp_int(doc["type"] | doc["value"] | 0, 0, 4);
+        unsigned long nowMs = millis();
+        if (!is_fx_owned_recent(FX_OWN_FILTER_TYPE, nowMs)) {
+            p4.filter_type = clamp_int(doc["type"] | doc["value"] | 0, 0, 4);
+            forward_fx_filter_type_to_s3(p4.filter_type);
+        }
     }
     else if (strcmp(cmd, "setFilterCutoff") == 0) {
-        p4.cutoff_hz = clamp_int(doc["value"] | 20000, 20, 20000);
+        unsigned long nowMs = millis();
+        if (!is_fx_owned_recent(FX_OWN_CUTOFF, nowMs)) {
+            p4.cutoff_hz = clamp_int(doc["value"] | 20000, 20, 20000);
+            forward_fx_cutoff_to_s3(p4.cutoff_hz);
+        }
     }
     else if (strcmp(cmd, "setFilterResonance") == 0) {
-        float r = clamp_float(doc["value"] | 1.0f, 1.0f, 10.0f);
-        p4.resonance_x10 = (int)(r * 10);
+        unsigned long nowMs = millis();
+        if (!is_fx_owned_recent(FX_OWN_RESONANCE, nowMs)) {
+            float r = clamp_float(doc["value"] | 1.0f, 1.0f, 10.0f);
+            p4.resonance_x10 = (int)(r * 10);
+            forward_fx_resonance_to_s3(p4.resonance_x10);
+        }
     }
     else if (strcmp(cmd, "setBitCrush") == 0) {
-        p4.bitcrush_bits = clamp_int(doc["value"] | 16, 4, 16);
+        unsigned long nowMs = millis();
+        if (!is_fx_owned_recent(FX_OWN_BITCRUSH, nowMs)) {
+            p4.bitcrush_bits = clamp_int(doc["value"] | 16, 4, 16);
+            forward_fx_bitcrush_to_s3(p4.bitcrush_bits);
+        }
     }
     else if (strcmp(cmd, "setDistortion") == 0) {
-        float d = clamp_float(doc["value"] | 0.0f, 0.0f, 1.0f);
-        p4.distortion_pct = (int)(d * 100);
+        unsigned long nowMs = millis();
+        if (!is_fx_owned_recent(FX_OWN_DISTORTION, nowMs)) {
+            float d = clamp_float(doc["value"] | 0.0f, 0.0f, 1.0f);
+            p4.distortion_pct = (int)(d * 100.0f);
+            forward_fx_distortion_to_s3(p4.distortion_pct);
+        }
     }
     else if (strcmp(cmd, "setSampleRate") == 0) {
-        p4.sample_rate_hz = clamp_int(doc["value"] | 44100, 1000, 44100);
+        unsigned long nowMs = millis();
+        if (!is_fx_owned_recent(FX_OWN_SAMPLE_RATE, nowMs)) {
+            p4.sample_rate_hz = clamp_int(doc["value"] | 44100, 1000, 44100);
+            forward_fx_samplerate_to_s3(p4.sample_rate_hz);
+        }
     }
     // ----- Pattern selection -----
     else if (strcmp(cmd, "selectPattern") == 0 || strcmp(cmd, "pattern_select") == 0 ||
@@ -1190,8 +1403,14 @@ bool udp_master_connected(void) { return masterAlive; }
 // step to S3 over UART (SYS_STEP), independent of WiFi/Master transport.
 // =============================================================================
 static void run_local_step_clock(unsigned long now) {
-    static unsigned long lastStepTime = 0;
+    static uint32_t lastStepUs = 0;
     static bool prev_playing = false;
+
+    // Master step sync is authoritative while fresh; local clock is fallback.
+    if (masterAlive && (now - lastMasterStepSyncMs) < 1200) {
+        prev_playing = p4.is_playing;
+        return;
+    }
 
     if (!p4.is_playing) {
         prev_playing = false;
@@ -1199,17 +1418,20 @@ static void run_local_step_clock(unsigned long now) {
     }
     // Edge false→true: snap the step clock to now to avoid catch-up bursts.
     if (!prev_playing) {
-        lastStepTime = now;
+        lastStepUs = micros();
         prev_playing = true;
         p4.current_step = 0;
         uart_send_to_s3(MSG_SYSTEM, SYS_STEP, (uint8_t)p4.current_step);
     }
     float bpm = p4.bpm_int + p4.bpm_frac * 0.1f;
     if (bpm < 40) bpm = 120;
-    unsigned long stepInterval = (unsigned long)(60000.0f / bpm / 4.0f); // 16ths
-    if (now - lastStepTime >= stepInterval) {
-        lastStepTime = now;
-        p4.current_step = (p4.current_step + 1) % 16;
+    uint32_t stepIntervalUs = (uint32_t)(60000000.0f / bpm / 4.0f); // 16ths
+    uint32_t nowUs = micros();
+    if ((uint32_t)(nowUs - lastStepUs) >= stepIntervalUs) {
+        do {
+            lastStepUs += stepIntervalUs;
+            p4.current_step = (p4.current_step + 1) % 16;
+        } while ((uint32_t)(nowUs - lastStepUs) >= stepIntervalUs);
         uart_send_to_s3(MSG_SYSTEM, SYS_STEP, (uint8_t)p4.current_step);
     }
 }

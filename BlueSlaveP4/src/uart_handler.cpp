@@ -531,6 +531,11 @@ static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
         case MSG_TOUCH_CMD:
             // S3 relays a step toggle when it has no WiFi (P4 forwards to Master)
             if (id == TCMD_STEP_TOGGLE) {
+                if (udp_master_connected()) {
+                    // With master online, step authority is setStep/pattern_sync.
+                    // Ignore relay toggles to prevent double inversion in multi-P4.
+                    break;
+                }
                 int trk = (val >> 4) & 0xF;
                 int stp = val & 0xF;
                 if (trk < 16 && stp < 16) {
