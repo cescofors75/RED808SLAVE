@@ -1434,6 +1434,13 @@ static void run_local_step_clock(unsigned long now) {
         udp_step_phase_valid_bridge = false;
     }
 
+    // While master step sync packets are fresh, do not locally advance the
+    // sequencer clock. This avoids double-advancing SYS_STEP and early hits.
+    if (masterAlive && (now - lastMasterStepSyncMs) < 1200) {
+        prev_playing = p4.is_playing;
+        return;
+    }
+
     if (!p4.is_playing) {
         prev_playing = false;
         return;

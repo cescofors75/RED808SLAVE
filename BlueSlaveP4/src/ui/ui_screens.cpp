@@ -1888,7 +1888,7 @@ static void create_live_screen(void) {
 
     lv_obj_t* vol_minus = lv_btn_create(vol_panel);
     lv_obj_set_size(vol_minus, 50, 40);
-    lv_obj_set_pos(vol_minus, 8, CH - 48);
+    lv_obj_set_pos(vol_minus, 4, CH - 54);
     apply_control_button_style(vol_minus, RED808_WARNING, false, 10);
     lv_obj_t* vol_minus_lbl = lv_label_create(vol_minus);
     lv_label_set_text(vol_minus_lbl, "-");
@@ -1898,7 +1898,7 @@ static void create_live_screen(void) {
 
     lv_obj_t* vol_plus = lv_btn_create(vol_panel);
     lv_obj_set_size(vol_plus, 50, 40);
-    lv_obj_set_pos(vol_plus, CW - 58, CH - 48);
+    lv_obj_set_pos(vol_plus, CW - 62, CH - 54);
     apply_control_button_style(vol_plus, RED808_SUCCESS, false, 10);
     lv_obj_t* vol_plus_lbl = lv_label_create(vol_plus);
     lv_label_set_text(vol_plus_lbl, "+");
@@ -2033,7 +2033,7 @@ static void create_live_screen(void) {
 
     lv_obj_t* bpm_minus = lv_btn_create(bpm_panel);
     lv_obj_set_size(bpm_minus, 50, 40);
-    lv_obj_set_pos(bpm_minus, 8, CH - 48);
+    lv_obj_set_pos(bpm_minus, 4, CH - 54);
     apply_control_button_style(bpm_minus, RED808_WARNING, false, 10);
     lv_obj_t* bpm_minus_lbl = lv_label_create(bpm_minus);
     lv_label_set_text(bpm_minus_lbl, "-");
@@ -2043,7 +2043,7 @@ static void create_live_screen(void) {
 
     lv_obj_t* bpm_plus = lv_btn_create(bpm_panel);
     lv_obj_set_size(bpm_plus, 50, 40);
-    lv_obj_set_pos(bpm_plus, CW - 58, CH - 48);
+    lv_obj_set_pos(bpm_plus, CW - 62, CH - 54);
     apply_control_button_style(bpm_plus, RED808_SUCCESS, false, 10);
     lv_obj_t* bpm_plus_lbl = lv_label_create(bpm_plus);
     lv_label_set_text(bpm_plus_lbl, "+");
