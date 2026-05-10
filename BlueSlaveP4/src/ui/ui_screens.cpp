@@ -5125,6 +5125,26 @@ static lv_obj_t* s_piano_keys_container   = NULL;
 static lv_obj_t* s_piano_rec_btn          = NULL;  // v2.7
 static lv_obj_t* s_piano_rec_lbl          = NULL;  // v2.7
 static lv_obj_t* s_piano_pad_lbl          = NULL;  // v2.8
+static lv_obj_t* s_piano_glide_btn        = NULL;
+static lv_obj_t* s_piano_glide_lbl        = NULL;
+static lv_obj_t* s_piano_bend_btn         = NULL;
+static lv_obj_t* s_piano_bend_lbl         = NULL;
+static lv_obj_t* s_piano_range_btn        = NULL;
+static lv_obj_t* s_piano_range_lbl        = NULL;
+
+// Piano gesture state (v3.0): hold+drag for glide and pitch bend.
+static bool      s_piano_glide_enabled     = true;
+static bool      s_piano_bend_enabled      = true;
+static int       s_piano_bend_range_st     = 2;     // default +/-2 semitones
+static bool      s_piano_gesture_active    = false;
+static int16_t   s_piano_touch_start_x     = 0;
+static uint8_t   s_piano_touch_base_note   = 60;
+static int       s_piano_last_slide_note   = -1;
+static float     s_piano_last_bend_st      = 0.0f;
+static uint32_t  s_piano_last_bend_send_ms = 0;
+static lv_obj_t* s_piano_active_key_obj    = NULL;
+static int       s_piano_active_key_note   = -1;
+static lv_obj_t* s_piano_key_obj_by_note[128] = {NULL};
 
 // Forward declarations for melody grid (defined after key handlers)
 static void piano_grid_refresh_cell(int col, int row);
@@ -5142,37 +5162,208 @@ static const char* piano_note_name(uint8_t midi) {
     return buf;
 }
 
+static inline uint8_t piano_engine_code(void) {
+    return PIANO_ENGINES[s_piano_engine_idx];
+}
+
+static void piano_set_key_visual(lv_obj_t* btn, uint8_t note, bool pressed) {
+    if (!btn) return;
+    bool is_black = piano_pc_is_black(note % 12);
+    lv_obj_set_style_bg_color(btn,
+        pressed ? RED808_ACCENT : (is_black ? lv_color_hex(0x101010) : lv_color_hex(0xF0F0E8)), 0);
+}
+
+static void piano_set_active_key(uint8_t note) {
+    if (s_piano_active_key_obj && s_piano_active_key_note >= 0) {
+        piano_set_key_visual(s_piano_active_key_obj, (uint8_t)s_piano_active_key_note, false);
+    }
+    s_piano_active_key_obj = (note <= 127) ? s_piano_key_obj_by_note[note] : NULL;
+    s_piano_active_key_note = s_piano_active_key_obj ? (int)note : -1;
+    if (s_piano_active_key_obj) {
+        piano_set_key_visual(s_piano_active_key_obj, note, true);
+    }
+}
+
+static void piano_reset_bend(void) {
+    if (!ui_use_udp_transport()) return;
+    uint8_t engine = piano_engine_code();
+    if (engine == 3) {
+        udp_send_synth_param(engine, 0, 14, 0.0f);   // PitchBend
+    } else if (engine == 6) {
+        udp_send_synth_param(engine, 0, 12, 0.0f);   // Detune fallback
+    }
+    s_piano_last_bend_st = 0.0f;
+}
+
+static void piano_apply_glide_setting(void) {
+    if (!ui_use_udp_transport()) return;
+    uint8_t engine = piano_engine_code();
+    if (engine == 3) {
+        udp_send_synth_param(engine, 0, 5, s_piano_glide_enabled ? 0.12f : 0.01f);
+    } else if (engine == 5) {
+        udp_send_synth_param(engine, 0, 17, s_piano_glide_enabled ? 0.35f : 0.0f);
+    }
+}
+
+static void piano_refresh_gesture_controls(void) {
+    if (s_piano_glide_lbl) {
+        lv_label_set_text(s_piano_glide_lbl, s_piano_glide_enabled ? "GLIDE ON" : "GLIDE OFF");
+    }
+    if (s_piano_glide_btn) {
+        lv_obj_set_style_border_color(s_piano_glide_btn,
+            s_piano_glide_enabled ? lv_color_hex(0x00E5FF) : RED808_BORDER, 0);
+        lv_obj_set_style_border_width(s_piano_glide_btn, s_piano_glide_enabled ? 2 : 1, 0);
+    }
+
+    if (s_piano_bend_lbl) {
+        lv_label_set_text(s_piano_bend_lbl, s_piano_bend_enabled ? "BEND ON" : "BEND OFF");
+    }
+    if (s_piano_bend_btn) {
+        lv_obj_set_style_border_color(s_piano_bend_btn,
+            s_piano_bend_enabled ? lv_color_hex(0x7CFF6B) : RED808_BORDER, 0);
+        lv_obj_set_style_border_width(s_piano_bend_btn, s_piano_bend_enabled ? 2 : 1, 0);
+    }
+
+    if (s_piano_range_lbl) {
+        lv_label_set_text_fmt(s_piano_range_lbl, "RANGE ±%d", s_piano_bend_range_st);
+    }
+    if (s_piano_range_btn) {
+        lv_obj_set_style_border_color(s_piano_range_btn,
+            s_piano_bend_enabled ? lv_color_hex(0xFFE066) : RED808_BORDER, 0);
+    }
+}
+
+static bool piano_get_local_touch(int16_t* lx, int16_t* ly) {
+    if (!s_piano_keys_container || !lx || !ly) return false;
+    lv_indev_t* indev = lv_indev_get_act();
+    if (!indev) return false;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    lv_area_t a;
+    lv_obj_get_coords(s_piano_keys_container, &a);
+    *lx = (int16_t)(p.x - a.x1);
+    *ly = (int16_t)(p.y - a.y1);
+    return true;
+}
+
+static bool piano_note_from_local_xy(int16_t lx, int16_t ly, uint8_t* note_out) {
+    if (!s_piano_keys_container || !note_out) return false;
+    int container_w = lv_obj_get_width(s_piano_keys_container);
+    int container_h = lv_obj_get_height(s_piano_keys_container);
+    if (container_w < 80 || container_h < 80) return false;
+    if (lx < 0 || lx >= container_w || ly < 0 || ly >= container_h) return false;
+
+    int num_octaves = s_piano_two_oct ? 2 : 1;
+    int num_white = num_octaves * 7;
+    if (num_white < 1) num_white = 1;
+    int white_w = container_w / num_white;
+    if (white_w < 4) white_w = 4;
+    int white_h = container_h;
+    int black_w = (white_w * 6) / 10;
+    int black_h = (white_h * 6) / 10;
+
+    static const uint8_t WHITE_PCS[7] = {0, 2, 4, 5, 7, 9, 11};
+    static const uint8_t BLACK_PCS[5] = {1, 3, 6, 8, 10};
+    static const uint8_t BLACK_AFTER_WHITE[5] = {0, 1, 3, 4, 5};
+
+    int base_midi = (s_piano_octave + 1) * 12;
+
+    if (ly < black_h) {
+        for (int oct = 0; oct < num_octaves; oct++) {
+            for (int b = 0; b < 5; b++) {
+                int wpos = BLACK_AFTER_WHITE[b];
+                int x0 = (oct * 7 + wpos) * white_w + white_w - black_w / 2;
+                int x1 = x0 + black_w;
+                if (lx >= x0 && lx < x1) {
+                    int midi = base_midi + oct * 12 + BLACK_PCS[b];
+                    if (midi >= 0 && midi <= 127) {
+                        *note_out = (uint8_t)midi;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    int white_idx = lx / white_w;
+    if (white_idx < 0) white_idx = 0;
+    if (white_idx >= num_white) white_idx = num_white - 1;
+    int oct = white_idx / 7;
+    int w = white_idx % 7;
+    int midi = base_midi + oct * 12 + WHITE_PCS[w];
+    if (midi < 0 || midi > 127) return false;
+    *note_out = (uint8_t)midi;
+    return true;
+}
+
+static bool piano_touch_inside_keys(void) {
+    int16_t lx = 0, ly = 0;
+    if (!piano_get_local_touch(&lx, &ly)) return false;
+    uint8_t dummy = 0;
+    return piano_note_from_local_xy(lx, ly, &dummy);
+}
+
+static void piano_send_bend(float bend_st) {
+    if (!ui_use_udp_transport()) return;
+    uint8_t engine = piano_engine_code();
+    uint32_t now = millis();
+    if ((now - s_piano_last_bend_send_ms) < 20 && fabsf(bend_st - s_piano_last_bend_st) < 0.08f) return;
+
+    if (engine == 3) {
+        if (bend_st < -12.0f) bend_st = -12.0f;
+        if (bend_st > 12.0f) bend_st = 12.0f;
+        udp_send_synth_param(engine, 0, 14, bend_st);
+        s_piano_last_bend_st = bend_st;
+        s_piano_last_bend_send_ms = now;
+    } else if (engine == 6) {
+        float det = bend_st / 2.0f;  // map +/-2st gesture to +/-1st detune
+        if (det < -1.0f) det = -1.0f;
+        if (det > 1.0f) det = 1.0f;
+        udp_send_synth_param(engine, 0, 12, det);
+        s_piano_last_bend_st = bend_st;
+        s_piano_last_bend_send_ms = now;
+    }
+}
+
 static void piano_send_off(void) {
     if (s_piano_held_note < 0) return;
     if (ui_use_udp_transport()) {
-        udp_send_synth_note_off(PIANO_ENGINES[s_piano_engine_idx], 0);
+        udp_send_synth_note_off(piano_engine_code(), 0);
     }
     s_piano_held_note = -1;
+    piano_reset_bend();
+    if (s_piano_active_key_obj && s_piano_active_key_note >= 0) {
+        piano_set_key_visual(s_piano_active_key_obj, (uint8_t)s_piano_active_key_note, false);
+        s_piano_active_key_obj = NULL;
+        s_piano_active_key_note = -1;
+    }
     if (s_piano_status_lbl) lv_label_set_text(s_piano_status_lbl, "—");
 }
 
-static void piano_send_on(uint8_t midi_note) {
-    piano_send_off();
+static void piano_send_on(uint8_t midi_note, bool legato) {
+    if (!legato) {
+        piano_send_off();
+    } else if (s_piano_held_note < 0) {
+        legato = false;
+    }
 #if P4_ENABLE_DEBUG_LOG
-    Serial.printf("[P4 piano] note=%u rec=%d transport=%d\n", midi_note, (int)s_piano_rec_active, (int)ui_use_udp_transport());
+    Serial.printf("[P4 piano] note=%u rec=%d transport=%d legato=%d\n", midi_note, (int)s_piano_rec_active, (int)ui_use_udp_transport(), (int)legato);
 #endif
+    piano_apply_glide_setting();
     if (ui_use_udp_transport()) {
-        udp_send_synth_note_on_ex(PIANO_ENGINES[s_piano_engine_idx],
-                                   midi_note, 110, false, false);
+        udp_send_synth_note_on_ex(piano_engine_code(),
+                                   midi_note, 110, false, legato && s_piano_glide_enabled);
         if (s_piano_rec_active) {
-            // v2.7 — also notify master to forward to S3 melody screen
 #if P4_ENABLE_DEBUG_LOG
-            Serial.printf("[P4 piano] -> melodyRecNote eng=%u note=%u\n", PIANO_ENGINES[s_piano_engine_idx], midi_note);
+            Serial.printf("[P4 piano] -> melodyRecNote eng=%u note=%u\n", piano_engine_code(), midi_note);
 #endif
-            udp_send_melody_rec_note(PIANO_ENGINES[s_piano_engine_idx], midi_note);
+            udp_send_melody_rec_note(piano_engine_code(), midi_note);
         }
     }
     if (s_piano_rec_active) {
         uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MELODY_NOTE, midi_note);
-        // v2.8 — also store locally so ASSIGN can push the full sequence.
         int pc = midi_note % 12;
         int row = -1;
-        // S3 row mapping: row 0 = B (pc 11) … row 11 = C (pc 0)
         for (int r = 0; r < 12; r++) {
             if ((11 - r) == pc) { row = r; break; }
         }
@@ -5185,6 +5376,8 @@ static void piano_send_on(uint8_t midi_note) {
         }
     }
     s_piano_held_note = (int)midi_note;
+    s_piano_last_slide_note = (int)midi_note;
+    piano_set_active_key(midi_note);
     if (s_piano_status_lbl) {
         lv_label_set_text_fmt(s_piano_status_lbl, "%s · %s",
                               PIANO_ENGINE_LABELS[s_piano_engine_idx],
@@ -5192,18 +5385,74 @@ static void piano_send_on(uint8_t midi_note) {
     }
 }
 
+static void piano_handle_pressing(void) {
+    if (!s_piano_gesture_active || s_piano_held_note < 0) return;
+    int16_t lx = 0, ly = 0;
+    if (!piano_get_local_touch(&lx, &ly)) return;
+
+    uint8_t touch_note = 0;
+    if (s_piano_glide_enabled && piano_note_from_local_xy(lx, ly, &touch_note)) {
+        if ((int)touch_note != s_piano_last_slide_note) {
+            piano_send_on(touch_note, true);
+            s_piano_touch_start_x = lx;
+            s_piano_touch_base_note = touch_note;
+            s_piano_last_bend_st = 0.0f;
+        }
+    }
+
+    if (!s_piano_bend_enabled) return;
+
+    int container_w = lv_obj_get_width(s_piano_keys_container);
+    int num_white = (s_piano_two_oct ? 2 : 1) * 7;
+    if (num_white < 1) num_white = 1;
+    int white_w = container_w / num_white;
+    if (white_w < 10) white_w = 10;
+    float sens_px = (float)(white_w * 2);  // full bend across ~2 white keys
+    float bend_st = ((float)(lx - s_piano_touch_start_x) / sens_px) * (float)s_piano_bend_range_st;
+    if (bend_st < -(float)s_piano_bend_range_st) bend_st = -(float)s_piano_bend_range_st;
+    if (bend_st > (float)s_piano_bend_range_st) bend_st = (float)s_piano_bend_range_st;
+
+    uint8_t engine = piano_engine_code();
+    if (engine == 3 || engine == 6) {
+        piano_send_bend(bend_st);
+    } else {
+        int bend_steps = (int)lroundf(bend_st);
+        int note = (int)s_piano_touch_base_note + bend_steps;
+        if (note < 0) note = 0;
+        if (note > 127) note = 127;
+        if (note != s_piano_held_note) {
+            piano_send_on((uint8_t)note, true);
+        }
+    }
+}
+
 static void piano_key_event_cb(lv_event_t* e) {
     lv_event_code_t code = lv_event_get_code(e);
     uint8_t note = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
-    lv_obj_t* btn = (lv_obj_t*)lv_event_get_target(e);
-    bool is_black = piano_pc_is_black(note % 12);
     if (code == LV_EVENT_PRESSED) {
-        piano_send_on(note);
-        lv_obj_set_style_bg_color(btn, RED808_ACCENT, 0);
-    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        bool from_glide = s_piano_gesture_active && s_piano_held_note >= 0;
+        int16_t lx = 0, ly = 0;
+        piano_get_local_touch(&lx, &ly);
+        s_piano_gesture_active = true;
+        s_piano_touch_start_x = lx;
+        s_piano_touch_base_note = note;
+        s_piano_last_slide_note = note;
+        s_piano_last_bend_st = 0.0f;
+        s_piano_last_bend_send_ms = 0;
+        piano_send_on(note, from_glide);
+    } else if (code == LV_EVENT_PRESSING) {
+        piano_handle_pressing();
+    } else if (code == LV_EVENT_PRESS_LOST) {
+        if (piano_touch_inside_keys()) {
+            // Keep gesture alive while sliding across adjacent keys.
+            piano_handle_pressing();
+            return;
+        }
+        s_piano_gesture_active = false;
         piano_send_off();
-        lv_obj_set_style_bg_color(btn,
-            is_black ? lv_color_hex(0x101010) : lv_color_hex(0xF0F0E8), 0);
+    } else if (code == LV_EVENT_RELEASED) {
+        s_piano_gesture_active = false;
+        piano_send_off();
     }
 }
 
@@ -5263,6 +5512,36 @@ static void piano_keys24_btn_cb(lv_event_t* e) {
     if (s_piano_keys24_lbl)
         lv_label_set_text(s_piano_keys24_lbl, s_piano_two_oct ? "24 K" : "12 K");
     piano_rebuild_keys();
+}
+
+static void piano_glide_btn_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    s_piano_glide_enabled = !s_piano_glide_enabled;
+    piano_apply_glide_setting();
+    piano_refresh_gesture_controls();
+}
+
+static void piano_bend_btn_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    s_piano_bend_enabled = !s_piano_bend_enabled;
+    if (!s_piano_bend_enabled) {
+        piano_reset_bend();
+    }
+    piano_refresh_gesture_controls();
+}
+
+static void piano_bend_range_btn_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    static const int ranges[3] = {2, 7, 12};
+    int next_idx = 0;
+    for (int i = 0; i < 3; i++) {
+        if (ranges[i] == s_piano_bend_range_st) {
+            next_idx = (i + 1) % 3;
+            break;
+        }
+    }
+    s_piano_bend_range_st = ranges[next_idx];
+    piano_refresh_gesture_controls();
 }
 
 static void piano_rec_btn_cb(lv_event_t* e) {
@@ -5591,6 +5870,9 @@ static void piano_rebuild_keys(void) {
     if (!s_piano_keys_container) return;
     lv_obj_update_layout(s_piano_keys_container);
     lv_obj_clean(s_piano_keys_container);
+    memset(s_piano_key_obj_by_note, 0, sizeof(s_piano_key_obj_by_note));
+    s_piano_active_key_obj = NULL;
+    s_piano_active_key_note = -1;
 
     int container_w = lv_obj_get_width(s_piano_keys_container);
     int container_h = lv_obj_get_height(s_piano_keys_container);
@@ -5630,7 +5912,9 @@ static void piano_rebuild_keys(void) {
             lv_obj_set_style_shadow_width(k, 0, 0);
             lv_obj_set_style_bg_color(k, RED808_ACCENT, LV_STATE_PRESSED);
             lv_obj_clear_flag(k, LV_OBJ_FLAG_SCROLLABLE);
+            s_piano_key_obj_by_note[midi] = k;
             lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_PRESSED, (void*)(uintptr_t)midi);
+            lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_PRESSING, (void*)(uintptr_t)midi);
             lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_RELEASED, (void*)(uintptr_t)midi);
             lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_PRESS_LOST, (void*)(uintptr_t)midi);
             if (w == 0) {
@@ -5661,7 +5945,9 @@ static void piano_rebuild_keys(void) {
             lv_obj_set_style_shadow_width(k, 0, 0);
             lv_obj_set_style_bg_color(k, RED808_ACCENT, LV_STATE_PRESSED);
             lv_obj_clear_flag(k, LV_OBJ_FLAG_SCROLLABLE);
+            s_piano_key_obj_by_note[midi] = k;
             lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_PRESSED, (void*)(uintptr_t)midi);
+            lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_PRESSING, (void*)(uintptr_t)midi);
             lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_RELEASED, (void*)(uintptr_t)midi);
             lv_obj_add_event_cb(k, piano_key_event_cb, LV_EVENT_PRESS_LOST, (void*)(uintptr_t)midi);
         }
@@ -5746,6 +6032,22 @@ static void create_piano_screen(void) {
     lv_obj_set_style_text_font(s_piano_status_lbl, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(s_piano_status_lbl, RED808_ACCENT, 0);
     lv_obj_set_pos(s_piano_status_lbl, 592, row_y + 8);
+
+    // v3.0 — visual controls for gesture piano (glide/bend/range)
+    s_piano_glide_btn = piano_make_chip(scr_piano, 730, row_y, 98, 36,
+                                        s_piano_glide_enabled ? "GLIDE ON" : "GLIDE OFF");
+    s_piano_glide_lbl = lv_obj_get_child(s_piano_glide_btn, 0);
+    lv_obj_add_event_cb(s_piano_glide_btn, piano_glide_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    s_piano_bend_btn = piano_make_chip(scr_piano, 836, row_y, 92, 36,
+                                       s_piano_bend_enabled ? "BEND ON" : "BEND OFF");
+    s_piano_bend_lbl = lv_obj_get_child(s_piano_bend_btn, 0);
+    lv_obj_add_event_cb(s_piano_bend_btn, piano_bend_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    s_piano_range_btn = piano_make_chip(scr_piano, 936, row_y, 86, 36, "RANGE ±2");
+    s_piano_range_lbl = lv_obj_get_child(s_piano_range_btn, 0);
+    lv_obj_add_event_cb(s_piano_range_btn, piano_bend_range_btn_cb, LV_EVENT_CLICKED, NULL);
+    piano_refresh_gesture_controls();
 
     /* v2.8/v2.9 — compact melody row: pad assign + presets + transport */
     int row_y2 = 104;

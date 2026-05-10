@@ -117,12 +117,13 @@ static void gt911_init(void) {
 }
 
 static void gt911_poll_all(void) {
-    for (int i = 0; i < MAX_TOUCH_POINTS; i++) {
-        touch_data[i].state = LV_INDEV_STATE_REL;
-        touch_data[i].area  = 0;
+    if (!gt911_initialized) {
+        for (int i = 0; i < MAX_TOUCH_POINTS; i++) {
+            touch_data[i].state = LV_INDEV_STATE_REL;
+            touch_data[i].area  = 0;
+        }
+        return;
     }
-
-    if (!gt911_initialized) return;
 
     Wire.beginTransmission(TOUCH_I2C_ADDR);
     Wire.write(0x81); Wire.write(0x4E);
@@ -133,12 +134,18 @@ static void gt911_poll_all(void) {
     uint8_t touches = status & 0x0F;
     bool buf_ready = (status & 0x80);
 
-    if (!buf_ready || touches == 0 || touches > MAX_TOUCH_POINTS) {
-        if (buf_ready) {
-            Wire.beginTransmission(TOUCH_I2C_ADDR);
-            Wire.write(0x81); Wire.write(0x4E); Wire.write((uint8_t)0);
-            Wire.endTransmission();
+    // Keep last valid frame when the controller hasn't published a new one yet.
+    // This avoids short REL glitches that can cut sustained piano notes.
+    if (!buf_ready) return;
+
+    if (touches == 0 || touches > MAX_TOUCH_POINTS) {
+        for (int i = 0; i < MAX_TOUCH_POINTS; i++) {
+            touch_data[i].state = LV_INDEV_STATE_REL;
+            touch_data[i].area  = 0;
         }
+        Wire.beginTransmission(TOUCH_I2C_ADDR);
+        Wire.write(0x81); Wire.write(0x4E); Wire.write((uint8_t)0);
+        Wire.endTransmission();
         return;
     }
 
@@ -149,6 +156,10 @@ static void gt911_poll_all(void) {
     bool ok = (Wire.endTransmission(false) == 0);
     if (ok) ok = (Wire.requestFrom((uint8_t)TOUCH_I2C_ADDR, (uint8_t)readLen) == readLen);
     if (ok) {
+        for (int i = 0; i < MAX_TOUCH_POINTS; i++) {
+            touch_data[i].state = LV_INDEV_STATE_REL;
+            touch_data[i].area  = 0;
+        }
         for (int i = 0; i < readLen; i++) buf[i] = Wire.read();
         for (int i = 0; i < touches; i++) {
             uint16_t x    = buf[i*8]   | ((uint16_t)buf[i*8+1] << 8);
