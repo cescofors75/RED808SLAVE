@@ -332,3 +332,15 @@ void lvgl_port_task_start(void) {
 lv_indev_t* lvgl_port_get_touch_indev(void) {
     return touch_indevs[0];
 }
+
+uint8_t lvgl_port_get_touch_velocity(void) {
+    uint8_t best = 0;
+    for (int i = 0; i < MAX_TOUCH_POINTS; i++) {
+        if (touch_data[i].state != LV_INDEV_STATE_PR) continue;
+        uint8_t a = touch_data[i].area;
+        uint8_t v = a ? (uint8_t)(40 + ((uint32_t)a * 87) / 255) : 100;
+        if (v > 127) v = 127;
+        if (v > best) best = v;
+    }
+    return best;
+}

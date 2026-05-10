@@ -5,6 +5,7 @@
 
 #include "ui_screens.h"
 #include "ui_theme.h"
+#include "../drivers/lvgl_port.h"
 #include "../udp_handler.h"
 #include "../uart_handler.h"
 #include "../dsp_task.h"
@@ -5142,8 +5143,8 @@ static const uint8_t GTR_STRING_OPEN_NOTES[6] = {64, 59, 55, 50, 45, 40};
 static constexpr int GTR_FRET_COUNT = 12;
 
 // Piano gesture state (v3.0): hold+drag for glide and pitch bend.
-static bool      s_piano_glide_enabled     = true;
-static bool      s_piano_bend_enabled      = true;
+static bool      s_piano_glide_enabled     = false;
+static bool      s_piano_bend_enabled      = false;
 static int       s_piano_bend_range_st     = 2;     // default +/-2 semitones
 static bool      s_piano_gesture_active    = false;
 static int16_t   s_piano_touch_start_x     = 0;
@@ -5151,9 +5152,12 @@ static uint8_t   s_piano_touch_base_note   = 60;
 static int       s_piano_last_slide_note   = -1;
 static float     s_piano_last_bend_st      = 0.0f;
 static uint32_t  s_piano_last_bend_send_ms = 0;
+static bool      s_piano_release_pending   = false;
+static uint32_t  s_piano_release_due_ms    = 0;
 static lv_obj_t* s_piano_active_key_obj    = NULL;
 static int       s_piano_active_key_note   = -1;
 static lv_obj_t* s_piano_key_obj_by_note[128] = {NULL};
+static constexpr uint32_t PIANO_RELEASE_DEBOUNCE_MS = 24;
 
 // Forward declarations for melody grid (defined after key handlers)
 static void piano_grid_refresh_cell(int col, int row);
@@ -5378,6 +5382,8 @@ static void piano_send_off(void) {
     if (ui_use_udp_transport()) {
         udp_send_synth_note_off(piano_engine_code(), 0);
     }
+    s_piano_release_pending = false;
+    s_piano_release_due_ms = 0;
     s_piano_held_note = -1;
     piano_reset_bend();
     if (s_piano_active_key_obj && s_piano_active_key_note >= 0) {
@@ -5388,19 +5394,33 @@ static void piano_send_off(void) {
     if (s_piano_status_lbl) lv_label_set_text(s_piano_status_lbl, "—");
 }
 
+static void piano_schedule_release(void) {
+    if (s_piano_held_note < 0) return;
+    s_piano_release_pending = true;
+    s_piano_release_due_ms = millis() + PIANO_RELEASE_DEBOUNCE_MS;
+}
+
+static void piano_cancel_release(void) {
+    s_piano_release_pending = false;
+    s_piano_release_due_ms = 0;
+}
+
 static void piano_send_on(uint8_t midi_note, bool legato) {
+    piano_cancel_release();
     if (!legato) {
         piano_send_off();
     } else if (s_piano_held_note < 0) {
         legato = false;
     }
+    uint8_t attack_velocity = lvgl_port_get_touch_velocity();
+    if (attack_velocity == 0) attack_velocity = s_piano_velocity;
 #if P4_ENABLE_DEBUG_LOG
-    Serial.printf("[P4 piano] note=%u rec=%d transport=%d legato=%d\n", midi_note, (int)s_piano_rec_active, (int)ui_use_udp_transport(), (int)legato);
+    Serial.printf("[P4 piano] note=%u vel=%u rec=%d transport=%d legato=%d\n", midi_note, (unsigned)attack_velocity, (int)s_piano_rec_active, (int)ui_use_udp_transport(), (int)legato);
 #endif
     piano_apply_glide_setting();
     if (ui_use_udp_transport()) {
         udp_send_synth_note_on_ex(piano_engine_code(),
-                                   midi_note, 110, false, legato && s_piano_glide_enabled);
+                                   midi_note, attack_velocity, false, legato && s_piano_glide_enabled);
         if (s_piano_rec_active) {
 #if P4_ENABLE_DEBUG_LOG
             Serial.printf("[P4 piano] -> melodyRecNote eng=%u note=%u\n", piano_engine_code(), midi_note);
@@ -5479,6 +5499,7 @@ static void piano_key_event_cb(lv_event_t* e) {
     uint8_t note = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
     if (code == LV_EVENT_PRESSED) {
         bool from_glide = s_piano_gesture_active && s_piano_held_note >= 0;
+        piano_cancel_release();
         int16_t lx = 0, ly = 0;
         piano_get_local_touch(&lx, &ly);
         s_piano_gesture_active = true;
@@ -5489,18 +5510,20 @@ static void piano_key_event_cb(lv_event_t* e) {
         s_piano_last_bend_send_ms = 0;
         piano_send_on(note, from_glide);
     } else if (code == LV_EVENT_PRESSING) {
+        piano_cancel_release();
         piano_handle_pressing();
     } else if (code == LV_EVENT_PRESS_LOST) {
         if (piano_touch_inside_keys()) {
             // Keep gesture alive while sliding across adjacent keys.
+            piano_cancel_release();
             piano_handle_pressing();
             return;
         }
         s_piano_gesture_active = false;
-        piano_send_off();
+        piano_schedule_release();
     } else if (code == LV_EVENT_RELEASED) {
         s_piano_gesture_active = false;
-        piano_send_off();
+        piano_schedule_release();
     }
 }
 
@@ -5797,8 +5820,15 @@ static void piano_vel_btn_cb(lv_event_t* e) {
 }
 
 void update_piano_screen(void) {
-    if (!s_piano_play_active) return;
     uint32_t now = millis();
+    if (s_piano_release_pending && s_piano_held_note >= 0) {
+        if (piano_touch_inside_keys()) {
+            piano_cancel_release();
+        } else if ((int32_t)(now - s_piano_release_due_ms) >= 0) {
+            piano_send_off();
+        }
+    }
+    if (!s_piano_play_active) return;
     uint32_t step_ms = (uint32_t)(60000.0f / s_piano_bpm / 4.0f); // 16th note
     if (step_ms < 30) step_ms = 30;
 
@@ -7438,7 +7468,8 @@ void ui_update_current_screen(void) {
     if (active == scr_live) period_ms = 16;
     else if (active == scr_sequencer) period_ms = 8;
     else if (active == scr_sdcard) period_ms = p4sd.needs_refresh ? 16 : 100;
-    else if (active == scr_piano || active == scr_piano_params || active == scr_guitar) period_ms = 50;
+    else if (active == scr_piano) period_ms = 16;
+    else if (active == scr_piano_params || active == scr_guitar) period_ms = 50;
     if (now - last_active_update_ms < period_ms) return;
     last_active_update_ms = now;
 

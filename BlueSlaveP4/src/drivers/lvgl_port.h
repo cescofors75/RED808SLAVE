@@ -16,6 +16,10 @@ void lvgl_port_update(void);
 // Get the touch input device (for screen callbacks)
 lv_indev_t* lvgl_port_get_touch_indev(void);
 
+// Return the strongest currently active touch mapped to MIDI velocity (40..127).
+// Returns 0 when no finger is currently active.
+uint8_t lvgl_port_get_touch_velocity(void);
+
 // Thread safety — wrap LVGL API calls from outside the LVGL task
 bool lvgl_port_lock(int timeout_ms);
 void lvgl_port_unlock(void);
