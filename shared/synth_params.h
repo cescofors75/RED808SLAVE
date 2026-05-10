@@ -4,7 +4,7 @@
 // Used by both BlueSlaveV2 (ESP32-S3) and BlueSlaveP4 to render
 // the PIANO PARAMS LVGL screen and emit UDP {synth303Param|synthParam|synthPreset}.
 //
-// Mirrors RedMaster_ESP32S3/data/web/synth-editor.js (engines 3-6 only).
+// Mirrors RedMaster_ESP32S3/data/web/synth-editor.js and extended P4 GTR UI.
 // =============================================================================
 #pragma once
 #include <stdint.h>
@@ -13,13 +13,15 @@
 // Engine indices (compatible with Daisy synthNoteOnEx / synthParam)
 //   0 = 808 sampler   1 = 909 sampler   2 = 505 sampler   (NOT exposed here)
 //   3 = TB-303         4 = Wavetable    5 = SH-101         6 = FM 2-Op
+//   7 = Physical modeling guitar
 
 #define SP_ENGINE_303    3
 #define SP_ENGINE_WT     4
 #define SP_ENGINE_SH101  5
 #define SP_ENGINE_FM2OP  6
+#define SP_ENGINE_PHYS   7
 
-#define SP_ENGINE_COUNT  4   // engines 3..6
+#define SP_ENGINE_COUNT  5   // engines 3..7
 
 typedef struct {
     uint8_t      param_id;
@@ -207,6 +209,39 @@ static const SynthPreset SP_PRESETS_FM2OP[] = {
 };
 
 // ---------------------------------------------------------------------------
+// PHYS / GTR — 8 params
+// ---------------------------------------------------------------------------
+static const SynthParamDef SP_PARAMS_PHYS[] = {
+    { 1, "M Struct",   0.f, 1.f, 0.14f, 0, "" },
+    { 2, "M Bright",   0.f, 1.f, 0.30f, 0, "" },
+    { 3, "M Damp",     0.f, 1.f, 0.78f, 0, "" },
+    { 4, "M Gain",     0.f, 1.f, 0.12f, 0, "" },
+    { 6, "S Struct",   0.f, 1.f, 0.34f, 0, "" },
+    { 7, "S Bright",   0.f, 1.f, 0.64f, 0, "" },
+    { 8, "S Damp",     0.f, 1.f, 0.58f, 0, "" },
+    { 9, "S Gain",     0.f, 1.f, 0.95f, 0, "" },
+};
+
+static const SynthPresetVal SP_PRES_PHYS_0[] = {
+    {1,0.10f},{2,0.22f},{3,0.84f},{4,0.10f},{6,0.30f},{7,0.42f},{8,0.72f},{9,0.92f}
+};
+static const SynthPresetVal SP_PRES_PHYS_1[] = {
+    {1,0.16f},{2,0.54f},{3,0.62f},{4,0.11f},{6,0.26f},{7,0.70f},{8,0.46f},{9,0.96f}
+};
+static const SynthPresetVal SP_PRES_PHYS_2[] = {
+    {1,0.28f},{2,0.66f},{3,0.48f},{4,0.08f},{6,0.56f},{7,0.86f},{8,0.26f},{9,0.82f}
+};
+static const SynthPresetVal SP_PRES_PHYS_3[] = {
+    {1,0.32f},{2,0.82f},{3,0.34f},{4,0.14f},{6,0.52f},{7,0.96f},{8,0.18f},{9,0.88f}
+};
+static const SynthPreset SP_PRESETS_PHYS[] = {
+    { "Clasica",  SP_PRES_PHYS_0, 8 },
+    { "Flamenco", SP_PRES_PHYS_1, 8 },
+    { "Funky",    SP_PRES_PHYS_2, 8 },
+    { "Electrica",SP_PRES_PHYS_3, 8 },
+};
+
+// ---------------------------------------------------------------------------
 // Engine table
 // ---------------------------------------------------------------------------
 static const SynthEngineDef SP_ENGINES[SP_ENGINE_COUNT] = {
@@ -221,5 +256,8 @@ static const SynthEngineDef SP_ENGINES[SP_ENGINE_COUNT] = {
       SP_PRESETS_SH101,4 },
     { SP_ENGINE_FM2OP, "FM2",   "FM 2-Op",
       SP_PARAMS_FM2OP, (uint8_t)(sizeof(SP_PARAMS_FM2OP)/sizeof(SP_PARAMS_FM2OP[0])),
-      SP_PRESETS_FM2OP,4 },
+            SP_PRESETS_FM2OP,4 },
+        { SP_ENGINE_PHYS,  "GTR",   "Physical Guitar",
+            SP_PARAMS_PHYS,  (uint8_t)(sizeof(SP_PARAMS_PHYS)/sizeof(SP_PARAMS_PHYS[0])),
+            SP_PRESETS_PHYS, 4 },
 };

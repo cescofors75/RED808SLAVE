@@ -681,14 +681,14 @@ static void process_extended(uint8_t type, uint8_t id, const uint8_t* payload, i
             uint8_t paramId = payload[2];
             float value = 0.0f;
             memcpy(&value, &payload[3], sizeof(value));
-            if (engine >= 3 && engine <= 6 && udp_wifi_connected()) {
+            if (engine >= 3 && engine <= 8 && udp_wifi_connected()) {
                 udp_send_synth_param(engine, instrument, paramId, value);
             }
         }
         else if (id == SYNTH_DATA_PRESET && len == 2) {
             uint8_t engine = payload[0];
             uint8_t preset = payload[1];
-            if (engine >= 3 && engine <= 6 && preset < 4 && udp_wifi_connected()) {
+            if (engine >= 3 && engine <= 8 && preset < 4 && udp_wifi_connected()) {
                 udp_send_synth_preset(engine, preset);
             }
         }

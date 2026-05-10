@@ -154,6 +154,7 @@ lv_obj_t* scr_sdcard = NULL;
 lv_obj_t* scr_performance = NULL;
 lv_obj_t* scr_piano = NULL;       /* v2.6 — PIANO live keyboard */
 lv_obj_t* scr_piano_params = NULL; /* v2.7 — synth engine parameter editor */
+lv_obj_t* scr_guitar = NULL;      /* v3.1 — GTR fretboard */
 
 // Header widgets
 static lv_obj_t* header_bar = NULL;
@@ -5100,11 +5101,12 @@ static void create_sdcard_screen(void) {
 
 // =============================================================================
 // PIANO SCREEN — live keyboard (12 / 24 keys) → synth via UDP
-// Engines: 3=303, 4=WTosc, 5=SH101, 6=FM2Op
+// Engines: 3=303, 4=WTosc, 5=SH101, 6=FM2Op, 7=PHYS (GTR)
 // =============================================================================
 static int  s_piano_engine_idx = 0;          // index into PIANO_ENGINES
 static int  s_piano_octave     = 4;          // C4..C5
 static bool s_piano_two_oct    = false;      // false=12 keys, true=24 keys
+static uint8_t s_piano_velocity = 100;
 static int  s_piano_held_note  = -1;         // last note-on still ringing
 static bool s_piano_rec_active = false;      // v2.7 — record to S3 melody screen
 // v2.8 — local mirror of recorded notes so P4 can ASSIGN to a pad without
@@ -5113,10 +5115,11 @@ static bool s_piano_rec_grid[16][12] = {{false}};
 static int  s_piano_rec_step  = 0;
 static int  s_piano_assign_pad = 0;          // 0..15
 
-static const uint8_t PIANO_ENGINES[4]      = {3, 4, 5, 6};
-static const char*   PIANO_ENGINE_LABELS[4] = {"303", "WT", "SH101", "FM2"};
+static constexpr int PIANO_ENGINE_COUNT = 5;
+static const uint8_t PIANO_ENGINES[PIANO_ENGINE_COUNT]      = {3, 4, 5, 6, 7};
+static const char*   PIANO_ENGINE_LABELS[PIANO_ENGINE_COUNT] = {"303", "WT", "SH101", "FM2", "GTR"};
 
-static lv_obj_t* s_piano_engine_btns[4]   = {NULL, NULL, NULL, NULL};
+static lv_obj_t* s_piano_engine_btns[PIANO_ENGINE_COUNT]   = {NULL, NULL, NULL, NULL, NULL};
 static lv_obj_t* s_piano_octave_lbl       = NULL;
 static lv_obj_t* s_piano_keys24_btn       = NULL;
 static lv_obj_t* s_piano_keys24_lbl       = NULL;
@@ -5131,6 +5134,12 @@ static lv_obj_t* s_piano_bend_btn         = NULL;
 static lv_obj_t* s_piano_bend_lbl         = NULL;
 static lv_obj_t* s_piano_range_btn        = NULL;
 static lv_obj_t* s_piano_range_lbl        = NULL;
+static lv_obj_t* s_gtr_status_lbl         = NULL;
+
+static int       s_gtr_held_note          = -1;
+static int       s_gtr_held_string        = -1;
+static const uint8_t GTR_STRING_OPEN_NOTES[6] = {64, 59, 55, 50, 45, 40};
+static constexpr int GTR_FRET_COUNT = 12;
 
 // Piano gesture state (v3.0): hold+drag for glide and pitch bend.
 static bool      s_piano_glide_enabled     = true;
@@ -5202,6 +5211,45 @@ static void piano_apply_glide_setting(void) {
         udp_send_synth_param(engine, 0, 5, s_piano_glide_enabled ? 0.12f : 0.01f);
     } else if (engine == 5) {
         udp_send_synth_param(engine, 0, 17, s_piano_glide_enabled ? 0.35f : 0.0f);
+    }
+}
+
+static void piano_send_off(void);
+static void piano_send_on(uint8_t midi_note, bool legato);
+
+static void guitar_send_off(void) {
+    if (s_gtr_held_note < 0) return;
+    piano_send_off();
+    s_gtr_held_note = -1;
+    s_gtr_held_string = -1;
+    if (s_gtr_status_lbl) lv_label_set_text(s_gtr_status_lbl, "GTR · —");
+}
+
+static void guitar_send_on(uint8_t midi_note, int string_idx) {
+    guitar_send_off();
+    if (s_piano_engine_idx != (PIANO_ENGINE_COUNT - 1)) {
+        s_piano_engine_idx = PIANO_ENGINE_COUNT - 1;
+    }
+    if (ui_use_udp_transport()) {
+        udp_send_melody_set_engine(7);
+    }
+    piano_send_on(midi_note, false);
+    s_gtr_held_note = (int)midi_note;
+    s_gtr_held_string = string_idx;
+    if (s_gtr_status_lbl) {
+        lv_label_set_text_fmt(s_gtr_status_lbl, "GTR · STR %d · %s", string_idx + 1, piano_note_name(midi_note));
+    }
+}
+
+static void guitar_fret_event_cb(lv_event_t* e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    uintptr_t packed = (uintptr_t)lv_event_get_user_data(e);
+    int string_idx = (int)((packed >> 8) & 0xFF);
+    int fret = (int)(packed & 0xFF);
+    uint8_t midi_note = (uint8_t)(GTR_STRING_OPEN_NOTES[string_idx] + fret);
+
+    if (code == LV_EVENT_CLICKED || code == LV_EVENT_PRESSED) {
+        guitar_send_on(midi_note, string_idx);
     }
 }
 
@@ -5467,10 +5515,10 @@ static void piano_uart_broadcast_state(void) {
 
 static void piano_engine_btn_cb(lv_event_t* e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx < 0 || idx >= 4) return;
+    if (idx < 0 || idx >= PIANO_ENGINE_COUNT) return;
     piano_send_off();
     s_piano_engine_idx = idx;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < PIANO_ENGINE_COUNT; i++) {
         if (!s_piano_engine_btns[i]) continue;
         bool sel = (i == idx);
         lv_obj_set_style_bg_color(s_piano_engine_btns[i],
@@ -5517,14 +5565,18 @@ static void piano_keys24_btn_cb(lv_event_t* e) {
 static void piano_glide_btn_cb(lv_event_t* e) {
     LV_UNUSED(e);
     s_piano_glide_enabled = !s_piano_glide_enabled;
-    piano_apply_glide_setting();
+    // Avoid zipper/clicks: if a note is currently held, apply on next note-on.
+    if (s_piano_held_note < 0) {
+        piano_apply_glide_setting();
+    }
     piano_refresh_gesture_controls();
 }
 
 static void piano_bend_btn_cb(lv_event_t* e) {
     LV_UNUSED(e);
     s_piano_bend_enabled = !s_piano_bend_enabled;
-    if (!s_piano_bend_enabled) {
+    // Avoid abrupt pitch jump while holding a note.
+    if (!s_piano_bend_enabled && s_piano_held_note < 0) {
         piano_reset_bend();
     }
     piano_refresh_gesture_controls();
@@ -5605,7 +5657,6 @@ static int       s_piano_play_step     = 0;
 static uint32_t  s_piano_play_next_ms  = 0;
 static uint32_t  s_piano_play_off_due_ms = 0;
 static int       s_piano_play_held_note = -1;
-static uint8_t   s_piano_velocity      = 100;
 static float     s_piano_bpm           = 120.0f;
 
 // Row 0 = B (top), Row 11 = C (bottom). Matches existing recording mapping.
@@ -5805,9 +5856,9 @@ static void piano_assign_btn_cb(lv_event_t* e) {
 // v2.9 — Apply melody_sync payload from master (engine/octave/rec/pad).
 // Must be called from within lvgl_port_lock.
 void piano_apply_melody_sync(uint8_t engine, uint8_t octave, bool rec, uint8_t pad) {
-    // Map engine value 3..6 → index 0..3
+    // Map engine value 3..7 → index 0..4
     int new_idx = s_piano_engine_idx;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < PIANO_ENGINE_COUNT; i++) {
         if (PIANO_ENGINES[i] == engine) { new_idx = i; break; }
     }
     bool octave_changed = ((int)octave != s_piano_octave && octave >= 1 && octave <= 7);
@@ -5817,7 +5868,7 @@ void piano_apply_melody_sync(uint8_t engine, uint8_t octave, bool rec, uint8_t p
     s_piano_rec_active = rec;
 
     // Refresh engine button colors
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < PIANO_ENGINE_COUNT; i++) {
         if (!s_piano_engine_btns[i]) continue;
         bool sel = (i == new_idx);
         lv_obj_set_style_bg_color(s_piano_engine_btns[i],
@@ -5973,8 +6024,8 @@ static void create_piano_screen(void) {
 
     /* Engine selector buttons (top-right) */
     int eng_w = 80, eng_h = 36, eng_gap = 6;
-    int eng_x_start = W - (eng_w + eng_gap) * 4 - 12;
-    for (int i = 0; i < 4; i++) {
+    int eng_x_start = W - (eng_w + eng_gap) * PIANO_ENGINE_COUNT - 12;
+    for (int i = 0; i < PIANO_ENGINE_COUNT; i++) {
         lv_obj_t* btn = piano_make_chip(scr_piano,
             eng_x_start + i * (eng_w + eng_gap), 8,
             eng_w, eng_h, PIANO_ENGINE_LABELS[i]);
@@ -6011,10 +6062,17 @@ static void create_piano_screen(void) {
         if (plbl) lv_obj_set_style_text_color(plbl, lv_color_hex(0x00E5FF), 0);
         lv_obj_add_event_cb(pbtn, [](lv_event_t* e){ (void)e; ui_navigate_to(11); },
                              LV_EVENT_CLICKED, NULL);
+
+        lv_obj_t* gbtn = piano_make_chip(scr_piano, 458, row_y, 110, 36, "GUITAR");
+        lv_obj_set_style_border_color(gbtn, lv_color_hex(0xFF8C42), 0);
+        lv_obj_t* glbl = lv_obj_get_child(gbtn, 0);
+        if (glbl) lv_obj_set_style_text_color(glbl, lv_color_hex(0xFF8C42), 0);
+        lv_obj_add_event_cb(gbtn, [](lv_event_t* e){ (void)e; ui_navigate_to(12); },
+                             LV_EVENT_CLICKED, NULL);
     }
 
     /* v2.7 — REC toggle: sends melodyRecNote to master while active */
-    s_piano_rec_btn = piano_make_chip(scr_piano, 458, row_y, 116, 44, "○ REC");
+    s_piano_rec_btn = piano_make_chip(scr_piano, 580, row_y, 116, 44, "○ REC");
     s_piano_rec_lbl = lv_obj_get_child(s_piano_rec_btn, 0);
     lv_obj_add_event_cb(s_piano_rec_btn, piano_rec_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_flag(s_piano_rec_btn, LV_OBJ_FLAG_PRESS_LOCK);
@@ -6031,7 +6089,7 @@ static void create_piano_screen(void) {
     lv_label_set_text(s_piano_status_lbl, "—");
     lv_obj_set_style_text_font(s_piano_status_lbl, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(s_piano_status_lbl, RED808_ACCENT, 0);
-    lv_obj_set_pos(s_piano_status_lbl, 592, row_y + 8);
+    lv_obj_set_pos(s_piano_status_lbl, 706, row_y + 8);
 
     // v3.0 — visual controls for gesture piano (glide/bend/range)
     s_piano_glide_btn = piano_make_chip(scr_piano, 730, row_y, 98, 36,
@@ -6190,7 +6248,7 @@ static void create_piano_screen(void) {
 #define PP_MAX_PARAMS_P4  21
 
 static int       s_pp_engine_idx = 0;
-static int       s_pp_preset_idx[SP_ENGINE_COUNT] = { -1, -1, -1, -1 };
+static int       s_pp_preset_idx[SP_ENGINE_COUNT] = { -1, -1, -1, -1, -1 };
 static float     s_pp_values[SP_ENGINE_COUNT][PP_MAX_PARAMS_P4] = {};
 static lv_obj_t* s_pp_engine_btns[SP_ENGINE_COUNT] = {};
 static lv_obj_t* s_pp_preset_btns[4] = {};
@@ -6201,7 +6259,7 @@ static lv_obj_t* s_pp_title_lbl = NULL;
 
 static lv_color_t pp_engine_color(int idx) {
     static const uint32_t colors[SP_ENGINE_COUNT] = {
-        0x00E5FF, 0xFF1493, 0xFFE066, 0x7CFF6B
+        0x00E5FF, 0xFF1493, 0xFFE066, 0x7CFF6B, 0xFF8C42
     };
     if (idx < 0 || idx >= SP_ENGINE_COUNT) return RED808_CYAN;
     return lv_color_hex(colors[idx]);
@@ -6360,6 +6418,9 @@ static void pp_cell_reset_cb(lv_event_t* e) {
     }
 }
 
+static void pp_update_engine_chips(void);
+static void pp_update_preset_chips(void);
+
 static void pp_rebuild_param_grid(void) {
     if (!s_pp_param_panel) return;
     lv_obj_clean(s_pp_param_panel);
@@ -6485,6 +6546,18 @@ static void pp_rebuild_param_grid(void) {
     }
 }
 
+static void pp_refresh_view(void) {
+    if (s_pp_title_lbl) {
+        char tbuf[64];
+        snprintf(tbuf, sizeof(tbuf), "SYNTH LAB · %s", SP_ENGINES[s_pp_engine_idx].long_name);
+        lv_label_set_text(s_pp_title_lbl, tbuf);
+        lv_obj_set_style_text_color(s_pp_title_lbl, pp_engine_color(s_pp_engine_idx), 0);
+    }
+    pp_update_engine_chips();
+    pp_update_preset_chips();
+    pp_rebuild_param_grid();
+}
+
 static void pp_update_engine_chips(void) {
     for (int i = 0; i < SP_ENGINE_COUNT; i++) {
         if (!s_pp_engine_btns[i]) continue;
@@ -6523,15 +6596,7 @@ static void pp_engine_cb(lv_event_t* e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx >= SP_ENGINE_COUNT) return;
     s_pp_engine_idx = idx;
-    if (s_pp_title_lbl) {
-        char tbuf[64];
-        snprintf(tbuf, sizeof(tbuf), "SYNTH LAB · %s", SP_ENGINES[idx].long_name);
-        lv_label_set_text(s_pp_title_lbl, tbuf);
-        lv_obj_set_style_text_color(s_pp_title_lbl, pp_engine_color(idx), 0);
-    }
-    pp_update_engine_chips();
-    pp_update_preset_chips();
-    pp_rebuild_param_grid();
+    pp_refresh_view();
 }
 
 static void pp_preset_cb(lv_event_t* e) {
@@ -6544,6 +6609,10 @@ static void pp_preset_cb(lv_event_t* e) {
     pp_rebuild_param_grid();
     if (ui_use_udp_transport()) {
         udp_send_synth_preset(eng->engine, (uint8_t)idx);
+        for (uint8_t i = 0; i < eng->param_count && i < PP_MAX_PARAMS_P4; i++) {
+            udp_send_synth_param(eng->engine, 0, eng->params[i].param_id,
+                                 s_pp_values[s_pp_engine_idx][i]);
+        }
     }
 }
 
@@ -6565,6 +6634,129 @@ static void pp_init_cb(lv_event_t* e) {
 static void pp_back_cb(lv_event_t* e) {
     (void)e;
     ui_navigate_to(10);  // back to PIANO
+}
+
+static void guitar_back_cb(lv_event_t* e) {
+    (void)e;
+    ui_navigate_to(10);
+}
+
+static void create_guitar_screen(void) {
+    int W = ui_layout_w();
+    int H = ui_layout_h();
+
+    scr_guitar = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr_guitar, RED808_BG, 0);
+    lv_obj_clear_flag(scr_guitar, LV_OBJ_FLAG_SCROLLABLE);
+    ui_create_header(scr_guitar);
+
+    lv_obj_t* title = lv_label_create(scr_guitar);
+    lv_label_set_text(title, "GUITAR · PHYS");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xFF8C42), 0);
+    lv_obj_set_pos(title, 20, 60);
+
+    lv_obj_t* sub = lv_label_create(scr_guitar);
+    lv_label_set_text(sub, "Diapason tactil · pulsa traste/cuerda · GTR tambien desde Piano");
+    lv_obj_set_style_text_font(sub, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(sub, RED808_TEXT_DIM, 0);
+    lv_obj_set_pos(sub, 20, 96);
+
+    lv_obj_t* back = lv_btn_create(scr_guitar);
+    lv_obj_set_size(back, 90, 38);
+    lv_obj_set_pos(back, W - 104, 58);
+    apply_control_button_style(back, RED808_ERROR, false, 8);
+    lv_obj_add_event_cb(back, guitar_back_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* back_lbl = lv_label_create(back);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT " PIANO");
+    lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_center(back_lbl);
+
+    s_gtr_status_lbl = lv_label_create(scr_guitar);
+    lv_label_set_text(s_gtr_status_lbl, "GTR · —");
+    lv_obj_set_style_text_font(s_gtr_status_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(s_gtr_status_lbl, RED808_TEXT, 0);
+    lv_obj_set_pos(s_gtr_status_lbl, 20, 126);
+
+    lv_obj_t* fretboard = lv_obj_create(scr_guitar);
+    lv_obj_set_size(fretboard, W - 40, H - 188);
+    lv_obj_set_pos(fretboard, 20, 158);
+    lv_obj_clear_flag(fretboard, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(fretboard, 16, 0);
+    lv_obj_set_style_bg_color(fretboard, lv_color_hex(0x8A5A2B), 0);
+    lv_obj_set_style_bg_grad_color(fretboard, lv_color_hex(0x5A3416), 0);
+    lv_obj_set_style_bg_grad_dir(fretboard, LV_GRAD_DIR_HOR, 0);
+    lv_obj_set_style_border_color(fretboard, lv_color_hex(0xC28A4B), 0);
+    lv_obj_set_style_border_width(fretboard, 2, 0);
+    lv_obj_set_style_pad_all(fretboard, 0, 0);
+
+    const int board_w = W - 40;
+    const int board_h = H - 188;
+    const int left_pad = 34;
+    const int top_pad = 34;
+    const int usable_w = board_w - left_pad - 16;
+    const int usable_h = board_h - top_pad * 2;
+    const int fret_gap = 2;
+    const int fret_w = (usable_w - (GTR_FRET_COUNT - 1) * fret_gap) / GTR_FRET_COUNT;
+    const int string_gap = usable_h / 5;
+
+    for (int fret = 1; fret < GTR_FRET_COUNT; fret++) {
+        lv_obj_t* bar = lv_obj_create(fretboard);
+        lv_obj_set_size(bar, 3, usable_h + 18);
+        lv_obj_set_pos(bar, left_pad + fret * (fret_w + fret_gap) - 2, top_pad - 8);
+        lv_obj_set_style_radius(bar, 2, 0);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(0xD6D2C4), 0);
+        lv_obj_set_style_border_width(bar, 0, 0);
+    }
+
+    const int marker_frets[] = {2, 4, 6, 8, 11};
+    for (int m = 0; m < 5; m++) {
+        int fret = marker_frets[m];
+        int dot_x = left_pad + fret * (fret_w + fret_gap) - (fret_w / 2);
+        lv_obj_t* dot = lv_obj_create(fretboard);
+        lv_obj_set_size(dot, 14, 14);
+        lv_obj_set_pos(dot, dot_x, top_pad + usable_h / 2 - 7);
+        lv_obj_set_style_radius(dot, 7, 0);
+        lv_obj_set_style_bg_color(dot, lv_color_hex(0xF7E7A9), 0);
+        lv_obj_set_style_border_width(dot, 0, 0);
+    }
+
+    for (int string_idx = 0; string_idx < 6; string_idx++) {
+        int y = top_pad + string_idx * string_gap;
+        lv_obj_t* string_lbl = lv_label_create(fretboard);
+        lv_label_set_text_fmt(string_lbl, "S%d", string_idx + 1);
+        lv_obj_set_style_text_font(string_lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(string_lbl, lv_color_hex(0xFFB26B), 0);
+        lv_obj_set_pos(string_lbl, 4, y - 10);
+
+        lv_obj_t* string_line = lv_obj_create(fretboard);
+        lv_obj_set_size(string_line, usable_w + 6, 2 + (5 - string_idx));
+        lv_obj_set_pos(string_line, left_pad, y);
+        lv_obj_set_style_radius(string_line, 2, 0);
+        lv_obj_set_style_bg_color(string_line, lv_color_hex(0xE9E4D4), 0);
+        lv_obj_set_style_border_width(string_line, 0, 0);
+
+        for (int fret = 0; fret < GTR_FRET_COUNT; fret++) {
+            lv_obj_t* cell = lv_btn_create(fretboard);
+            lv_obj_set_size(cell, fret_w, string_gap);
+            lv_obj_set_pos(cell, left_pad + fret * (fret_w + fret_gap), y - string_gap / 2);
+            lv_obj_set_style_bg_opa(cell, LV_OPA_10, 0);
+            lv_obj_set_style_border_opa(cell, LV_OPA_20, 0);
+            lv_obj_set_style_border_color(cell, lv_color_hex(0xFFF5CC), 0);
+            lv_obj_set_style_border_width(cell, 1, 0);
+            lv_obj_set_style_radius(cell, 4, 0);
+            if (string_idx == 0) {
+                lv_obj_t* fret_lbl = lv_label_create(fretboard);
+                lv_label_set_text_fmt(fret_lbl, "%d", fret);
+                lv_obj_set_style_text_font(fret_lbl, &lv_font_montserrat_14, 0);
+                lv_obj_set_style_text_color(fret_lbl, lv_color_hex(0xF7E7A9), 0);
+                lv_obj_set_pos(fret_lbl, left_pad + fret * (fret_w + fret_gap) + (fret_w / 2) - 5, 8);
+            }
+            uintptr_t packed = (uintptr_t)(((uint16_t)string_idx << 8) | (uint16_t)fret);
+            lv_obj_add_flag(cell, LV_OBJ_FLAG_PRESS_LOCK);
+            lv_obj_add_event_cb(cell, guitar_fret_event_cb, LV_EVENT_CLICKED, (void*)packed);
+        }
+    }
 }
 
 static void create_piano_params_screen(void) {
@@ -6605,7 +6797,7 @@ static void create_piano_params_screen(void) {
 
     // Engine tabs row (y=56)
     const int tab_y = 56, tab_h = 38, tab_gap = 6;
-    int tab_w = (W - 24 - 3 * tab_gap) / 4;
+    int tab_w = (W - 24 - (SP_ENGINE_COUNT - 1) * tab_gap) / SP_ENGINE_COUNT;
     for (int i = 0; i < SP_ENGINE_COUNT; i++) {
         lv_obj_t* b = lv_btn_create(scr_piano_params);
         lv_obj_set_size(b, tab_w, tab_h);
@@ -6662,9 +6854,7 @@ static void create_piano_params_screen(void) {
     lv_obj_set_style_pad_all(s_pp_param_panel, 0, 0);
     lv_obj_clear_flag(s_pp_param_panel, LV_OBJ_FLAG_SCROLLABLE);
 
-    pp_update_engine_chips();
-    pp_update_preset_chips();
-    pp_rebuild_param_grid();
+    pp_refresh_view();
 }
 
 // =============================================================================
@@ -6762,6 +6952,7 @@ void ui_create_all_screens(void) {
     create_performance_screen();
     create_piano_screen();      /* v2.6 */
     create_piano_params_screen(); /* v2.7 — synth params editor */
+    create_guitar_screen();     /* v3.1 — GTR fretboard */
 
     // Start on boot screen
     lv_scr_load(scr_boot);
@@ -6881,7 +7072,7 @@ static void ui_reload_themed_screens(void) {
     s_piano_keys_container = NULL; s_piano_octave_lbl = NULL;
     s_piano_keys24_btn = NULL; s_piano_keys24_lbl = NULL; s_piano_status_lbl = NULL;
     s_piano_rec_btn = NULL; s_piano_rec_lbl = NULL;
-    for (int i = 0; i < 4; i++) s_piano_engine_btns[i] = NULL;
+    for (int i = 0; i < PIANO_ENGINE_COUNT; i++) s_piano_engine_btns[i] = NULL;
     create_piano_screen();
     /* v2.7 — also recreate piano params on theme reload */
     if (scr_piano_params) { lv_obj_del(scr_piano_params); scr_piano_params = NULL; }
@@ -6892,6 +7083,9 @@ static void ui_reload_themed_screens(void) {
         s_pp_sliders[i] = NULL; s_pp_val_lbls[i] = NULL;
     }
     create_piano_params_screen();
+    if (scr_guitar) { lv_obj_del(scr_guitar); scr_guitar = NULL; }
+    s_gtr_status_lbl = NULL;
+    create_guitar_screen();
 
     // Restore navigation (go to live if was on unknown screen)
     int nav_to = (saved_screen == 9) ? 9 : 2;  // stay in sdcard if we were there
@@ -6900,6 +7094,7 @@ static void ui_reload_themed_screens(void) {
     if (saved_screen == 7) nav_to = 7;
     if (saved_screen == 8) nav_to = 8;
     if (saved_screen == 10) nav_to = 10;   /* PIANO */
+    if (saved_screen == 12) nav_to = 12;   /* GUITAR */
     ui_navigate_to(nav_to);
 }
 
@@ -6908,17 +7103,22 @@ void ui_navigate_to(int screen_id) {
         scr_boot, NULL, scr_live, scr_sequencer, NULL,
         NULL, scr_performance, scr_volumes, scr_fx, scr_sdcard,
         scr_piano,        /* 10 = PIANO (replaces stubbed performance slot) */
-        scr_piano_params  /* 11 = PIANO PARAMS (synth editor) */
+        scr_piano_params, /* 11 = PIANO PARAMS (synth editor) */
+        scr_guitar        /* 12 = GUITAR */
     };
     int count = sizeof(targets) / sizeof(targets[0]);
     if (screen_id >= 0 && screen_id < count && targets[screen_id]) {
+        if (screen_id == 11 && s_piano_engine_idx >= 0 && s_piano_engine_idx < SP_ENGINE_COUNT) {
+            s_pp_engine_idx = s_piano_engine_idx;
+            pp_refresh_view();
+        }
         if (screen_id != 9) s_sd_for_xtra = false;
         bool keep_piano_preview = s_piano_play_active &&
             ((active_screen == 10 && screen_id == 11) || (active_screen == 11 && screen_id == 10));
         // Before leaving most screens, stop active synths to prevent stuck notes.
         // Keep the local Melody preview alive while moving between PIANO and PARAMS.
         if (udp_wifi_connected() && !keep_piano_preview) {
-            for (int eng = 0; eng < 7; eng++) {
+            for (int eng = 0; eng < 9; eng++) {
                 udp_send_synth_note_off(eng, 0);  // engine, track=0
             }
         }
@@ -7238,7 +7438,7 @@ void ui_update_current_screen(void) {
     if (active == scr_live) period_ms = 16;
     else if (active == scr_sequencer) period_ms = 8;
     else if (active == scr_sdcard) period_ms = p4sd.needs_refresh ? 16 : 100;
-    else if (active == scr_piano || active == scr_piano_params) period_ms = 50;
+    else if (active == scr_piano || active == scr_piano_params || active == scr_guitar) period_ms = 50;
     if (now - last_active_update_ms < period_ms) return;
     last_active_update_ms = now;
 
@@ -7247,7 +7447,7 @@ void ui_update_current_screen(void) {
     else if (active == scr_sequencer) update_sequencer_screen();
     else if (active == scr_fx) update_fx_screen();
     else if (active == scr_volumes) update_volumes_screen();
-    else if (active == scr_piano || active == scr_piano_params) update_piano_screen();
+    else if (active == scr_piano || active == scr_piano_params || active == scr_guitar) update_piano_screen();
     else if (active == scr_sdcard && p4sd.needs_refresh) {
         p4sd.needs_refresh = false;
         sd_refresh_ui();
