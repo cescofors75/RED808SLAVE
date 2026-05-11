@@ -33,6 +33,22 @@
 			"group": "build"
 		},
 		{
+			"label": "PlatformIO: Upload Filesystem S3",
+			"type": "shell",
+			"command": "pwsh.exe",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-File", "${workspaceFolder}/.vscode/upload_device.ps1",
+				"-Device", "s3",
+				"-Target", "uploadfs",
+				"-ProjectDir", "${workspaceFolder}/RedMaster_ESP32S3",
+				"-Environment", "redmaster-s3-r8n16"
+			],
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
 			"label": "PlatformIO: Flash Daisy",
 			"type": "shell",
 			"command": "pwsh.exe",
