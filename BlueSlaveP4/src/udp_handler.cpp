@@ -484,6 +484,14 @@ void udp_send_synth_note_off(uint8_t engine, uint8_t track) {
     sendJson(buf);
 }
 
+void udp_send_synth_note_off_ex(uint8_t engine, uint8_t track, uint8_t note) {
+    char buf[96];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"synthNoteOff\",\"engine\":%u,\"track\":%u,\"note\":%u}",
+             (unsigned)engine, (unsigned)track, (unsigned)note);
+    sendJson(buf);
+}
+
 void udp_send_synth303_note_off(void) {
     sendJson("{\"cmd\":\"synth303NoteOff\"}");
 }
