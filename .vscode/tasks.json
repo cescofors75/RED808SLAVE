@@ -156,6 +156,48 @@
 			}
 		},
 		{
+			"label": "PlatformIO: Build SlavePico",
+			"type": "shell",
+			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe run --project-dir ${workspaceFolder}/SlavePico --environment slavepico-p4",
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Upload SlavePico",
+			"type": "shell",
+			"command": "pwsh.exe",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-File", "${workspaceFolder}/.vscode/upload_device.ps1",
+				"-Device", "p4",
+				"-Target", "upload",
+				"-ProjectDir", "${workspaceFolder}/SlavePico",
+				"-Environment", "slavepico-p4"
+			],
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Monitor SlavePico",
+			"type": "shell",
+			"command": "pwsh.exe",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-File", "${workspaceFolder}/.vscode/monitor_device.ps1",
+				"-Device", "p4"
+			],
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true
+			}
+		},
+		{
 			"label": "Inspect MEM MIDIs (Python)",
 			"type": "shell",
 			"command": "python",
