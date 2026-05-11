@@ -3,16 +3,18 @@
 // =============================================================================
 #include "ui_theme.h"
 
-VisualTheme currentTheme = THEME_OCEAN;
+VisualTheme currentTheme = THEME_RED808;
 
 const ThemeColors theme_presets[THEME_COUNT] = {
     // THEME_RED808
-    { .bg=0x0D1117, .panel=0x161B22, .surface=0x21262D, .border=0x30363D,
-      .text=0xE6EDF3, .text_dim=0x8B949E,
-      .accent=0xFF4444, .accent2=0xFF6B6B,
-      .success=0x3FB950, .warning=0xD29922, .error=0xF85149, .info=0x58A6FF, .cyan=0x39D2C0,
-      .track_colors={0xFF2020,0xFF3030,0xFF4040,0xFF5050,0xFF6060,0xFF7070,0xFF8080,0xCC2020,
-                     0xDD3030,0xEE4040,0xFF5555,0xBB1010,0xCC3333,0xDD4444,0xEE5555,0xFF6666},
+    { .bg=0x090806, .panel=0x14110D, .surface=0x211B14, .border=0x3A3024,
+      .text=0xF7EAD7, .text_dim=0xA99A86,
+      .accent=0xE23D22, .accent2=0xF87925,
+      .success=0xF7EAD7, .warning=0xF5BC31, .error=0xC9271B, .info=0xFF8A24, .cyan=0xF7EAD7,
+      .track_colors={0xC9271B,0xD93421,0xE74428,0xF2552F,
+                     0xD85A1A,0xE86820,0xF87925,0xFF8C2A,
+                     0xC99522,0xE0AA2A,0xF5BC31,0xFFD052,
+                     0xDCC9A8,0xEAD9BA,0xF7EAD7,0xFFF7E8},
       .name="RED808" },
     // THEME_OCEAN
     { .bg=0x0A1628, .panel=0x0F2035, .surface=0x162D4A, .border=0x1E3F66,

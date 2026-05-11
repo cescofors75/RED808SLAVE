@@ -111,6 +111,14 @@ static volatile uint8_t s_16l_src_pad  = 0;            // last non-16L tap
 static volatile bool          s_pad_held[16] = {};
 static volatile unsigned long s_pad_repeat_next_ms[16] = {};
 static volatile uint8_t       s_pad_held_velocity[16] = {};
+static volatile uint8_t       s_pad_hold_x[16] = {};
+static volatile uint8_t       s_pad_hold_y[16] = {};
+static volatile unsigned long s_pad_hold_start_ms[16] = {};
+static volatile uint8_t       s_pad_roll_phase[16] = {};
+
+static const unsigned long PAD_TREMOLO_HOLD_MS = 165;
+static const unsigned long PAD_TREMOLO_FAST_MS = 42;
+static const unsigned long PAD_TREMOLO_SLOW_MS = 235;
 
 // Velocity fade visualisation: each press stores (velocity, start_ms) and
 // update_live_screen interpolates an exponential decay over FADE_MS to drive
@@ -127,6 +135,8 @@ static inline void ui_pad_flash_start(uint8_t pad, uint8_t velocity) {
     s_pad_flash_start_ms[pad] = millis();
 }
 
+static inline uint8_t ui_live_pad_velocity(void);
+
 static unsigned long ui_nr_interval_ms(void) {
     // Use current tempo from P4State (UART-synced). BPM can be 0 briefly at
     // boot; clamp to 40..300 for safety.
@@ -142,6 +152,36 @@ static unsigned long ui_nr_interval_ms(void) {
     unsigned long ms = 600000UL / ((unsigned long)bpm_x10 * div);
     if (ms < 15) ms = 15;   // safety floor (~66 Hz max retrigger)
     return ms;
+}
+
+static unsigned long ui_pad_tremolo_interval_ms(uint8_t pad, unsigned long nr_interval) {
+    if (nr_interval) return nr_interval;
+    if (pad >= 16) return 0;
+    uint8_t x = s_pad_hold_x[pad];
+    if (x > 127) x = 127;
+    return PAD_TREMOLO_SLOW_MS - (((PAD_TREMOLO_SLOW_MS - PAD_TREMOLO_FAST_MS) * (unsigned long)x) / 127UL);
+}
+
+static uint8_t ui_pad_tremolo_velocity(uint8_t pad, unsigned long now_ms) {
+    if (pad >= 16) return 100;
+    uint8_t y = s_pad_hold_y[pad];
+    if (y > 127) y = 127;
+    uint16_t base = ui_live_pad_velocity();
+    uint16_t amp = 34 + (((uint16_t)(127 - y) * 93U) / 127U);
+    uint16_t vel = (base * amp) / 127U;
+
+    unsigned long held_ms = now_ms - s_pad_hold_start_ms[pad];
+    if (held_ms < 420UL) {
+        vel = (vel * (64U + (uint16_t)((held_ms * 63UL) / 420UL))) / 127U;
+    }
+
+    static const int8_t wobble[8] = {0, 5, 9, 5, 0, -4, -7, -4};
+    uint8_t phase = s_pad_roll_phase[pad];
+    uint8_t depth = 2 + (uint8_t)(((uint16_t)(127 - y) * 10U) / 127U);
+    int16_t shaped = (int16_t)vel + (int16_t)((wobble[phase & 0x07] * (int8_t)depth) / 4);
+    if (shaped < 8) shaped = 8;
+    if (shaped > 127) shaped = 127;
+    return (uint8_t)shaped;
 }
 
 
@@ -189,6 +229,30 @@ static int ui_layout_h(void) {
     return (UI_H > LCD_V_RES) ? LCD_V_RES : UI_H;
 }
 
+static inline lv_color_t ui_track_color(int track) {
+    return lv_color_hex(theme_presets[currentTheme].track_colors[track & 0x0F]);
+}
+
+static inline bool ui_track_color_is_light(int track) {
+    uint32_t c = theme_presets[currentTheme].track_colors[track & 0x0F];
+    uint8_t r = (uint8_t)((c >> 16) & 0xFF);
+    uint8_t g = (uint8_t)((c >> 8) & 0xFF);
+    uint8_t b = (uint8_t)(c & 0xFF);
+    return ((uint16_t)r + (uint16_t)g + (uint16_t)b) > 560;
+}
+
+static inline lv_color_t ui_track_label_color(int track, bool lit) {
+    return (lit && ui_track_color_is_light(track)) ? RED808_BG : ui_track_color(track);
+}
+
+static inline uint32_t ui_tremolo_neon_hex(uint8_t x, uint8_t y) {
+    uint8_t amp = (uint8_t)(127U - (y > 127 ? 127 : y));
+    if (x < 32)  return (amp > 84) ? 0xFF3324 : 0xC9271B;
+    if (x < 64)  return (amp > 72) ? 0xFF6A2A : 0xE86820;
+    if (x < 96)  return (amp > 60) ? 0xFFD052 : 0xF5BC31;
+    return (amp > 48) ? 0xFFF7E8 : 0xF7EAD7;
+}
+
 // =============================================================================
 // HELPER: Section shell (styled container)
 // =============================================================================
@@ -200,7 +264,7 @@ lv_obj_t* create_section_shell(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_set_style_bg_opa(obj, LV_OPA_80, 0);
     lv_obj_set_style_border_width(obj, 1, 0);
     lv_obj_set_style_border_color(obj, RED808_BORDER, 0);
-    lv_obj_set_style_radius(obj, 12, 0);
+    lv_obj_set_style_radius(obj, 8, 0);
     lv_obj_set_style_pad_all(obj, 14, 0);
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     return obj;
@@ -238,7 +302,7 @@ static bool ui_master_link_display_on(void) {
 static void apply_control_button_style(lv_obj_t* button, lv_color_t accent,
                                        bool filled, int radius) {
     if (!button) return;
-    lv_obj_set_style_radius(button, radius, 0);
+    lv_obj_set_style_radius(button, radius > 8 ? 8 : radius, 0);
     lv_obj_set_style_bg_color(button, filled ? accent : RED808_SURFACE, 0);
     lv_obj_set_style_bg_grad_color(button, filled ? RED808_SURFACE : RED808_PANEL, 0);
     lv_obj_set_style_bg_grad_dir(button, LV_GRAD_DIR_VER, 0);
@@ -1721,7 +1785,7 @@ static void create_live_screen(void) {
     // === LEFT 4×4: Drum Pads (Neon Ring Style) ===
     for (int i = 0; i < 16; i++) {
         int c = i % 4, r = i / 4;
-        lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[i]);
+        lv_color_t tc = ui_track_color(i);
 
         live_pad_btns[i] = lv_btn_create(scr_live);
         lv_obj_set_size(live_pad_btns[i], CW, CH);
@@ -1764,7 +1828,7 @@ static void create_live_screen(void) {
         live_pad_inst_labels[i] = lv_label_create(live_pad_btns[i]);
         lv_label_set_text(live_pad_inst_labels[i], PAD_INST_SHORT[s_pad_inst_sel[i] & 0x07]);
         lv_obj_set_style_text_font(live_pad_inst_labels[i], &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(live_pad_inst_labels[i], RED808_CYAN, 0);
+        lv_obj_set_style_text_color(live_pad_inst_labels[i], tc, 0);
         lv_obj_align(live_pad_inst_labels[i], LV_ALIGN_BOTTOM_RIGHT, -8, -7);
 
         live_pad_labels[i] = lv_label_create(live_pad_btns[i]);
@@ -2123,7 +2187,7 @@ static void update_live_screen(void) {
         if (band == pad_prev_band[i]) continue;
         pad_prev_band[i] = band;
 
-        lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[i]);
+        lv_color_t tc = ui_track_color(i);
 
         if (muted) {
             lv_obj_set_style_bg_color(live_pad_btns[i], RED808_SURFACE, 0);
@@ -2154,7 +2218,7 @@ static void update_live_screen(void) {
             if (live_pad_accent_strips[i])
                 lv_obj_set_style_bg_opa(live_pad_accent_strips[i], LV_OPA_70, 0);
             if (live_pad_labels[i])
-                lv_obj_set_style_text_color(live_pad_labels[i], tc, 0);
+                lv_obj_set_style_text_color(live_pad_labels[i], ui_track_label_color(i, false), 0);
             if (live_pad_num_labels[i])
                 lv_obj_set_style_text_color(live_pad_num_labels[i], RED808_TEXT_DIM, 0);
         } else {
@@ -2170,12 +2234,11 @@ static void update_live_screen(void) {
             lv_color_t bc = (band >= 6) ? lv_color_white() : tc;
             lv_obj_set_style_border_color(live_pad_btns[i], bc, 0);
             lv_obj_set_style_border_opa(live_pad_btns[i], LV_OPA_COVER, 0);
-            if (live_pad_labels[i]) {
-                lv_color_t lc = (band >= 5) ? lv_color_white() : tc;
-                lv_obj_set_style_text_color(live_pad_labels[i], lc, 0);
-            }
+            if (live_pad_labels[i])
+                lv_obj_set_style_text_color(live_pad_labels[i], ui_track_label_color(i, band >= 5), 0);
             if (live_pad_num_labels[i])
-                lv_obj_set_style_text_color(live_pad_num_labels[i], band >= 5 ? lv_color_white() : RED808_TEXT, 0);
+                lv_obj_set_style_text_color(live_pad_num_labels[i],
+                    (band >= 5 && ui_track_color_is_light(i)) ? RED808_BG : (band >= 5 ? lv_color_white() : RED808_TEXT), 0);
             if (live_pad_accent_strips[i])
                 lv_obj_set_style_bg_opa(live_pad_accent_strips[i], band >= 5 ? LV_OPA_COVER : LV_OPA_80, 0);
         }
@@ -2200,7 +2263,7 @@ static void update_live_screen(void) {
         prev_solo[i] = solo;
         prev_step_lit[i] = step_lit;
 
-        lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[i]);
+        lv_color_t tc = ui_track_color(i);
         if (live_pad_state_labels[i]) {
             if (solo) {
                 lv_label_set_text(live_pad_state_labels[i], "SOLO");
@@ -2319,6 +2382,73 @@ static void update_live_screen(void) {
         prev_16l_src = 255;
     }
 
+    // Tremolo hold: neon ring responds to X(rate) and Y(amplitude), no marker dot.
+    static bool prev_trem_visible[16] = {};
+    static uint8_t prev_trem_x[16] = {};
+    static uint8_t prev_trem_y[16] = {};
+    static uint8_t prev_trem_phase[16] = {};
+    for (int i = 0; i < 16; i++) {
+        if (!live_pad_btns[i]) continue;
+        bool visible = s_pad_held[i] && !p4.track_muted[i] &&
+                       !lv_obj_has_flag(live_pad_btns[i], LV_OBJ_FLAG_HIDDEN);
+        uint8_t x = s_pad_hold_x[i];
+        uint8_t y = s_pad_hold_y[i];
+        uint8_t phase = s_pad_roll_phase[i] & 0x07;
+        if (!visible) {
+            if (prev_trem_visible[i]) {
+                lv_obj_set_style_outline_width(live_pad_btns[i], 0, 0);
+                lv_obj_set_style_shadow_width(live_pad_btns[i], 0, 0);
+                lv_obj_set_style_shadow_opa(live_pad_btns[i], LV_OPA_0, 0);
+                pad_prev_band[i] = 0xFF;
+            }
+            prev_trem_visible[i] = false;
+            continue;
+        }
+
+        if (visible == prev_trem_visible[i] && x == prev_trem_x[i] &&
+            y == prev_trem_y[i] && phase == prev_trem_phase[i]) {
+            continue;
+        }
+        prev_trem_visible[i] = true;
+        prev_trem_x[i] = x;
+        prev_trem_y[i] = y;
+        prev_trem_phase[i] = phase;
+
+        uint8_t amp = (uint8_t)(127U - (y > 127 ? 127 : y));
+        uint8_t speed = x > 127 ? 127 : x;
+        uint8_t pulse = (phase <= 4) ? (uint8_t)(phase * 16U) : (uint8_t)((8U - phase) * 16U);
+        lv_color_t neon = lv_color_hex(ui_tremolo_neon_hex(speed, y));
+        lv_opa_t fill_opa = (lv_opa_t)(78 + ((uint16_t)amp * 112U) / 127U + pulse / 3U);
+        if (fill_opa > LV_OPA_COVER) fill_opa = LV_OPA_COVER;
+        lv_coord_t border_w = (lv_coord_t)(4 + ((uint16_t)speed * 3U) / 127U);
+        lv_coord_t outline_w = (lv_coord_t)(2 + ((uint16_t)amp * 4U) / 127U);
+        lv_coord_t shadow_w = (lv_coord_t)(10 + ((uint16_t)amp * 18U) / 127U + ((uint16_t)speed * 10U) / 127U);
+        lv_opa_t glow_opa = (lv_opa_t)(70 + ((uint16_t)amp * 145U) / 127U + pulse / 2U);
+        if (glow_opa > LV_OPA_COVER) glow_opa = LV_OPA_COVER;
+
+        lv_obj_set_style_bg_color(live_pad_btns[i], neon, 0);
+        lv_obj_set_style_bg_grad_color(live_pad_btns[i], RED808_SURFACE, 0);
+        lv_obj_set_style_bg_opa(live_pad_btns[i], fill_opa, 0);
+        lv_obj_set_style_border_width(live_pad_btns[i], border_w, 0);
+        lv_obj_set_style_border_color(live_pad_btns[i], neon, 0);
+        lv_obj_set_style_border_opa(live_pad_btns[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_outline_width(live_pad_btns[i], outline_w, 0);
+        lv_obj_set_style_outline_pad(live_pad_btns[i], 1, 0);
+        lv_obj_set_style_outline_color(live_pad_btns[i], neon, 0);
+        lv_obj_set_style_outline_opa(live_pad_btns[i], glow_opa, 0);
+        lv_obj_set_style_shadow_width(live_pad_btns[i], shadow_w, 0);
+        lv_obj_set_style_shadow_color(live_pad_btns[i], neon, 0);
+        lv_obj_set_style_shadow_opa(live_pad_btns[i], glow_opa, 0);
+        if (live_pad_labels[i])
+            lv_obj_set_style_text_color(live_pad_labels[i], ui_track_color_is_light(i) ? RED808_BG : lv_color_white(), 0);
+        if (live_pad_num_labels[i])
+            lv_obj_set_style_text_color(live_pad_num_labels[i], ui_track_color_is_light(i) ? RED808_BG : RED808_TEXT, 0);
+        if (live_pad_accent_strips[i]) {
+            lv_obj_set_style_bg_color(live_pad_accent_strips[i], neon, 0);
+            lv_obj_set_style_bg_opa(live_pad_accent_strips[i], LV_OPA_COVER, 0);
+        }
+    }
+
     // Spectrum bars — read from DSP task
     {
         SpectrumData sp;
@@ -2360,8 +2490,8 @@ static bool s_fx_ui_syncing = false;
 
 // FX metadata (page × 3)
 static const char*    fx_names[6]  = {"FLANGE","DELAY","REVERB","FOLD","CRUSH","PHASER"};
-static const uint32_t fx_colors[6] = {0x58A6FF, 0xB58BFF, 0x39D2C0,
-                                       0xFF6B35, 0xFFD700, 0xFF8F5A};
+static const uint32_t fx_colors[6] = {0xC9271B, 0xE86820, 0xF5BC31,
+                                       0xF2552F, 0xFF8C2A, 0xF7EAD7};
 static const char*    fx_src[6]    = {"ENC 1","ENC 2","ENC 3","MACRO","MACRO","MACRO"};
 
 // Callback: toggle FX mute on card click
@@ -5175,6 +5305,7 @@ static void piano_reset_vertical_expression(void);
 static void piano_update_status_note(uint8_t midi_note);
 static void piano_update_expression_status(void);
 static void piano_update_expression_bar(void);
+static void piano_sync_active_engine_state(void);
 
 static inline bool piano_pc_is_black(uint8_t pc) {
     return (pc == 1) || (pc == 3) || (pc == 6) || (pc == 8) || (pc == 10);
@@ -5220,13 +5351,28 @@ static void piano_send_note_off_specific(uint8_t midi_note) {
     udp_send_synth_note_off(piano_engine_code(), 0);
 }
 
+static void piano_send_engine_all_notes_off(uint8_t engine) {
+    if (!ui_use_udp_transport()) return;
+    udp_send_synth_note_off(engine, 0xFF);
+}
+
+static void piano_send_panic_melodic(void) {
+    if (!ui_use_udp_transport()) return;
+    for (int i = 0; i < PIANO_ENGINE_COUNT; i++) {
+        piano_send_engine_all_notes_off(PIANO_ENGINES[i]);
+    }
+#if P4_ENABLE_DEBUG_LOG
+    Serial.printf("[P4 piano] panic melodic engines=%d\n", PIANO_ENGINE_COUNT);
+#endif
+}
+
 static void piano_reset_bend(void) {
     if (!ui_use_udp_transport()) return;
     uint8_t engine = piano_engine_code();
     if (engine == 3) {
         udp_send_synth_param(engine, 0, 14, 0.0f);   // PitchBend
     } else if (engine == 6) {
-        udp_send_synth_param(engine, 0, 12, 0.0f);   // Detune fallback
+        udp_send_synth_param(engine, 0, 12, 0.0f);   // Detune cents
     }
     s_piano_last_bend_st = 0.0f;
 }
@@ -5391,9 +5537,9 @@ static void piano_send_bend(float bend_st) {
         s_piano_last_bend_st = bend_st;
         s_piano_last_bend_send_ms = now;
     } else if (engine == 6) {
-        float det = bend_st / 2.0f;  // map +/-2st gesture to +/-1st detune
-        if (det < -1.0f) det = -1.0f;
-        if (det > 1.0f) det = 1.0f;
+        float det = bend_st * 25.0f;  // map +/-2st gesture to +/-50ct detune
+        if (det < -50.0f) det = -50.0f;
+        if (det > 50.0f) det = 50.0f;
         udp_send_synth_param(engine, 0, 12, det);
         s_piano_last_bend_st = bend_st;
         s_piano_last_bend_send_ms = now;
@@ -5401,9 +5547,13 @@ static void piano_send_bend(float bend_st) {
 }
 
 static void piano_send_off(void) {
-    if (s_piano_held_note < 0) return;
-    if (ui_use_udp_transport()) {
-        udp_send_synth_note_off(piano_engine_code(), 0);
+    int held_note = s_piano_held_note;
+    if (held_note >= 0 && ui_use_udp_transport()) {
+        if (piano_engine_code() == 4) {
+            udp_send_synth_note_off_ex(piano_engine_code(), 0, (uint8_t)held_note);
+        } else {
+            udp_send_synth_note_off(piano_engine_code(), 0);
+        }
     }
     s_piano_release_pending = false;
     s_piano_release_due_ms = 0;
@@ -5587,23 +5737,40 @@ static void piano_uart_broadcast_state(void) {
     uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MELODY_PAD,    (uint8_t)s_piano_assign_pad);
 }
 
-static void piano_engine_btn_cb(lv_event_t* e) {
-    int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx < 0 || idx >= PIANO_ENGINE_COUNT) return;
-    piano_send_off();
-    s_piano_engine_idx = idx;
+static void piano_refresh_engine_chips(void) {
     for (int i = 0; i < PIANO_ENGINE_COUNT; i++) {
         if (!s_piano_engine_btns[i]) continue;
-        bool sel = (i == idx);
+        bool sel = (i == s_piano_engine_idx);
         lv_obj_set_style_bg_color(s_piano_engine_btns[i],
             sel ? RED808_ACCENT : RED808_SURFACE, 0);
         lv_obj_set_style_border_color(s_piano_engine_btns[i],
             sel ? RED808_ACCENT2 : RED808_BORDER, 0);
     }
+    if (s_piano_status_lbl) {
+        lv_label_set_text_fmt(s_piano_status_lbl, "ENG %s  OCT %d  PAD %d",
+                              PIANO_ENGINE_LABELS[s_piano_engine_idx],
+                              s_piano_octave, s_piano_assign_pad + 1);
+    }
+}
+
+static void piano_engine_btn_cb(lv_event_t* e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= PIANO_ENGINE_COUNT) return;
+#if P4_ENABLE_DEBUG_LOG
+    uint8_t old_engine = piano_engine_code();
+#endif
+    piano_send_off();
+    piano_send_panic_melodic();
+    s_piano_engine_idx = idx;
+#if P4_ENABLE_DEBUG_LOG
+    Serial.printf("[P4 piano] engine %u -> %u\n", old_engine, piano_engine_code());
+#endif
+    piano_refresh_engine_chips();
     // v2.9 — broadcast engine selection through master
     if (ui_use_udp_transport()) {
         udp_send_melody_set_engine(PIANO_ENGINES[s_piano_engine_idx]);
     }
+    piano_sync_active_engine_state();
     // v2.9 — sync directly to S3 melody screen via UART (4 campos completos)
     piano_uart_broadcast_state();
 }
@@ -5948,15 +6115,7 @@ void piano_apply_melody_sync(uint8_t engine, uint8_t octave, bool rec, uint8_t p
     if (pad < 16) s_piano_assign_pad = (int)pad;
     s_piano_rec_active = rec;
 
-    // Refresh engine button colors
-    for (int i = 0; i < PIANO_ENGINE_COUNT; i++) {
-        if (!s_piano_engine_btns[i]) continue;
-        bool sel = (i == new_idx);
-        lv_obj_set_style_bg_color(s_piano_engine_btns[i],
-            sel ? RED808_ACCENT : RED808_SURFACE, 0);
-        lv_obj_set_style_border_color(s_piano_engine_btns[i],
-            sel ? RED808_ACCENT2 : RED808_BORDER, 0);
-    }
+    piano_refresh_engine_chips();
     // Refresh octave label
     if (s_piano_octave_lbl)
         lv_label_set_text_fmt(s_piano_octave_lbl, "OCT %d", s_piano_octave);
@@ -6389,6 +6548,29 @@ static void pp_init_engine_defaults(int eng_idx) {
     }
 }
 
+static void piano_sync_active_engine_state(void) {
+    if (!ui_use_udp_transport()) return;
+    int eng_idx = s_piano_engine_idx;
+    if (eng_idx < 0 || eng_idx >= SP_ENGINE_COUNT) return;
+    const SynthEngineDef* eng = &SP_ENGINES[eng_idx];
+    int preset_idx = s_pp_preset_idx[eng_idx];
+    uint8_t packets = 0;
+    if (preset_idx >= 0 && preset_idx < eng->preset_count) {
+        udp_send_synth_preset(eng->engine, (uint8_t)preset_idx);
+        packets++;
+    }
+    piano_apply_glide_setting();
+    if (eng->engine == SP_ENGINE_WT) {
+        piano_reset_vertical_expression();
+        packets += 2;
+    }
+    (void)packets;
+#if P4_ENABLE_DEBUG_LOG
+    Serial.printf("[P4 piano] sync eng=%u preset=%d packets~%u\n",
+                  eng->engine, preset_idx, packets);
+#endif
+}
+
 static bool piano_vertical_expression_active(void) {
     return piano_engine_code() == SP_ENGINE_WT && !s_piano_glide_enabled && !s_piano_bend_enabled;
 }
@@ -6819,10 +7001,11 @@ static void pp_preset_cb(lv_event_t* e) {
     pp_update_preset_chips();
     pp_rebuild_param_grid();
     if (ui_use_udp_transport()) {
-        for (uint8_t i = 0; i < eng->param_count && i < PP_MAX_PARAMS_P4; i++) {
-            udp_send_synth_param(eng->engine, 0, eng->params[i].param_id,
-                                 s_pp_values[s_pp_engine_idx][i]);
-        }
+        piano_send_panic_melodic();
+        udp_send_synth_preset(eng->engine, (uint8_t)idx);
+#if P4_ENABLE_DEBUG_LOG
+        Serial.printf("[P4 params] preset eng=%u preset=%d packets=6\n", eng->engine, idx);
+#endif
     }
 }
 
@@ -7319,6 +7502,18 @@ void ui_navigate_to(int screen_id) {
         if (screen_id == 11 && s_piano_engine_idx >= 0 && s_piano_engine_idx < SP_ENGINE_COUNT) {
             s_pp_engine_idx = s_piano_engine_idx;
             pp_refresh_view();
+            piano_sync_active_engine_state();
+        }
+        if (screen_id == 10) {
+            if (active_screen == 11 && s_pp_engine_idx >= 0 && s_pp_engine_idx < PIANO_ENGINE_COUNT) {
+                s_piano_engine_idx = s_pp_engine_idx;
+                piano_refresh_engine_chips();
+                if (ui_use_udp_transport()) {
+                    udp_send_melody_set_engine(PIANO_ENGINES[s_piano_engine_idx]);
+                }
+                piano_uart_broadcast_state();
+            }
+            piano_sync_active_engine_state();
         }
         if (screen_id != 9) s_sd_for_xtra = false;
         bool keep_piano_preview = s_piano_play_active &&
@@ -7457,7 +7652,9 @@ static constexpr int LIVE_CH = 143;
 static constexpr int LIVE_SX = 126;
 static constexpr int LIVE_SY = 147;
 
-int ui_pad_from_xy(uint16_t x, uint16_t y) {
+int ui_pad_from_xy(uint16_t x, uint16_t y, uint8_t* cell_x, uint8_t* cell_y) {
+    if (cell_x) *cell_x = 64;
+    if (cell_y) *cell_y = 64;
     if (!g_live_screen_active.load(std::memory_order_acquire)) return -1;
     // Dynamic hit-test against current pad geometry (PAD MODE aware).
     for (int i = 0; i < 16; i++) {
@@ -7469,6 +7666,12 @@ int ui_pad_from_xy(uint16_t x, uint16_t y) {
         lv_coord_t pw = lv_obj_get_width(b);
         lv_coord_t ph = lv_obj_get_height(b);
         if ((int)x >= px && (int)x < (px + pw) && (int)y >= py && (int)y < (py + ph)) {
+            int dx = (int)x - (int)px;
+            int dy = (int)y - (int)py;
+            int denom_x = (pw > 1) ? (pw - 1) : 1;
+            int denom_y = (ph > 1) ? (ph - 1) : 1;
+            if (cell_x) *cell_x = (uint8_t)constrain((dx * 127) / denom_x, 0, 127);
+            if (cell_y) *cell_y = (uint8_t)constrain((dy * 127) / denom_y, 0, 127);
             return i;
         }
     }
@@ -7482,6 +7685,8 @@ int ui_pad_from_xy(uint16_t x, uint16_t y) {
     int y_in = (y - LIVE_M) % LIVE_SY;
     if (x_in >= LIVE_CW || y_in >= LIVE_CH) return -1;
     if (col >= 4 || row >= 4) return -1;
+    if (cell_x) *cell_x = (uint8_t)constrain((x_in * 127) / (LIVE_CW - 1), 0, 127);
+    if (cell_y) *cell_y = (uint8_t)constrain((y_in * 127) / (LIVE_CH - 1), 0, 127);
     return row * 4 + col;
 }
 
@@ -7496,7 +7701,8 @@ static inline uint8_t ui_live_pad_velocity(void) {
 // note-repeat timer. Falling edge → cancel repeat. Held → fire repeats on
 // schedule using the current tempo & subdivision.
 // =============================================================================
-void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
+void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16],
+                         const uint8_t cell_x[16], const uint8_t cell_y[16]) {
     (void)velocity;
     static bool prev_live_active = true;
 
@@ -7507,6 +7713,8 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
         for (int p = 0; p < 16; p++) {
             s_pad_held[p] = false;
             s_pad_repeat_next_ms[p] = 0;
+            s_pad_hold_start_ms[p] = 0;
+            s_pad_roll_phase[p] = 0;
         }
         return;
     }
@@ -7527,6 +7735,8 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
         for (int p = 0; p < 16; p++) {
             s_pad_held[p] = false;
             s_pad_repeat_next_ms[p] = 0;
+            s_pad_hold_start_ms[p] = 0;
+            s_pad_roll_phase[p] = 0;
         }
         return;
     }
@@ -7541,11 +7751,17 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
     for (int p = 0; p < 16; p++) {
         bool was_held = s_pad_held[p];
         bool is_held  = pressed[p];
+        if (is_held) {
+            s_pad_hold_x[p] = cell_x ? cell_x[p] : 64;
+            s_pad_hold_y[p] = cell_y ? cell_y[p] : 64;
+        }
 
         if (is_held && !was_held) {
             // ── Rising edge: real finger-down ──
             uint8_t vel = ui_live_pad_velocity();
             s_pad_held_velocity[p] = vel;
+            s_pad_hold_start_ms[p] = now;
+            s_pad_roll_phase[p] = 0;
 
             uint8_t send_pad = p;
             uint8_t send_vel = vel;
@@ -7565,16 +7781,25 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
                 s_pad_flash_vel[p] = 0;
             }
 
-            // Arm note-repeat timer
-            s_pad_repeat_next_ms[p] = (nr_interval && s_nr_idx)
-                ? (now + nr_interval) : 0;
+            unsigned long tremolo_interval = ui_pad_tremolo_interval_ms((uint8_t)p, nr_interval);
+            s_pad_repeat_next_ms[p] = tremolo_interval
+                ? (now + (nr_interval ? tremolo_interval : PAD_TREMOLO_HOLD_MS)) : 0;
         } else if (!is_held && was_held) {
             // ── Falling edge: finger lifted ──
             s_pad_repeat_next_ms[p] = 0;
-        } else if (is_held && nr_interval && s_pad_repeat_next_ms[p]
+            s_pad_hold_start_ms[p] = 0;
+            s_pad_roll_phase[p] = 0;
+        } else if (is_held && s_pad_repeat_next_ms[p]
                    && now >= s_pad_repeat_next_ms[p]) {
-            // ── Held + note-repeat tick ──
-            uint8_t vel = s_pad_held_velocity[p] ? s_pad_held_velocity[p] : 100;
+            // ── Held + tremolo/note-repeat tick ──
+            unsigned long tremolo_interval = ui_pad_tremolo_interval_ms((uint8_t)p, nr_interval);
+            if (!tremolo_interval) {
+                s_pad_repeat_next_ms[p] = 0;
+                s_pad_held[p] = is_held;
+                continue;
+            }
+            s_pad_roll_phase[p] = (uint8_t)(s_pad_roll_phase[p] + 1);
+            uint8_t vel = ui_pad_tremolo_velocity((uint8_t)p, now);
             uint8_t send_pad = p;
             uint8_t send_vel = vel;
             if (s_16l_active) {
@@ -7590,8 +7815,8 @@ void ui_pad_frame_update(const bool pressed[16], const uint8_t velocity[16]) {
             }
             // Schedule next tick; if we fell behind, catch up without drifting
             // into the far past (e.g. after a blocked frame).
-            unsigned long next = s_pad_repeat_next_ms[p] + nr_interval;
-            if (next <= now) next = now + nr_interval;
+            unsigned long next = s_pad_repeat_next_ms[p] + tremolo_interval;
+            if (next <= now) next = now + tremolo_interval;
             s_pad_repeat_next_ms[p] = next;
         }
 

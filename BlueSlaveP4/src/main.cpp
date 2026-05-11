@@ -40,7 +40,7 @@ void setup() {
     P4_LOG_PRINTLN("[INIT] LVGL OK");
 
     // 4. Apply default theme
-    ui_theme_apply(THEME_OCEAN);
+    ui_theme_apply(THEME_RED808);
 
     // 5. Create UI screens (boot → live → seq → fx → vol → settings → perf)
     P4_LOG_PRINTLN("[INIT] UI screens...");

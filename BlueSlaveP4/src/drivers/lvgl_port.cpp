@@ -187,11 +187,20 @@ static void touch_task(void* arg) {
 
         bool    pressed[16]  = {};
         uint8_t velocity[16] = {};
+        uint8_t cell_x[16];
+        uint8_t cell_y[16];
+        for (int p = 0; p < 16; p++) {
+            cell_x[p] = 64;
+            cell_y[p] = 64;
+        }
 
         for (int i = 0; i < MAX_TOUCH_POINTS; i++) {
             if (touch_data[i].state != LV_INDEV_STATE_PR) continue;
+            uint8_t lx = 64;
+            uint8_t ly = 64;
             int pad = ui_pad_from_xy((uint16_t)touch_data[i].point.x,
-                                     (uint16_t)touch_data[i].point.y);
+                                     (uint16_t)touch_data[i].point.y,
+                                     &lx, &ly);
             if (pad < 0) continue;
             pressed[pad] = true;
             // Map GT911 area byte (0..255) to MIDI velocity (40..127).
@@ -200,10 +209,14 @@ static void touch_task(void* arg) {
             uint8_t a = touch_data[i].area;
             uint8_t v = a ? (uint8_t)(40 + ((uint32_t)a * 87) / 255) : 100;
             if (v > 127) v = 127;
-            if (v > velocity[pad]) velocity[pad] = v;
+            if (v > velocity[pad]) {
+                velocity[pad] = v;
+                cell_x[pad] = lx;
+                cell_y[pad] = ly;
+            }
         }
 
-        ui_pad_frame_update(pressed, velocity);
+        ui_pad_frame_update(pressed, velocity, cell_x, cell_y);
 
         vTaskDelay(pdMS_TO_TICKS(5));   // 200Hz touch polling
     }
