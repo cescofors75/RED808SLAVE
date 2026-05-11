@@ -61,6 +61,12 @@ static int patternRowStepCount = 16;
 static unsigned long lastLocalStepMs[16][64] = {};
 static unsigned long lastMasterStepSyncMs = 0;
 static unsigned long lastLocalFxMs[6] = {};
+static unsigned long lastRemoteMasterFxLogMs = 0;
+static unsigned long lastRemoteStateSyncFxLogMs = 0;
+static unsigned long lastRemoteHttpFxLogMs = 0;
+static const unsigned long FX_SYNC_LOG_MIN_MS = 250;
+// Dirty flag: set by UDP handler (any task), consumed by LVGL task in ui_tick()
+volatile bool g_fx_screen_dirty = false;
 
 // JSON parse buffer
 static char rxBuf[8192];
@@ -130,6 +136,131 @@ static float clamp_float(float value, float lo, float hi) {
     if (value < lo) return lo;
     if (value > hi) return hi;
     return value;
+}
+
+static int scale_unit_to_u7(float value) {
+    float unit = clamp_float(value, 0.0f, 1.0f);
+    return clamp_int((int)(unit * 127.0f + 0.5f), 0, 127);
+}
+
+static float fx_scalar_to_unit(JsonVariantConst value, float fallbackUnit) {
+    if (value.isNull()) return clamp_float(fallbackUnit, 0.0f, 1.0f);
+    float raw = value.as<float>();
+    if (raw > 1.0f) raw /= 100.0f;
+    return clamp_float(raw, 0.0f, 1.0f);
+}
+
+static bool should_log_fx_sync(unsigned long& lastLogMs) {
+#if P4_ENABLE_FX_SYNC_LOG
+    unsigned long nowMs = millis();
+    if ((nowMs - lastLogMs) < FX_SYNC_LOG_MIN_MS) return false;
+    lastLogMs = nowMs;
+    return true;
+#else
+    (void)lastLogMs;
+    return false;
+#endif
+}
+
+static void log_remote_macro_fx_state(const char* source, JsonObjectConst fx, unsigned long& lastLogMs) {
+#if P4_ENABLE_FX_SYNC_LOG
+    if (!should_log_fx_sync(lastLogMs)) return;
+    P4_FX_LOG_PRINTF("[FX][RX][%s] fields dA=%d dM=%d rA=%d rM=%d pA=%d pD=%d -> D act=%d mix=%u R act=%d mix=%u P act=%d depth=%u\n",
+                      source,
+                      fx["delayActive"].isNull() ? 0 : 1,
+                      fx["delayMix"].isNull() ? 0 : 1,
+                      fx["reverbActive"].isNull() ? 0 : 1,
+                      fx["reverbMix"].isNull() ? 0 : 1,
+                      fx["phaserActive"].isNull() ? 0 : 1,
+                      fx["phaserDepth"].isNull() ? 0 : 1,
+                      p4.enc_muted[1] ? 0 : 1,
+                      (unsigned)p4.enc_value[1],
+                      p4.enc_muted[2] ? 0 : 1,
+                      (unsigned)p4.enc_value[2],
+                      p4.pot_muted[2] ? 0 : 1,
+                      (unsigned)p4.pot_value[2]);
+#else
+    (void)source;
+    (void)fx;
+    (void)lastLogMs;
+#endif
+}
+
+static void log_remote_master_fx_param(const char* param, JsonVariantConst value, bool handled) {
+#if P4_ENABLE_FX_SYNC_LOG
+    if (!should_log_fx_sync(lastRemoteMasterFxLogMs)) return;
+    float raw = value.isNull() ? 0.0f : value.as<float>();
+    P4_FX_LOG_PRINTF("[FX][RX][masterFx] param=%s raw=%.3f handled=%d -> D act=%d mix=%u R act=%d mix=%u P act=%d depth=%u\n",
+                      param ? param : "",
+                      raw,
+                      handled ? 1 : 0,
+                      p4.enc_muted[1] ? 0 : 1,
+                      (unsigned)p4.enc_value[1],
+                      p4.enc_muted[2] ? 0 : 1,
+                      (unsigned)p4.enc_value[2],
+                      p4.pot_muted[2] ? 0 : 1,
+                      (unsigned)p4.pot_value[2]);
+#else
+    (void)param;
+    (void)value;
+    (void)handled;
+#endif
+}
+
+static void apply_remote_macro_fx_state(JsonObjectConst fx, const char* source, unsigned long& lastLogMs) {
+    bool delayActive = fx["delayActive"].isNull() ? !p4.enc_muted[1] : (fx["delayActive"].as<bool>());
+    bool reverbActive = fx["reverbActive"].isNull() ? !p4.enc_muted[2] : (fx["reverbActive"].as<bool>());
+    bool phaserActive = fx["phaserActive"].isNull() ? !p4.pot_muted[2] : (fx["phaserActive"].as<bool>());
+
+    p4.enc_muted[1] = !delayActive;
+    p4.enc_muted[2] = !reverbActive;
+    p4.pot_muted[2] = !phaserActive;
+
+    if (!fx["delayMix"].isNull()) {
+        float delayUnit = fx_scalar_to_unit(fx["delayMix"], (float)p4.enc_value[1] / 127.0f);
+        p4.enc_value[1] = (uint8_t)scale_unit_to_u7(delayUnit);
+    }
+    if (!fx["reverbMix"].isNull()) {
+        float reverbUnit = fx_scalar_to_unit(fx["reverbMix"], (float)p4.enc_value[2] / 127.0f);
+        p4.enc_value[2] = (uint8_t)scale_unit_to_u7(reverbUnit);
+    }
+    if (!fx["phaserDepth"].isNull()) {
+        float phaserUnit = fx_scalar_to_unit(fx["phaserDepth"], (float)p4.pot_value[2] / 127.0f);
+        p4.pot_value[2] = (uint8_t)scale_unit_to_u7(phaserUnit);
+    }
+
+    g_fx_screen_dirty = true;
+    log_remote_macro_fx_state(source, fx, lastLogMs);
+}
+
+static void apply_remote_master_fx_param(const char* param, JsonVariantConst value) {
+    if (!param || value.isNull()) {
+        log_remote_master_fx_param(param, value, false);
+        return;
+    }
+
+    bool handled = true;
+    if (strcmp(param, "delayActive") == 0) {
+        p4.enc_muted[1] = !value.as<bool>();
+    } else if (strcmp(param, "delayMix") == 0) {
+        float delayUnit = fx_scalar_to_unit(value, (float)p4.enc_value[1] / 127.0f);
+        p4.enc_value[1] = (uint8_t)scale_unit_to_u7(delayUnit);
+    } else if (strcmp(param, "reverbActive") == 0) {
+        p4.enc_muted[2] = !value.as<bool>();
+    } else if (strcmp(param, "reverbMix") == 0) {
+        float reverbUnit = fx_scalar_to_unit(value, (float)p4.enc_value[2] / 127.0f);
+        p4.enc_value[2] = (uint8_t)scale_unit_to_u7(reverbUnit);
+    } else if (strcmp(param, "phaserActive") == 0) {
+        p4.pot_muted[2] = !value.as<bool>();
+    } else if (strcmp(param, "phaserDepth") == 0) {
+        float phaserUnit = fx_scalar_to_unit(value, (float)p4.pot_value[2] / 127.0f);
+        p4.pot_value[2] = (uint8_t)scale_unit_to_u7(phaserUnit);
+    } else {
+        handled = false;
+    }
+
+    if (handled) g_fx_screen_dirty = true;
+    log_remote_master_fx_param(param, value, handled);
 }
 
 static bool pattern_grid_has_data(void) {
@@ -428,6 +559,7 @@ static bool fetch_master_state_http(void) {
             p4.sample_rate_hz = clamp_int(fx["sampleRate"] | p4.sample_rate_hz, 1000, 48000);
             forward_fx_samplerate_to_s3(p4.sample_rate_hz);
         }
+        apply_remote_macro_fx_state(fx, "http", lastRemoteHttpFxLogMs);
     }
 
     const char* kit = doc["kit"] | "";
@@ -954,6 +1086,12 @@ static void processJson(const char* json, int len) {
         P4_LOG_PRINTLN("[UDP] Master connected!");
     }
 
+    const char* eventType = doc["type"] | "";
+    if (strcmp(eventType, "masterFx") == 0) {
+        apply_remote_master_fx_param(doc["param"] | "", doc["value"]);
+        return;
+    }
+
     const char* cmd = doc["cmd"];
     if (!cmd) return;
 
@@ -1057,6 +1195,7 @@ static void processJson(const char* json, int len) {
                 p4.sample_rate_hz = clamp_int(fx["sampleRate"] | p4.sample_rate_hz, 1000, 48000);
                 forward_fx_samplerate_to_s3(p4.sample_rate_hz);
             }
+            apply_remote_macro_fx_state(fx, "state_sync", lastRemoteStateSyncFxLogMs);
         }
 
         const char* kit = doc["kit"] | "";

@@ -304,6 +304,9 @@ static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
     switch (type) {
         case MSG_ENCODER:
             if (id < 3) {
+#if !P4_ENABLE_LEGACY_UART_FX_CONTROLS
+                if (id == 1 || id == 2) break;
+#endif
                 p4.enc_value[id] = val;
                 // Relay encoder FX values to Master (P4 is the WiFi gateway)
                 if (udp_wifi_connected()) {
@@ -328,6 +331,9 @@ static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
 
         case MSG_POT:
             if (id < 4) {
+#if !P4_ENABLE_LEGACY_UART_FX_CONTROLS
+                if (id == 2) break;
+#endif
                 p4.pot_value[id] = val;
                 // Relay pot FX macros to Master:
                 //   S3 pot 0 = Master volume (NOT an FX, ignored here — handled elsewhere)
@@ -436,12 +442,16 @@ static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
                     if (udp_wifi_connected()) udp_send_fx_enc(0, p4.enc_value[0], p4.enc_muted[0]);
                     break;
                 case FX_ENC1_MUTE:
+#if P4_ENABLE_LEGACY_UART_FX_CONTROLS
                     p4.enc_muted[1] = (val != 0);
                     if (udp_wifi_connected()) udp_send_fx_enc(1, p4.enc_value[1], p4.enc_muted[1]);
+#endif
                     break;
                 case FX_ENC2_MUTE:
+#if P4_ENABLE_LEGACY_UART_FX_CONTROLS
                     p4.enc_muted[2] = (val != 0);
                     if (udp_wifi_connected()) udp_send_fx_enc(2, p4.enc_value[2], p4.enc_muted[2]);
+#endif
                     break;
                 case FX_POT0_MUTE:
                     p4.pot_muted[0] = (val != 0);
@@ -452,8 +462,10 @@ static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
                     if (udp_wifi_connected()) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
                     break;
                 case FX_POT2_MUTE:
+#if P4_ENABLE_LEGACY_UART_FX_CONTROLS
                     p4.pot_muted[2] = (val != 0);
                     if (udp_wifi_connected()) udp_send_fx_pot(2, p4.pot_value[2], p4.pot_muted[2]);
+#endif
                     break;
                 case FX_FILTER_TYPE:  p4.filter_type = val;                break;
                 // 16-bit values arrive as two packets (H then L). Accumulate

@@ -7876,6 +7876,12 @@ void ui_update_current_screen(void) {
     if (now - last_active_update_ms < period_ms) return;
     last_active_update_ms = now;
 
+    // Force fx_screen repaint if UDP received new FX values (even if not on scr_fx)
+    if (g_fx_screen_dirty) {
+        g_fx_screen_dirty = false;
+        update_fx_screen();
+    }
+
     // Update active screen content
     if (active == scr_live) update_live_screen();
     else if (active == scr_sequencer) update_sequencer_screen();

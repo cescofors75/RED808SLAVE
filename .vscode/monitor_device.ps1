@@ -77,11 +77,16 @@ if ($Port) {
         $candidates = $devs
     }
 
-    foreach ($candidate in $candidates) {
-        $chip = Get-DetectedChip $candidate.port
-        if (Is-ExpectedChip $chip) {
-            $found = $candidate
-            break
+    if ($candidates.Count -eq 1) {
+        $found = $candidates | Select-Object -First 1
+        Write-Host ("Aviso: usando unico puerto candidato " + $found.port + " sin forzar chip_id antes del monitor.") -ForegroundColor Yellow
+    } else {
+        foreach ($candidate in $candidates) {
+            $chip = Get-DetectedChip $candidate.port
+            if (Is-ExpectedChip $chip) {
+                $found = $candidate
+                break
+            }
         }
     }
 }

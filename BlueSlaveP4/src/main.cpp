@@ -27,6 +27,10 @@ void setup() {
     delay(500);
     Serial.println("\n=== RED808 P4 — Visual Beast ===");
     Serial.println("Guition JC1060P470C | ESP32-P4 + C6 WiFi");
+#elif P4_ENABLE_FX_SYNC_LOG
+    delay(500);
+    Serial.println("\n[FX][DBG] P4 FX sync log enabled @115200");
+    Serial.println("[FX][DBG] Waiting for masterFx/state_sync.fx/http FX packets");
 #endif
 
     // 2. Initialize MIPI-DSI display + backlight

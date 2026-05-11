@@ -1,6 +1,7 @@
 #include "drivers/input_manager.h"
 
 #include <Arduino.h>
+#include <DFRobot_VisualRotaryEncoder.h>
 #include <M5ROTATE8.h>
 #include <Wire.h>
 
@@ -21,6 +22,10 @@ constexpr uint8_t kByteButtonLedUserDefined = 0;
 constexpr uint8_t kByteButtonBrightness = 160;
 constexpr uint8_t kEncodersPerModule = 8;
 constexpr int32_t kM5DeltaClamp = 8;
+constexpr uint8_t kDfRotaryCount = 4;
+constexpr uint16_t kDfRotaryCenter = 512;
+constexpr uint16_t kDfRotaryStepThreshold = 2;
+constexpr uint32_t kDfButtonGuardMs = 250;
 InputEvent g_queue[kQueueLen] = {};
 volatile uint8_t g_head = 0;
 volatile uint8_t g_tail = 0;
@@ -37,6 +42,11 @@ uint8_t g_hubProbeChannel = 0;
 uint32_t g_lastHubProbeLogMs = 0;
 uint32_t g_hubRecoverUntilMs = 0;
 uint8_t g_hubRecoverCount = 0;
+DFRobot_VisualRotaryEncoder_I2C* g_dfRotary[kDfRotaryCount] = {};
+bool g_dfRotaryDetected[kDfRotaryCount] = {};
+uint16_t g_prevDfRotaryValue[kDfRotaryCount] = {};
+bool g_prevDfRotaryButtonDown[kDfRotaryCount] = {};
+uint32_t g_lastDfButtonMs[kDfRotaryCount] = {};
 int32_t g_prevM5Counter0[kEncodersPerModule] = {};
 uint8_t g_m5ButtonConfirm0[kEncodersPerModule] = {};
 bool g_m5ButtonArmed0[kEncodersPerModule] = {};
@@ -63,6 +73,72 @@ bool probe_selected_bus_device(uint8_t address) {
 bool detect_hub_locked() {
   Wire.beginTransmission(cfg::kI2cHubAddr);
   return Wire.endTransmission() == 0;
+}
+
+bool detect_df_rotary_locked(uint8_t rotaryIndex) {
+  if (rotaryIndex >= kDfRotaryCount) return false;
+  uint8_t hubChannel = static_cast<uint8_t>(devices::HUB_CH_DF_ROT_0 + rotaryIndex);
+  if (!i2c_hub_select(hubChannel)) return false;
+  if (!probe_selected_bus_device(cfg::kAddrDfRobotRotary)) {
+    i2c_hub_deselect();
+    return false;
+  }
+
+  if (!g_dfRotary[rotaryIndex]) {
+    g_dfRotary[rotaryIndex] = new DFRobot_VisualRotaryEncoder_I2C(cfg::kAddrDfRobotRotary, &Wire);
+    if (!g_dfRotary[rotaryIndex] || g_dfRotary[rotaryIndex]->begin() != 0) {
+      delete g_dfRotary[rotaryIndex];
+      g_dfRotary[rotaryIndex] = nullptr;
+      i2c_hub_deselect();
+      return false;
+    }
+    g_dfRotary[rotaryIndex]->setGainCoefficient(10);
+    g_dfRotary[rotaryIndex]->setEncoderValue(kDfRotaryCenter);
+    g_prevDfRotaryValue[rotaryIndex] = kDfRotaryCenter;
+  }
+
+  i2c_hub_deselect();
+  return true;
+}
+
+void poll_df_rotary_locked() {
+  for (uint8_t rotaryIndex = 0; rotaryIndex < kDfRotaryCount; ++rotaryIndex) {
+    bool detectedNow = detect_df_rotary_locked(rotaryIndex);
+    if (detectedNow != g_dfRotaryDetected[rotaryIndex]) {
+      g_dfRotaryDetected[rotaryIndex] = detectedNow;
+      if (cfg::kDebugLog) {
+        Serial.printf("[SlavePico][I2C] DFRobot%u %s on hub ch%u\n",
+                      rotaryIndex,
+                      detectedNow ? "detected" : "missing",
+                      static_cast<unsigned>(devices::HUB_CH_DF_ROT_0 + rotaryIndex));
+      }
+    }
+    if (!detectedNow || !g_dfRotary[rotaryIndex]) continue;
+
+    uint8_t hubChannel = static_cast<uint8_t>(devices::HUB_CH_DF_ROT_0 + rotaryIndex);
+    if (!i2c_hub_select(hubChannel)) continue;
+    uint16_t value = g_dfRotary[rotaryIndex]->getEncoderValue();
+    bool buttonDown = g_dfRotary[rotaryIndex]->detectButtonDown();
+    i2c_hub_deselect();
+
+    if (abs((int)value - (int)g_prevDfRotaryValue[rotaryIndex]) >= kDfRotaryStepThreshold) {
+      g_prevDfRotaryValue[rotaryIndex] = value;
+      (void)push_event(static_cast<uint8_t>(devices::CTRL_DF_ROTARY_0 + rotaryIndex), 0, static_cast<int16_t>(value), 2);
+      if (cfg::kDebugLog) {
+        Serial.printf("[SlavePico][I2C] DFRobot%u value=%u\n", rotaryIndex, value);
+      }
+    }
+
+    uint32_t now = millis();
+    if (buttonDown && !g_prevDfRotaryButtonDown[rotaryIndex] && (now - g_lastDfButtonMs[rotaryIndex] >= kDfButtonGuardMs)) {
+      g_lastDfButtonMs[rotaryIndex] = now;
+      (void)push_event(static_cast<uint8_t>(devices::CTRL_DF_ROTARY_0 + rotaryIndex), 0, 1, 1);
+      if (cfg::kDebugLog) {
+        Serial.printf("[SlavePico][I2C] DFRobot%u button\n", rotaryIndex);
+      }
+    }
+    g_prevDfRotaryButtonDown[rotaryIndex] = buttonDown;
+  }
 }
 
 void poll_hub_base_isolation_locked() {
@@ -250,6 +326,9 @@ void input_manager_init() {
   if (cfg::kEnableFaderAnalog) {
     pinMode(cfg::kFaderAnalogPin, INPUT);
   }
+  for (uint8_t rotaryIndex = 0; rotaryIndex < kDfRotaryCount; ++rotaryIndex) {
+    g_prevDfRotaryValue[rotaryIndex] = kDfRotaryCenter;
+  }
   for (uint8_t enc = 0; enc < kEncodersPerModule; ++enc) {
     g_m5ButtonArmed0[enc] = true;
   }
@@ -277,6 +356,10 @@ void input_manager_poll_i2c() {
     poll_hub_base_isolation_locked();
     i2c_unlock();
     return;
+  }
+
+  if (cfg::kEnableDfRotary) {
+    poll_df_rotary_locked();
   }
 
   if (cfg::kEnableM5ByteButton) {

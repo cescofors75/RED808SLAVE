@@ -23,6 +23,16 @@
 #define P4_LOG_PRINTF(...)  ((void)0)
 #endif
 
+#ifndef P4_ENABLE_FX_SYNC_LOG
+#define P4_ENABLE_FX_SYNC_LOG 0
+#endif
+
+#if P4_ENABLE_FX_SYNC_LOG
+#define P4_FX_LOG_PRINTF(...) Serial.printf(__VA_ARGS__)
+#else
+#define P4_FX_LOG_PRINTF(...) ((void)0)
+#endif
+
 // =============================================================================
 // DISPLAY — Guition JC1060P470C (7" MIPI-DSI, JD9165BA)
 // =============================================================================
@@ -120,6 +130,16 @@
 // =============================================================================
 #ifndef P4_STANDALONE_MASTER_ONLY
 #define P4_STANDALONE_MASTER_ONLY 1
+#endif
+
+// =============================================================================
+// LEGACY AUX/S3 FX CONTROLS
+// 0 = Delay/Reverb/Phaser visuals are authoritative from Master UDP only.
+//     UART/USB-C legacy FX packets must not overwrite those P4 UI values.
+// 1 = Allow old AUX/S3 encoder/pot FX packets to drive P4 FX visuals.
+// =============================================================================
+#ifndef P4_ENABLE_LEGACY_UART_FX_CONTROLS
+#define P4_ENABLE_LEGACY_UART_FX_CONTROLS 0
 #endif
 
 // =============================================================================

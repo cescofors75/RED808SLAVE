@@ -17,6 +17,23 @@ wl_status_t g_lastWifiStatus = WL_IDLE_STATUS;
 bool g_wifiConnectRequested = false;
 bool g_wifiAssociated = false;
 bool g_wifiHasIp = false;
+bool g_delayActive = false;
+bool g_reverbActive = false;
+bool g_phaserActive = false;
+
+void udp_send_json(const JsonDocument& doc) {
+  g_udp.beginPacket(g_masterIp, cfg::kMasterUdpPort);
+  serializeJson(doc, g_udp);
+  g_udp.endPacket();
+}
+
+float map_range(float value, float inMin, float inMax, float outMin, float outMax) {
+  if (inMax <= inMin) return outMin;
+  float t = (value - inMin) / (inMax - inMin);
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+  return outMin + (outMax - outMin) * t;
+}
 
 const char* status_to_str(wl_status_t st) {
   switch (st) {
@@ -119,12 +136,100 @@ void udp_send_event(const InputEvent& ev) {
   if (!udp_is_ready()) return;
 
   JsonDocument doc;
-  doc["cmd"] = "slaveInput";
   doc["src"] = "SlavePico";
-  doc["id"] = ev.controlId;
-  doc["element"] = ev.elementId;
-  doc["type"] = ev.eventType;
-  doc["value"] = ev.value;
+
+  if (ev.controlId >= devices::CTRL_DF_ROTARY_0 && ev.controlId <= devices::CTRL_DF_ROTARY_3) {
+    if (ev.eventType == 1) {
+      switch (ev.controlId) {
+        case devices::CTRL_DF_ROTARY_0:
+          doc["cmd"] = "tempo";
+          doc["value"] = 120;
+          doc["input"] = "dfRotaryButton";
+          doc["param"] = "bpmReset";
+          break;
+        case devices::CTRL_DF_ROTARY_1:
+          g_delayActive = !g_delayActive;
+          doc["cmd"] = "setDelayActive";
+          doc["value"] = g_delayActive;
+          doc["input"] = "dfRotaryButton";
+          doc["param"] = "delayActive";
+          break;
+        case devices::CTRL_DF_ROTARY_2:
+          g_reverbActive = !g_reverbActive;
+          doc["cmd"] = "setReverbActive";
+          doc["value"] = g_reverbActive;
+          doc["input"] = "dfRotaryButton";
+          doc["param"] = "reverbActive";
+          break;
+        case devices::CTRL_DF_ROTARY_3:
+          g_phaserActive = !g_phaserActive;
+          doc["cmd"] = "setPhaserActive";
+          doc["value"] = g_phaserActive;
+          doc["input"] = "dfRotaryButton";
+          doc["param"] = "phaserActive";
+          break;
+      }
+    } else {
+      float raw = static_cast<float>(ev.value);
+      switch (ev.controlId) {
+        case devices::CTRL_DF_ROTARY_0:
+          doc["cmd"] = "tempo";
+          doc["value"] = map_range(raw, 0.0f, 1023.0f, cfg::kTempoMin, cfg::kTempoMax);
+          doc["input"] = "dfRotary";
+          doc["param"] = "bpm";
+          break;
+        case devices::CTRL_DF_ROTARY_1:
+        {
+          JsonDocument activeDoc;
+          g_delayActive = true;
+          activeDoc["src"] = "SlavePico";
+          activeDoc["cmd"] = "setDelayActive";
+          activeDoc["value"] = true;
+          udp_send_json(activeDoc);
+          doc["cmd"] = "setDelayMix";
+          doc["value"] = map_range(raw, 0.0f, 1023.0f, 0.0f, 100.0f);
+          doc["input"] = "dfRotary";
+          doc["param"] = "delayMix";
+          break;
+        }
+        case devices::CTRL_DF_ROTARY_2:
+        {
+          JsonDocument activeDoc;
+          g_reverbActive = true;
+          activeDoc["src"] = "SlavePico";
+          activeDoc["cmd"] = "setReverbActive";
+          activeDoc["value"] = true;
+          udp_send_json(activeDoc);
+          doc["cmd"] = "setReverbMix";
+          doc["value"] = map_range(raw, 0.0f, 1023.0f, 0.0f, 100.0f);
+          doc["input"] = "dfRotary";
+          doc["param"] = "reverbMix";
+          break;
+        }
+        case devices::CTRL_DF_ROTARY_3:
+        {
+          JsonDocument activeDoc;
+          g_phaserActive = true;
+          activeDoc["src"] = "SlavePico";
+          activeDoc["cmd"] = "setPhaserActive";
+          activeDoc["value"] = true;
+          udp_send_json(activeDoc);
+          doc["cmd"] = "setPhaserDepth";
+          doc["value"] = map_range(raw, 0.0f, 1023.0f, 0.0f, 100.0f);
+          doc["input"] = "dfRotary";
+          doc["param"] = "phaserDepth";
+          break;
+        }
+      }
+    }
+    doc["id"] = ev.controlId;
+  } else {
+    doc["cmd"] = "slaveInput";
+    doc["id"] = ev.controlId;
+    doc["element"] = ev.elementId;
+    doc["type"] = ev.eventType;
+    doc["value"] = ev.value;
+  }
 
   if (ev.controlId == devices::CTRL_BYTEBTN_0 || ev.controlId == devices::CTRL_BYTEBTN_1) {
     doc["input"] = "byteButton";
@@ -145,12 +250,11 @@ void udp_send_event(const InputEvent& ev) {
     doc["present"] = (ev.value != 0);
   }
 
-  g_udp.beginPacket(g_masterIp, cfg::kMasterUdpPort);
-  serializeJson(doc, g_udp);
-  g_udp.endPacket();
+  udp_send_json(doc);
 
   if (cfg::kDebugLog) {
-    Serial.printf("[SlavePico][UDP] event id=%u type=%u value=%d\n", ev.controlId, ev.eventType, ev.value);
+    const char* cmd = doc["cmd"] | "?";
+    Serial.printf("[SlavePico][UDP] event id=%u type=%u cmd=%s value=%d\n", ev.controlId, ev.eventType, cmd, ev.value);
   }
 }
 

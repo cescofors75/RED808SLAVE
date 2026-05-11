@@ -53,6 +53,10 @@ void udp_send_solo(int track, bool soloed);
 void udp_send_mute_mask(uint16_t mask);
 void udp_send_solo_mask(uint16_t mask);
 
+// Dirty flag: set true by UDP task when FX values change.
+// Consumed (cleared) by LVGL ui_tick() to force update_fx_screen().
+extern volatile bool g_fx_screen_dirty;
+
 // Synth (melody) — engine: 3=303, 4=WTosc, 5=SH101, 6=FM2Op
 void udp_send_synth_note_on_ex(uint8_t engine, uint8_t note, uint8_t velocity,
                                 bool accent, bool slide);

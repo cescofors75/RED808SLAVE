@@ -21,6 +21,8 @@ Este es el contrato unico vigente entre BlueSlaveP4, BlueSlaveV2 y RedMaster ESP
 
 La fuente de verdad musical es RedMaster ESP32-S3. P4/S3 pueden editar o pedir estado, pero deben aceptar snapshots autoritativos del Master. En P4, las lecturas pesadas/criticas de UI se hacen por HTTP (`/api/getPattern`, `/api/p4State`) y los controles en tiempo real siguen por UDP JSON.
 
+Para los FX master visibles en P4, la autoridad visual vigente es RedMaster por UDP. P4 puede enviar comandos y SlavePico puede enviar comandos, pero Delay/Reverb/Phaser se pintan en P4 desde `masterFx` y `state_sync.fx` recibidos del Master. La ruta UART/USB-C legacy del AUX/S3 no debe sobrescribir esos visuales salvo que se active explicitamente un modo legacy.
+
 ## Reglas JSON
 
 - Campo obligatorio: `cmd`.
@@ -188,7 +190,11 @@ Snapshot compacto del estado autoritativo del Master hacia P4/S3.
   "fx":{
     "filterType":1,
     "delayActive":true,
+    "delayMix":0.45,
     "reverbActive":false,
+    "reverbMix":0.35,
+    "phaserActive":true,
+    "phaserDepth":0.50,
     "chorusActive":false,
     "trackReverbSend":[0],
     "trackDelaySend":[0],
@@ -203,6 +209,27 @@ Snapshot compacto del estado autoritativo del Master hacia P4/S3.
 ```
 
 El Master envia `state_sync` al saludar (`hello`), al recibir `get_state`, periodicamente a clientes UDP vivos y tras cambios de patron/mixer/FX/kit relevantes.
+
+### `masterFx`
+
+Evento incremental de baja latencia desde Master hacia P4/S3 para reflejar cambios de FX sin esperar al siguiente snapshot completo. Debe enviarse por UDP a clientes vivos y puede emitirse tambien por WebSocket para la UI web.
+
+```json
+{"type":"masterFx","param":"delayMix","value":45}
+```
+
+Campos usados por P4 FX LAB para los controles remotos de SlavePico:
+
+| `param` | Tipo/rango aceptado | Destino visual P4 |
+|---|---|---|
+| `delayActive` | bool | `DELAY` ON/OFF |
+| `delayMix` | `0..1` o `0..100` | `DELAY` valor |
+| `reverbActive` | bool | `REVERB` ON/OFF |
+| `reverbMix` | `0..1` o `0..100` | `REVERB` valor |
+| `phaserActive` | bool | `PHASER` ON/OFF |
+| `phaserDepth` | `0..1` o `0..100` | `PHASER` valor |
+
+Regla de autoridad P4: los visuales de Delay/Reverb/Phaser se actualizan desde `masterFx` y, como respaldo de reconexion, desde `state_sync.fx`. Los mensajes binarios UART/USB-C legacy (`MSG_ENCODER`, `MSG_POT`, `MSG_FX`) no deben escribir esos mismos visuales cuando `P4_ENABLE_LEGACY_UART_FX_CONTROLS` esta desactivado.
 
 ## Samples desde P4 SD
 
