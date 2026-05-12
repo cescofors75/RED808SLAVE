@@ -601,6 +601,7 @@ static lv_obj_t* grid_xtra_lbls[4] = {};
 static lv_obj_t* grid_xtra_change_btns[4] = {};
 static lv_obj_t* grid_xtra_delete_btns[4] = {};
 static lv_obj_t* grid_xtra_meta_lbls[4] = {};
+static lv_obj_t* grid_xtra_slot_lbls[4] = {};
 static int s_xtra_pending_slot = -1;
 static lv_obj_t* s_pad_inst_modal = NULL;
 static lv_obj_t* s_pad_inst_modal_pad_lbl = NULL;
@@ -653,9 +654,12 @@ static const char* XTRA_PADS_PARAMS_FILE = "/xtra_params.txt";
 static bool s_sd_for_xtra = false;
 static uint8_t xtra_backing_pad_for_slot(int slot);
 static bool s_xtra_touch_active[4] = {};
+static bool s_xtra_hold_latched[4] = {};
 static int s_xtra_last_note[4] = {-1, -1, -1, -1};
 static lv_coord_t s_xtra_last_lx[4] = {};
 static lv_coord_t s_xtra_last_ly[4] = {};
+static uint32_t s_xtra_touch_start_ms[4] = {};
+static uint32_t s_xtra_sampler_next_ms[4] = {};
 static uint32_t s_xtra_xy_last_send_ms[4] = {};
 static float s_xtra_param_values[4][XTRA_PARAM_MAX] = {};
 static bool s_xtra_param_valid[4] = {};
@@ -676,6 +680,52 @@ static const uint8_t XTRA_MELODIC_BASE_NOTES[3][4] = {
 
 static inline lv_color_t xtra_slot_color(int slot) {
     return lv_color_hex(theme_presets[currentTheme].track_colors[slot & 0x0F]);
+}
+
+static void xtra_apply_visual_state(int slot, bool active, lv_coord_t lx, lv_coord_t ly) {
+    if (slot < 0 || slot >= 4 || !grid_xtra_btns[slot]) return;
+    lv_obj_t* obj = grid_xtra_btns[slot];
+    lv_color_t accent = xtra_slot_color(slot);
+    if (!active) {
+        lv_obj_set_style_shadow_width(obj, 0, 0);
+        lv_obj_set_style_shadow_opa(obj, LV_OPA_0, 0);
+        lv_obj_set_style_outline_width(obj, 0, 0);
+        lv_obj_set_style_outline_opa(obj, LV_OPA_0, 0);
+        lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(obj, 2, 0);
+        lv_obj_set_style_border_color(obj, theme_accent2(), 0);
+        if (grid_xtra_meta_lbls[slot]) lv_obj_set_style_text_color(grid_xtra_meta_lbls[slot], theme_text(), 0);
+        if (grid_xtra_slot_lbls[slot]) lv_obj_set_style_text_color(grid_xtra_slot_lbls[slot], theme_text_dim(), 0);
+        return;
+    }
+
+    lv_coord_t w = lv_obj_get_width(obj);
+    lv_coord_t h = lv_obj_get_height(obj);
+    lv_coord_t dx = abs((int)lx - (int)(w / 2));
+    lv_coord_t dy = abs((int)ly - (int)(h / 2));
+    uint16_t travel = (uint16_t)constrain(dx + dy, 0, 240);
+    lv_opa_t fill_opa = (lv_opa_t)(190 + travel / 4);
+    if (fill_opa > LV_OPA_COVER) fill_opa = LV_OPA_COVER;
+    lv_coord_t outline_w = (lv_coord_t)(2 + travel / 30);
+    lv_coord_t shadow_w = (lv_coord_t)(18 + travel / 8);
+    lv_opa_t glow_opa = (lv_opa_t)(160 + travel / 3);
+    if (glow_opa > LV_OPA_COVER) glow_opa = LV_OPA_COVER;
+
+    lv_obj_set_style_bg_color(obj, accent, 0);
+    lv_obj_set_style_bg_grad_color(obj, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_opa(obj, fill_opa, 0);
+    lv_obj_set_style_border_width(obj, 3, 0);
+    lv_obj_set_style_border_color(obj, accent, 0);
+    lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_outline_width(obj, outline_w, 0);
+    lv_obj_set_style_outline_pad(obj, 1, 0);
+    lv_obj_set_style_outline_color(obj, accent, 0);
+    lv_obj_set_style_outline_opa(obj, glow_opa, 0);
+    lv_obj_set_style_shadow_width(obj, shadow_w, 0);
+    lv_obj_set_style_shadow_color(obj, accent, 0);
+    lv_obj_set_style_shadow_opa(obj, glow_opa, 0);
+    if (grid_xtra_meta_lbls[slot]) lv_obj_set_style_text_color(grid_xtra_meta_lbls[slot], lv_color_white(), 0);
+    if (grid_xtra_slot_lbls[slot]) lv_obj_set_style_text_color(grid_xtra_slot_lbls[slot], lv_color_white(), 0);
 }
 
 static void xtra_save_param_state(void);
@@ -906,7 +956,16 @@ static void xtra_trigger_slot(int slot, int lx, int ly, bool initialPress) {
     float yNorm = 1.0f - (float)constrain(ly, 0, h) / (float)(h > 0 ? h : 1);
     uint8_t velocity = (uint8_t)constrain((int)(40.0f + yNorm * 87.0f + 0.5f), 20, 127);
     if (!s_xtra_slots[slot].synth_mode) {
-        if (initialPress) udp_send_trigger(s_xtra_slots[slot].pad, velocity);
+        if (initialPress) {
+            udp_send_trigger(s_xtra_slots[slot].pad, velocity);
+            s_xtra_sampler_next_ms[slot] = millis() + (uint32_t)(70.0f + (1.0f - xNorm) * 190.0f);
+        } else {
+            uint32_t now = millis();
+            if (now >= s_xtra_sampler_next_ms[slot]) {
+                udp_send_trigger(s_xtra_slots[slot].pad, velocity);
+                s_xtra_sampler_next_ms[slot] = now + (uint32_t)(70.0f + (1.0f - xNorm) * 190.0f);
+            }
+        }
         return;
     }
     if (initialPress && !xtra_slot_is_drum(slot)) xtra_send_slot_param_snapshot(slot);
@@ -953,29 +1012,33 @@ static void xtra_pad_touch_cb(lv_event_t* e) {
     xtra_local_touch(e, &lx, &ly);
     if (code == LV_EVENT_PRESSED) {
         s_xtra_touch_active[slot] = true;
+        s_xtra_hold_latched[slot] = false;
+        s_xtra_touch_start_ms[slot] = millis();
         s_xtra_last_lx[slot] = lx;
         s_xtra_last_ly[slot] = ly;
         xtra_trigger_slot(slot, lx, ly, true);
-        lv_obj_set_style_shadow_width(grid_xtra_btns[slot], 28, 0);
-        lv_obj_set_style_shadow_opa(grid_xtra_btns[slot], LV_OPA_80, 0);
-        lv_obj_set_style_shadow_color(grid_xtra_btns[slot], xtra_slot_color(slot), 0);
-        lv_obj_set_style_bg_opa(grid_xtra_btns[slot], LV_OPA_COVER, 0);
+        xtra_apply_visual_state(slot, true, lx, ly);
     } else if (code == LV_EVENT_PRESSING) {
         if (!s_xtra_touch_active[slot]) return;
-        s_xtra_last_lx[slot] = lx;
-        s_xtra_last_ly[slot] = ly;
-        xtra_trigger_slot(slot, lx, ly, false);
-        lv_coord_t w = lv_obj_get_width(grid_xtra_btns[slot]);
-        lv_coord_t h = lv_obj_get_height(grid_xtra_btns[slot]);
-        lv_coord_t dx = abs((int)lx - (int)(w / 2));
-        lv_coord_t dy = abs((int)ly - (int)(h / 2));
-        lv_obj_set_style_shadow_width(grid_xtra_btns[slot], 18 + (dx + dy) / 8, 0);
+        uint32_t now = millis();
+        if (!s_xtra_hold_latched[slot] && (now - s_xtra_touch_start_ms[slot]) >= 28) {
+            s_xtra_hold_latched[slot] = true;
+        }
+        lv_coord_t dx = abs((int)lx - (int)s_xtra_last_lx[slot]);
+        lv_coord_t dy = abs((int)ly - (int)s_xtra_last_ly[slot]);
+        if (dx >= 3 || dy >= 3 || s_xtra_hold_latched[slot]) {
+            s_xtra_last_lx[slot] = lx;
+            s_xtra_last_ly[slot] = ly;
+            xtra_trigger_slot(slot, lx, ly, false);
+        }
+        xtra_apply_visual_state(slot, true, lx, ly);
     } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         s_xtra_touch_active[slot] = false;
+        s_xtra_hold_latched[slot] = false;
+        s_xtra_touch_start_ms[slot] = 0;
+        s_xtra_sampler_next_ms[slot] = 0;
         if (!xtra_slot_is_drum(slot)) xtra_send_note_off(slot);
-        lv_obj_set_style_shadow_width(grid_xtra_btns[slot], 0, 0);
-        lv_obj_set_style_shadow_opa(grid_xtra_btns[slot], LV_OPA_0, 0);
-        lv_obj_set_style_bg_opa(grid_xtra_btns[slot], LV_OPA_80, 0);
+        xtra_apply_visual_state(slot, false, 0, 0);
     }
 }
 
@@ -1086,6 +1149,8 @@ static void xtra_refresh_panel(void) {
             lv_label_set_text(grid_xtra_lbls[i], "+ ADD");
             if (grid_xtra_meta_lbls[i]) lv_label_set_text(grid_xtra_meta_lbls[i], "ENGINE SLOT");
         }
+        xtra_apply_visual_state(i, false, 0, 0);
+        if (grid_xtra_slot_lbls[i]) lv_label_set_text_fmt(grid_xtra_slot_lbls[i], "S%02d", i + 1);
         if (grid_xtra_change_btns[i]) {
             lv_obj_set_style_border_color(grid_xtra_change_btns[i], accent, 0);
             lv_obj_t* lbl = lv_obj_get_child(grid_xtra_change_btns[i], 0);
@@ -4709,6 +4774,8 @@ static lv_obj_t* sd_assign_lbl = NULL;
 static lv_obj_t* sd_pad_btns[16] = {};
 static lv_obj_t* sd_load_btn    = NULL;
 static lv_obj_t* sd_load_lbl    = NULL;
+static lv_obj_t* sd_preview_btn = NULL;
+static lv_obj_t* sd_preview_lbl = NULL;
 // MIDI section
 static lv_obj_t* sd_wav_section       = NULL;
 static lv_obj_t* sd_midi_section      = NULL;
@@ -5198,34 +5265,31 @@ static void sd_midi_load_btn_cb(lv_event_t* e) {
                            steps_found, raw_len, bpm, tracks_used);
 }
 
-static void sd_load_btn_cb(lv_event_t* e) {
-    (void)e;
-    if (p4sd.selected_file[0] == '\0') return;
-    if (p4sd.selected_is_midi) return;
+static bool sd_upload_selected_wav(bool closeAfterSuccess, bool triggerAfterUpload) {
+    if (p4sd.selected_file[0] == '\0' || p4sd.selected_is_midi) return false;
 
     int xtraSlot = -1;
     if (s_xtra_pending_slot >= 0 && s_xtra_pending_slot < 4) {
         xtraSlot = s_xtra_pending_slot;
-        // XTRA uses a fixed internal backing pad per slot to avoid user confusion.
         p4sd.selected_pad = xtra_backing_pad_for_slot(xtraSlot);
     }
 
     if (sd_status_lbl) {
-        lv_label_set_text_fmt(sd_status_lbl, "UPLOAD PAD %02d...", p4sd.selected_pad + 1);
+        lv_label_set_text_fmt(sd_status_lbl, "%s PAD %02d...",
+                              triggerAfterUpload ? "PREVIEW" : "UPLOAD",
+                              p4sd.selected_pad + 1);
         lv_obj_set_style_text_color(sd_status_lbl, RED808_CYAN, 0);
     }
 
     char path[192];
-    if (strcmp(p4sd.path, "/") == 0)
-        snprintf(path, sizeof(path), "/%s", p4sd.selected_file);
-    else
-        snprintf(path, sizeof(path), "%s/%s", p4sd.path, p4sd.selected_file);
+    if (strcmp(p4sd.path, "/") == 0) snprintf(path, sizeof(path), "/%s", p4sd.selected_file);
+    else snprintf(path, sizeof(path), "%s/%s", p4sd.path, p4sd.selected_file);
 
     File sample = SD_MMC.open(path, FILE_READ);
     if (!sample) {
         ui_show_toast("No se puede abrir el WAV", RED808_WARNING);
         if (sd_status_lbl) lv_label_set_text(sd_status_lbl, "OPEN FAILED");
-        return;
+        return false;
     }
 
     size_t sample_size = sample.size();
@@ -5233,7 +5297,7 @@ static void sd_load_btn_cb(lv_event_t* e) {
         sample.close();
         ui_show_toast("WAV no valido o demasiado grande", RED808_WARNING);
         if (sd_status_lbl) lv_label_set_text(sd_status_lbl, "WAV INVALID");
-        return;
+        return false;
     }
 
     WiFiClient client;
@@ -5242,7 +5306,7 @@ static void sd_load_btn_cb(lv_event_t* e) {
         sample.close();
         ui_show_toast("Master no conectado", RED808_WARNING);
         if (sd_status_lbl) lv_label_set_text(sd_status_lbl, "MASTER OFFLINE");
-        return;
+        return false;
     }
 
     const char* boundary = "----RED808P4Upload";
@@ -5288,35 +5352,7 @@ static void sd_load_btn_cb(lv_event_t* e) {
     }
     client.stop();
 
-    if (write_ok && status == 200) {
-        char msg[64];
-        snprintf(msg, sizeof(msg), "Sample cargado en Daisy PAD %02d", p4sd.selected_pad + 1);
-        ui_show_toast(msg, RED808_SUCCESS);
-        if (sd_status_lbl) {
-            lv_label_set_text(sd_status_lbl, msg);
-            lv_obj_set_style_text_color(sd_status_lbl, RED808_SUCCESS, 0);
-        }
-
-        if (xtraSlot >= 0 && xtraSlot < 4) {
-            XtraPadSlot& slot = s_xtra_slots[xtraSlot];
-            uint8_t backingPad = xtra_backing_pad_for_slot(xtraSlot);
-            slot.used = true;
-            slot.pad = backingPad;
-            slot.synth_mode = false;
-            strncpy(slot.name, p4sd.selected_file, sizeof(slot.name) - 1);
-            slot.name[sizeof(slot.name) - 1] = '\0';
-            trim_wav_extension(slot.name);
-            xtra_save_state();
-            xtra_refresh_panel();
-            s_xtra_pending_slot = -1;
-            s_sd_for_xtra = false;
-            ui_show_toast("XTRA cargado", RED808_SUCCESS);
-            ui_navigate_to(6);
-            return;
-        }
-
-        // Normal SD->Daisy upload path (non-XTRA)
-    } else {
+    if (!(write_ok && status == 200)) {
         char msg[64];
         if (!write_ok) snprintf(msg, sizeof(msg), "Upload cortado");
         else snprintf(msg, sizeof(msg), "Upload fallido HTTP %d", status);
@@ -5325,7 +5361,51 @@ static void sd_load_btn_cb(lv_event_t* e) {
             lv_label_set_text(sd_status_lbl, msg);
             lv_obj_set_style_text_color(sd_status_lbl, RED808_WARNING, 0);
         }
+        return false;
     }
+
+    if (triggerAfterUpload && udp_wifi_connected()) {
+        udp_send_trigger(p4sd.selected_pad, 110);
+    }
+
+    char msg[72];
+    snprintf(msg, sizeof(msg), "%s PAD %02d",
+             triggerAfterUpload ? "Preview listo en" : "Sample cargado en Daisy",
+             p4sd.selected_pad + 1);
+    ui_show_toast(msg, RED808_SUCCESS);
+    if (sd_status_lbl) {
+        lv_label_set_text(sd_status_lbl, msg);
+        lv_obj_set_style_text_color(sd_status_lbl, RED808_SUCCESS, 0);
+    }
+
+    if (xtraSlot >= 0 && xtraSlot < 4) {
+        XtraPadSlot& slot = s_xtra_slots[xtraSlot];
+        slot.used = true;
+        slot.pad = xtra_backing_pad_for_slot(xtraSlot);
+        slot.synth_mode = false;
+        strncpy(slot.name, p4sd.selected_file, sizeof(slot.name) - 1);
+        slot.name[sizeof(slot.name) - 1] = '\0';
+        trim_wav_extension(slot.name);
+        xtra_save_state();
+        xtra_refresh_panel();
+        if (closeAfterSuccess) {
+            s_xtra_pending_slot = -1;
+            s_sd_for_xtra = false;
+            ui_show_toast("XTRA cargado", RED808_SUCCESS);
+            ui_navigate_to(6);
+        }
+    }
+    return true;
+}
+
+static void sd_preview_btn_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    (void)sd_upload_selected_wav(false, true);
+}
+
+static void sd_load_btn_cb(lv_event_t* e) {
+    LV_UNUSED(e);
+    (void)sd_upload_selected_wav(true, false);
 }
 
 static void sd_refresh_ui(void) {
@@ -5339,11 +5419,22 @@ static void sd_refresh_ui(void) {
         if (s_sd_for_xtra) lv_obj_add_flag(sd_pad_btns[i], LV_OBJ_FLAG_HIDDEN);
         else lv_obj_clear_flag(sd_pad_btns[i], LV_OBJ_FLAG_HIDDEN);
     }
+    lv_obj_clean(sd_file_list);
+
     if (sd_load_lbl) {
         lv_label_set_text(sd_load_lbl,
-            s_sd_for_xtra ? LV_SYMBOL_UPLOAD "  LOAD XTRA" : LV_SYMBOL_UPLOAD "  LOAD TO PAD");
+            s_sd_for_xtra ? LV_SYMBOL_UPLOAD "  LOAD TO XTRA" : LV_SYMBOL_UPLOAD "  LOAD TO PAD");
     }
-    lv_obj_clean(sd_file_list);
+    if (sd_preview_lbl) {
+        lv_label_set_text(sd_preview_lbl,
+            s_sd_for_xtra ? LV_SYMBOL_PLAY "  PREVIEW XTRA" : LV_SYMBOL_PLAY "  PREVIEW PAD");
+    }
+    if (sd_preview_btn) {
+        if (p4sd.mounted && p4sd.selected_file[0] && !p4sd.selected_is_midi)
+            lv_obj_clear_state(sd_preview_btn, LV_STATE_DISABLED);
+        else
+            lv_obj_add_state(sd_preview_btn, LV_STATE_DISABLED);
+    }
 
     // ── MEM branch: list P4's own /mid/*.mid from SPIFFS ────────────────
     if (sd_source == 1) {
@@ -5649,10 +5740,26 @@ static void create_sdcard_screen(void) {
     lv_label_set_long_mode(sd_selected_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_pos(sd_selected_lbl, 8, 300);
 
+    sd_preview_btn = lv_btn_create(sd_wav_section);
+    lv_obj_set_size(sd_preview_btn, RIGHT_W - 24, 48);
+    lv_obj_set_pos(sd_preview_btn, 8, 308);
+    lv_obj_set_style_bg_color(sd_preview_btn, RED808_SURFACE, 0);
+    lv_obj_set_style_bg_color(sd_preview_btn, lv_color_hex(0x223344), LV_STATE_DISABLED);
+    lv_obj_set_style_border_color(sd_preview_btn, RED808_CYAN, 0);
+    lv_obj_set_style_border_width(sd_preview_btn, 2, 0);
+    lv_obj_set_style_radius(sd_preview_btn, 10, 0);
+    lv_obj_add_state(sd_preview_btn, LV_STATE_DISABLED);
+    sd_preview_lbl = lv_label_create(sd_preview_btn);
+    lv_label_set_text(sd_preview_lbl, LV_SYMBOL_PLAY "  PREVIEW PAD");
+    lv_obj_set_style_text_font(sd_preview_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(sd_preview_lbl, lv_color_white(), 0);
+    lv_obj_center(sd_preview_lbl);
+    lv_obj_add_event_cb(sd_preview_btn, sd_preview_btn_cb, LV_EVENT_CLICKED, NULL);
+
     // LOAD WAV button
     sd_load_btn = lv_btn_create(sd_wav_section);
     lv_obj_set_size(sd_load_btn, RIGHT_W - 24, 60);
-    lv_obj_set_pos(sd_load_btn, 8, 360);
+    lv_obj_set_pos(sd_load_btn, 8, 362);
     lv_obj_set_style_bg_color(sd_load_btn, RED808_ACCENT, 0);
     lv_obj_set_style_bg_color(sd_load_btn, lv_color_hex(0x882200), LV_STATE_DISABLED);
     lv_obj_set_style_radius(sd_load_btn, 10, 0);
@@ -8105,7 +8212,7 @@ static void create_performance_screen(void) {
     lv_obj_set_pos(sub, 20, 114);
 
     lv_obj_t* hint = lv_label_create(scr_performance);
-    lv_label_set_text(hint, "MODE tap. Hold en MODE = editor. Hold pad = XY / trigger.");
+    lv_label_set_text(hint, "MODE tap. Hold MODE = editor. Hold pad = XY sensible + glow.");
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(hint, theme_warning(), 0);
     lv_obj_set_pos(hint, 20, 142);
@@ -8137,6 +8244,12 @@ static void create_performance_screen(void) {
         lv_obj_set_style_text_font(grid_xtra_lbls[i], &lv_font_montserrat_24, 0);
         lv_obj_set_style_text_align(grid_xtra_lbls[i], LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(grid_xtra_lbls[i], LV_ALIGN_CENTER, 0, -18);
+
+        grid_xtra_slot_lbls[i] = lv_label_create(grid_xtra_btns[i]);
+        lv_label_set_text_fmt(grid_xtra_slot_lbls[i], "S%02d", i + 1);
+        lv_obj_set_style_text_font(grid_xtra_slot_lbls[i], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(grid_xtra_slot_lbls[i], theme_text_dim(), 0);
+        lv_obj_align(grid_xtra_slot_lbls[i], LV_ALIGN_TOP_LEFT, 10, 8);
 
         grid_xtra_meta_lbls[i] = lv_label_create(grid_xtra_btns[i]);
         lv_label_set_text(grid_xtra_meta_lbls[i], "PRESET A · XY NOTE");
