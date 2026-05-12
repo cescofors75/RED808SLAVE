@@ -63,6 +63,7 @@ void udp_send_synth_note_on_ex(uint8_t engine, uint8_t note, uint8_t velocity,
 void udp_send_synth_note_off(uint8_t engine, uint8_t track);
 void udp_send_synth_note_off_ex(uint8_t engine, uint8_t track, uint8_t note);
 void udp_send_synth303_note_off(void);
+void udp_send_synth_trigger(uint8_t engine, uint8_t instrument, uint8_t velocity);
 
 // Synth parameter editor
 void udp_send_synth_param(uint8_t engine, uint8_t instrument, uint8_t paramId, float value);

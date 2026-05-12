@@ -143,6 +143,29 @@ static int scale_unit_to_u7(float value) {
     return clamp_int((int)(unit * 127.0f + 0.5f), 0, 127);
 }
 
+static uint8_t delay_mix_to_u7(JsonVariantConst value, uint8_t fallback) {
+    if (value.isNull()) return fallback;
+    float mixPct = value.as<float>();
+    float norm = (mixPct - 8.0f) / 50.0f;
+    return (uint8_t)scale_unit_to_u7(norm);
+}
+
+static uint8_t reverb_mix_to_u7(JsonVariantConst value, uint8_t fallback) {
+    if (value.isNull()) return fallback;
+    float mix = value.as<float>();
+    if (mix > 1.0f) mix /= 100.0f;
+    float norm = (mix - 0.06f) / 0.42f;
+    return (uint8_t)scale_unit_to_u7(norm);
+}
+
+static uint8_t phaser_depth_to_u7(JsonVariantConst value, uint8_t fallback) {
+    if (value.isNull()) return fallback;
+    float depthPct = value.as<float>();
+    if (depthPct <= 1.0f) depthPct *= 100.0f;
+    float norm = (depthPct - 28.0f) / 60.0f;
+    return (uint8_t)scale_unit_to_u7(norm);
+}
+
 static float fx_scalar_to_unit(JsonVariantConst value, float fallbackUnit) {
     if (value.isNull()) return clamp_float(fallbackUnit, 0.0f, 1.0f);
     float raw = value.as<float>();
@@ -217,16 +240,13 @@ static void apply_remote_macro_fx_state(JsonObjectConst fx, const char* source, 
     p4.pot_muted[2] = !phaserActive;
 
     if (!fx["delayMix"].isNull()) {
-        float delayUnit = fx_scalar_to_unit(fx["delayMix"], (float)p4.enc_value[1] / 127.0f);
-        p4.enc_value[1] = (uint8_t)scale_unit_to_u7(delayUnit);
+        p4.enc_value[1] = delay_mix_to_u7(fx["delayMix"], p4.enc_value[1]);
     }
     if (!fx["reverbMix"].isNull()) {
-        float reverbUnit = fx_scalar_to_unit(fx["reverbMix"], (float)p4.enc_value[2] / 127.0f);
-        p4.enc_value[2] = (uint8_t)scale_unit_to_u7(reverbUnit);
+        p4.enc_value[2] = reverb_mix_to_u7(fx["reverbMix"], p4.enc_value[2]);
     }
     if (!fx["phaserDepth"].isNull()) {
-        float phaserUnit = fx_scalar_to_unit(fx["phaserDepth"], (float)p4.pot_value[2] / 127.0f);
-        p4.pot_value[2] = (uint8_t)scale_unit_to_u7(phaserUnit);
+        p4.pot_value[2] = phaser_depth_to_u7(fx["phaserDepth"], p4.pot_value[2]);
     }
 
     g_fx_screen_dirty = true;
@@ -243,18 +263,15 @@ static void apply_remote_master_fx_param(const char* param, JsonVariantConst val
     if (strcmp(param, "delayActive") == 0) {
         p4.enc_muted[1] = !value.as<bool>();
     } else if (strcmp(param, "delayMix") == 0) {
-        float delayUnit = fx_scalar_to_unit(value, (float)p4.enc_value[1] / 127.0f);
-        p4.enc_value[1] = (uint8_t)scale_unit_to_u7(delayUnit);
+        p4.enc_value[1] = delay_mix_to_u7(value, p4.enc_value[1]);
     } else if (strcmp(param, "reverbActive") == 0) {
         p4.enc_muted[2] = !value.as<bool>();
     } else if (strcmp(param, "reverbMix") == 0) {
-        float reverbUnit = fx_scalar_to_unit(value, (float)p4.enc_value[2] / 127.0f);
-        p4.enc_value[2] = (uint8_t)scale_unit_to_u7(reverbUnit);
+        p4.enc_value[2] = reverb_mix_to_u7(value, p4.enc_value[2]);
     } else if (strcmp(param, "phaserActive") == 0) {
         p4.pot_muted[2] = !value.as<bool>();
     } else if (strcmp(param, "phaserDepth") == 0) {
-        float phaserUnit = fx_scalar_to_unit(value, (float)p4.pot_value[2] / 127.0f);
-        p4.pot_value[2] = (uint8_t)scale_unit_to_u7(phaserUnit);
+        p4.pot_value[2] = phaser_depth_to_u7(value, p4.pot_value[2]);
     } else {
         handled = false;
     }
@@ -621,6 +638,14 @@ void udp_send_synth_note_off_ex(uint8_t engine, uint8_t track, uint8_t note) {
     snprintf(buf, sizeof(buf),
              "{\"cmd\":\"synthNoteOff\",\"engine\":%u,\"track\":%u,\"note\":%u}",
              (unsigned)engine, (unsigned)track, (unsigned)note);
+    sendJson(buf);
+}
+
+void udp_send_synth_trigger(uint8_t engine, uint8_t instrument, uint8_t velocity) {
+    char buf[112];
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"synthTrigger\",\"engine\":%u,\"instrument\":%u,\"velocity\":%u}",
+             (unsigned)engine, (unsigned)instrument, (unsigned)velocity);
     sendJson(buf);
 }
 
@@ -1019,7 +1044,7 @@ void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
             break;
         }
         case 2: {  // PHASER macro: audible sweep without the tremolo/limiter gain issues.
-            bool active = (!muted && value > 0);
+            bool active = !muted;
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setPhaserActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
