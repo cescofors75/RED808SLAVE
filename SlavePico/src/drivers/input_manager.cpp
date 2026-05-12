@@ -4,6 +4,10 @@
 #include <DFRobot_VisualRotaryEncoder.h>
 #include <M5ROTATE8.h>
 #include <Wire.h>
+#if defined(ARDUINO_ARCH_ESP32)
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#endif
 
 #include "config.h"
 #include "device_map.h"
@@ -32,11 +36,16 @@ volatile uint8_t g_tail = 0;
 int16_t g_lastFader = -1;
 bool g_hubDetected = false;
 bool g_byteButton0Detected = false;
+bool g_byteButton1Detected = false;
 bool g_m5Encoder0Detected = false;
 uint8_t g_prevByteButton0State = 0;
+uint8_t g_prevByteButton1State = 0;
 uint8_t g_byteButton0FailCount = 0;
+uint8_t g_byteButton1FailCount = 0;
 uint32_t g_byteButton0SuspendUntilMs = 0;
+uint32_t g_byteButton1SuspendUntilMs = 0;
 uint8_t g_byteButton0PresenceCount = 0;
+uint8_t g_byteButton1PresenceCount = 0;
 uint8_t g_m5Encoder0PresenceCount = 0;
 uint8_t g_hubProbeChannel = 0;
 uint32_t g_lastHubProbeLogMs = 0;
@@ -47,6 +56,13 @@ bool g_dfRotaryDetected[kDfRotaryCount] = {};
 uint16_t g_prevDfRotaryValue[kDfRotaryCount] = {};
 bool g_prevDfRotaryButtonDown[kDfRotaryCount] = {};
 uint32_t g_lastDfButtonMs[kDfRotaryCount] = {};
+float g_dfRotarySmoothed[kDfRotaryCount] = {   // EMA state (initialized in init)
+  kDfRotaryCenter, kDfRotaryCenter, kDfRotaryCenter, kDfRotaryCenter
+};
+uint32_t g_lastDfRotaryEventMs[kDfRotaryCount] = {};
+#if defined(ARDUINO_ARCH_ESP32)
+static SemaphoreHandle_t s_i2c_sem = nullptr;
+#endif
 int32_t g_prevM5Counter0[kEncodersPerModule] = {};
 uint8_t g_m5ButtonConfirm0[kEncodersPerModule] = {};
 bool g_m5ButtonArmed0[kEncodersPerModule] = {};
@@ -55,7 +71,23 @@ uint32_t g_lastLedAnimMs = 0;
 uint8_t g_bootAnimPhase = 0;
 bool g_bootAnimDone = false;
 bool g_byteButton0LedsReady = false;
+bool g_byteButton1LedsReady = false;
 M5ROTATE8 g_m5Encoder0;
+bool g_m5Encoder1Detected = false;
+uint8_t g_m5Encoder1PresenceCount = 0;
+int32_t g_prevM5Counter1[kEncodersPerModule] = {};
+uint8_t g_m5ButtonConfirm1[kEncodersPerModule] = {};
+bool g_m5ButtonArmed1[kEncodersPerModule] = {};
+unsigned long g_lastM5ButtonPress1[kEncodersPerModule] = {};
+M5ROTATE8 g_m5Encoder1;
+
+// Pending LED update requests (written by udp_handler task, read by I2C task)
+struct LedRequest { uint8_t r, g, b; bool dirty; };
+static LedRequest g_pendingLed0[8] = {};
+static LedRequest g_pendingLed1[8] = {};
+struct EncLedRequest { uint8_t r, g, b; bool dirty; };
+static EncLedRequest g_pendingEncLed0[8] = {};
+static EncLedRequest g_pendingEncLed1[8] = {};
 
 bool push_event(uint8_t id, uint8_t elementId, int16_t value, uint8_t type) {
   uint8_t next = static_cast<uint8_t>((g_head + 1) % kQueueLen);
@@ -92,9 +124,10 @@ bool detect_df_rotary_locked(uint8_t rotaryIndex) {
       i2c_hub_deselect();
       return false;
     }
-    g_dfRotary[rotaryIndex]->setGainCoefficient(10);
+    g_dfRotary[rotaryIndex]->setGainCoefficient(cfg::kRotaryGainCoeff);
     g_dfRotary[rotaryIndex]->setEncoderValue(kDfRotaryCenter);
     g_prevDfRotaryValue[rotaryIndex] = kDfRotaryCenter;
+    g_dfRotarySmoothed[rotaryIndex]  = static_cast<float>(kDfRotaryCenter);
   }
 
   i2c_hub_deselect();
@@ -121,11 +154,21 @@ void poll_df_rotary_locked() {
     bool buttonDown = g_dfRotary[rotaryIndex]->detectButtonDown();
     i2c_hub_deselect();
 
-    if (abs((int)value - (int)g_prevDfRotaryValue[rotaryIndex]) >= kDfRotaryStepThreshold) {
-      g_prevDfRotaryValue[rotaryIndex] = value;
-      (void)push_event(static_cast<uint8_t>(devices::CTRL_DF_ROTARY_0 + rotaryIndex), 0, static_cast<int16_t>(value), 2);
+    // EMA low-pass filter: smooths noise and rapid jitter
+    g_dfRotarySmoothed[rotaryIndex] =
+        cfg::kRotarySmoothAlpha * static_cast<float>(value) +
+        (1.0f - cfg::kRotarySmoothAlpha) * g_dfRotarySmoothed[rotaryIndex];
+    uint16_t smoothed = static_cast<uint16_t>(g_dfRotarySmoothed[rotaryIndex] + 0.5f);
+
+    uint32_t nowMs = millis();
+    bool changed  = abs((int)smoothed - (int)g_prevDfRotaryValue[rotaryIndex]) >= kDfRotaryStepThreshold;
+    bool throttleOk = (nowMs - g_lastDfRotaryEventMs[rotaryIndex]) >= cfg::kRotaryMinSendIntervalMs;
+    if (changed && throttleOk) {
+      g_prevDfRotaryValue[rotaryIndex]  = smoothed;
+      g_lastDfRotaryEventMs[rotaryIndex] = nowMs;
+      (void)push_event(static_cast<uint8_t>(devices::CTRL_DF_ROTARY_0 + rotaryIndex), 0, static_cast<int16_t>(smoothed), 2);
       if (cfg::kDebugLog) {
-        Serial.printf("[SlavePico][I2C] DFRobot%u value=%u\n", rotaryIndex, value);
+        Serial.printf("[SlavePico][I2C] DFRobot%u smoothed=%u raw=%u\n", rotaryIndex, smoothed, value);
       }
     }
 
@@ -240,20 +283,49 @@ bool write_bytebutton_led_locked(uint8_t channel, uint8_t led, uint8_t red, uint
 }
 
 void write_bytebutton_idle_locked() {
+  // Module 0: B0=PLAY(stopped), B1=PAT-, B2=PAT+, B3=PAT1,
+  //           B4=MUTE_ALL, B5=PHASER, B6=DELAY, B7=REVERB
+  static const uint8_t kR0[8] = {25,  0,  0, 35, 20, 15,  0,  0};
+  static const uint8_t kG0[8] = { 0, 15, 15, 30, 15,  0,  5, 15};
+  static const uint8_t kB0[8] = { 0, 40, 40,  0,  0, 15, 20, 15};
   for (uint8_t led = 0; led < kByteButtonLedCount; ++led) {
-    uint8_t red = 0;
-    uint8_t green = (led == 0) ? 18 : 8;
-    uint8_t blue = (led == 0) ? 24 : 36;
-    (void)write_bytebutton_led_locked(devices::HUB_CH_BYTEBTN_0, led, red, green, blue);
+    if (led < 8) {
+      (void)write_bytebutton_led_locked(devices::HUB_CH_BYTEBTN_0, led, kR0[led], kG0[led], kB0[led]);
+    } else {
+      (void)write_bytebutton_led_locked(devices::HUB_CH_BYTEBTN_0, led, 0, 8, 24);
+    }
+  }
+}
+
+void write_bytebutton1_idle_locked() {
+  // Module 1: B0=CLEAR PAT(red), B1=STEPS×16(white), B2=STEPS×32(blue), B3=STEPS×64(cyan),
+  //           B4=FLANGER(pink),  B5=CHORUS(orange),  B6=COMPRESSOR(green), B7=SONG MODE(yellow)
+  static const uint8_t kR1[8] = {40,  20,   0,  0, 50, 45,  0, 35};
+  static const uint8_t kG1[8] = { 0,  20,  12, 30,  0, 20, 50, 30};
+  static const uint8_t kB1[8] = { 0,  20,  55, 35, 25,  0,  0,  0};
+  for (uint8_t led = 0; led < kByteButtonLedCount; ++led) {
+    if (led < 8) {
+      (void)write_bytebutton_led_locked(devices::HUB_CH_BYTEBTN_1, led, kR1[led], kG1[led], kB1[led]);
+    } else {
+      (void)write_bytebutton_led_locked(devices::HUB_CH_BYTEBTN_1, led, 0, 8, 24);
+    }
   }
 }
 
 void write_m5encoder_idle_locked() {
-  for (uint8_t enc = 0; enc < kEncodersPerModule; ++enc) {
-    uint8_t red = 8;
-    uint8_t green = static_cast<uint8_t>(14 + enc * 3);
-    uint8_t blue = static_cast<uint8_t>(26 + enc * 8);
-    (void)g_m5Encoder0.writeRGB(enc, red, green, blue);
+  if (g_m5Encoder0Detected && i2c_hub_select(devices::HUB_CH_M5_ENC_0)) {
+    for (uint8_t enc = 0; enc < kEncodersPerModule; ++enc) {
+      uint8_t r = 8, gv = static_cast<uint8_t>(14 + enc * 3), b = static_cast<uint8_t>(26 + enc * 8);
+      (void)g_m5Encoder0.writeRGB(enc, r, gv, b);
+    }
+    i2c_hub_deselect();
+  }
+  if (g_m5Encoder1Detected && i2c_hub_select(devices::HUB_CH_M5_ENC_1)) {
+    for (uint8_t enc = 0; enc < kEncodersPerModule; ++enc) {
+      uint8_t r = 8, gv = static_cast<uint8_t>(14 + enc * 3), b = static_cast<uint8_t>(26 + enc * 8);
+      (void)g_m5Encoder1.writeRGB(enc, r, gv, b);
+    }
+    i2c_hub_deselect();
   }
 }
 
@@ -263,27 +335,35 @@ void run_led_boot_animation_locked() {
   g_lastLedAnimMs = now;
 
   if (!g_bootAnimDone) {
-    if (g_m5Encoder0Detected) {
+    for (uint8_t eiMod = 0; eiMod < 2; eiMod++) {
+      bool encDet = (eiMod == 0) ? g_m5Encoder0Detected : g_m5Encoder1Detected;
+      if (!encDet) continue;
+      uint8_t encCh = (eiMod == 0) ? (uint8_t)devices::HUB_CH_M5_ENC_0 : (uint8_t)devices::HUB_CH_M5_ENC_1;
+      if (!i2c_hub_select(encCh)) continue;
       for (uint8_t enc = 0; enc < kEncodersPerModule; ++enc) {
         if (enc == g_bootAnimPhase % kEncodersPerModule) {
-          (void)g_m5Encoder0.writeRGB(enc, 90, 10, 0);
+          if (eiMod == 0) (void)g_m5Encoder0.writeRGB(enc, 90, 10, 0);
+          else            (void)g_m5Encoder1.writeRGB(enc, 10, 0, 90);
         } else {
-          (void)g_m5Encoder0.writeRGB(enc, 0, 0, 6);
+          if (eiMod == 0) (void)g_m5Encoder0.writeRGB(enc, 0, 0, 6);
+          else            (void)g_m5Encoder1.writeRGB(enc, 0, 0, 6);
         }
       }
+      i2c_hub_deselect();
     }
 
-    if (g_byteButton0Detected && g_byteButton0LedsReady) {
-      for (uint8_t led = 0; led < kByteButtonLedCount; ++led) {
-        uint8_t red = 0;
-        uint8_t green = 0;
-        uint8_t blue = 4;
-        if (led == g_bootAnimPhase % kByteButtonLedCount) {
-          red = 0;
-          green = 70;
-          blue = 24;
+    for (uint8_t mod = 0; mod < 2; mod++) {
+      bool rdy = (mod == 0) ? (g_byteButton0Detected && g_byteButton0LedsReady)
+                             : (g_byteButton1Detected && g_byteButton1LedsReady);
+      uint8_t ch = (mod == 0) ? devices::HUB_CH_BYTEBTN_0 : devices::HUB_CH_BYTEBTN_1;
+      if (rdy) {
+        for (uint8_t led = 0; led < kByteButtonLedCount; ++led) {
+          uint8_t red = 0, green = 0, blue = 4;
+          if (led == g_bootAnimPhase % kByteButtonLedCount) {
+            red = (mod == 0) ? 0 : 60; green = (mod == 0) ? 70 : 25; blue = 24;
+          }
+          (void)write_bytebutton_led_locked(ch, led, red, green, blue);
         }
-        (void)write_bytebutton_led_locked(devices::HUB_CH_BYTEBTN_0, led, red, green, blue);
       }
     }
 
@@ -292,6 +372,7 @@ void run_led_boot_animation_locked() {
       g_bootAnimDone = true;
       if (g_m5Encoder0Detected) write_m5encoder_idle_locked();
       if (g_byteButton0Detected && g_byteButton0LedsReady) write_bytebutton_idle_locked();
+      if (g_byteButton1Detected && g_byteButton1LedsReady) write_bytebutton1_idle_locked();
     }
   }
 }
@@ -320,6 +401,29 @@ bool detect_m5encoder0_locked() {
   return ok;
 }
 
+bool detect_m5encoder1_locked() {
+  bool ok = false;
+  if (!i2c_hub_select(devices::HUB_CH_M5_ENC_1)) return false;
+  if (!probe_selected_bus_device(cfg::kAddrM5Encoder8)) {
+    i2c_hub_deselect();
+    return false;
+  }
+  if (!g_m5Encoder1Detected) {
+    if (g_m5Encoder1.begin()) {
+      for (uint8_t enc = 0; enc < kEncodersPerModule; ++enc) {
+        g_m5Encoder1.resetCounter(enc);
+        g_prevM5Counter1[enc] = 0;
+        g_m5ButtonArmed1[enc] = true;
+      }
+      ok = true;
+    }
+  } else {
+    ok = true;
+  }
+  i2c_hub_deselect();
+  return ok;
+}
+
 } // namespace
 
 void input_manager_init() {
@@ -328,10 +432,36 @@ void input_manager_init() {
   }
   for (uint8_t rotaryIndex = 0; rotaryIndex < kDfRotaryCount; ++rotaryIndex) {
     g_prevDfRotaryValue[rotaryIndex] = kDfRotaryCenter;
+    g_dfRotarySmoothed[rotaryIndex]  = static_cast<float>(kDfRotaryCenter);
   }
   for (uint8_t enc = 0; enc < kEncodersPerModule; ++enc) {
     g_m5ButtonArmed0[enc] = true;
+    g_m5ButtonArmed1[enc] = true;
   }
+
+#if defined(ARDUINO_ARCH_ESP32)
+  // Binary semaphore used to wake the I2C task.
+  // Given by ISR (INT pin) or by timeout fallback (kInputPollMs).
+  s_i2c_sem = xSemaphoreCreateBinary();
+
+  if (cfg::kEnableDfRotaryInterrupt) {
+    for (int i = 0; i < 4; i++) {
+      int8_t pin = cfg::kDfRotaryIntPins[i];
+      if (pin < 0) continue;
+      pinMode(pin, INPUT_PULLUP);
+      attachInterruptArg(
+        static_cast<uint8_t>(pin),
+        [](void* /*arg*/) IRAM_ATTR {
+          BaseType_t woken = pdFALSE;
+          xSemaphoreGiveFromISR(s_i2c_sem, &woken);
+          if (woken) portYIELD_FROM_ISR();
+        },
+        nullptr,
+        FALLING
+      );
+    }
+  }
+#endif
 }
 
 void input_manager_poll_i2c() {
@@ -413,17 +543,89 @@ void input_manager_poll_i2c() {
       for (uint8_t button = 0; button < kByteButtonButtons; ++button) {
         if ((pressedEdges & (1u << button)) == 0) continue;
         (void)push_event(devices::CTRL_BYTEBTN_0, button, 1, 1);
+        // Brief white flash on press; udp_handler will set the final state color
         if (g_byteButton0LedsReady) {
-          (void)write_bytebutton_led_locked(devices::HUB_CH_BYTEBTN_0, button, 0, 90, 36);
+          (void)write_bytebutton_led_locked(devices::HUB_CH_BYTEBTN_0, button, 80, 80, 80);
         }
         if (cfg::kDebugLog) {
           Serial.printf("[SlavePico][I2C] ByteButton0 press b=%u mask=0x%02X\n", button, byteButtonStatus);
+        }
+      }
+      // Apply pending LED state colors queued by udp_handler (settled from previous press)
+      if (g_byteButton0LedsReady) {
+        for (uint8_t i = 0; i < kByteButtonButtons; i++) {
+          if (!g_pendingLed0[i].dirty) continue;
+          g_pendingLed0[i].dirty = false;
+          (void)write_bytebutton_led_locked(devices::HUB_CH_BYTEBTN_0, i,
+            g_pendingLed0[i].r, g_pendingLed0[i].g, g_pendingLed0[i].b);
+        }
+      }
+    }
+
+    // ── ByteButton module 1 (hub ch 1) ──────────────────────────────────────
+    uint8_t byteButton1Status = 0;
+    bool byteButton1AckNow = false;
+    bool byteButton1DetectedNow = false;
+    uint32_t nowMs1 = millis();
+    if (i2c_hub_select(devices::HUB_CH_BYTEBTN_1)) {
+      byteButton1AckNow = probe_selected_bus_device(cfg::kAddrM5ByteButton);
+      i2c_hub_deselect();
+    }
+    if (byteButton1AckNow) {
+      if (g_byteButton1PresenceCount < 255) g_byteButton1PresenceCount++;
+    } else {
+      g_byteButton1PresenceCount = 0;
+    }
+    if (nowMs1 >= g_byteButton1SuspendUntilMs && g_byteButton1PresenceCount >= 2) {
+      byteButton1DetectedNow = read_bytebutton_status_locked(devices::HUB_CH_BYTEBTN_1, byteButton1Status);
+      if (byteButton1DetectedNow) {
+        g_byteButton1FailCount = 0;
+      } else {
+        if (g_byteButton1FailCount < 255) g_byteButton1FailCount++;
+        if (g_byteButton1FailCount >= 3) {
+          g_byteButton1SuspendUntilMs = nowMs1 + 750;
+        }
+      }
+    }
+    if (byteButton1DetectedNow != g_byteButton1Detected) {
+      g_byteButton1Detected = byteButton1DetectedNow;
+      if (g_byteButton1Detected) {
+        g_byteButton1LedsReady = init_bytebutton_leds_locked(devices::HUB_CH_BYTEBTN_1);
+        if (g_byteButton1LedsReady) write_bytebutton1_idle_locked();
+      } else {
+        g_byteButton1LedsReady = false;
+      }
+      if (cfg::kDebugLog) {
+        Serial.printf("[SlavePico][I2C] ByteButton1 %s on hub ch%d\n",
+          g_byteButton1Detected ? "detected" : "missing", devices::HUB_CH_BYTEBTN_1);
+      }
+    }
+    if (byteButton1DetectedNow) {
+      uint8_t pressedEdges1 = byteButton1Status & (uint8_t)~g_prevByteButton1State;
+      g_prevByteButton1State = byteButton1Status;
+      for (uint8_t button = 0; button < kByteButtonButtons; ++button) {
+        if ((pressedEdges1 & (1u << button)) == 0) continue;
+        (void)push_event(devices::CTRL_BYTEBTN_1, button, 1, 1);
+        if (g_byteButton1LedsReady) {
+          (void)write_bytebutton_led_locked(devices::HUB_CH_BYTEBTN_1, button, 80, 80, 80);
+        }
+        if (cfg::kDebugLog) {
+          Serial.printf("[SlavePico][I2C] ByteButton1 press b=%u mask=0x%02X\n", button, byteButton1Status);
+        }
+      }
+      if (g_byteButton1LedsReady) {
+        for (uint8_t i = 0; i < kByteButtonButtons; i++) {
+          if (!g_pendingLed1[i].dirty) continue;
+          g_pendingLed1[i].dirty = false;
+          (void)write_bytebutton_led_locked(devices::HUB_CH_BYTEBTN_1, i,
+            g_pendingLed1[i].r, g_pendingLed1[i].g, g_pendingLed1[i].b);
         }
       }
     }
   }
 
   if (cfg::kEnableM5Encoder) {
+    // ── M5Encoder module 0 (hub ch 2, tracks 0-7) ──────────────────────────
     bool m5Encoder0AckNow = false;
     if (i2c_hub_select(devices::HUB_CH_M5_ENC_0)) {
       m5Encoder0AckNow = probe_selected_bus_device(cfg::kAddrM5Encoder8);
@@ -434,22 +636,18 @@ void input_manager_poll_i2c() {
     } else {
       g_m5Encoder0PresenceCount = 0;
     }
-
     bool m5Encoder0DetectedNow = false;
     if (g_m5Encoder0PresenceCount >= 2) {
       m5Encoder0DetectedNow = detect_m5encoder0_locked();
     }
     if (m5Encoder0DetectedNow != g_m5Encoder0Detected) {
       g_m5Encoder0Detected = m5Encoder0DetectedNow;
-      if (g_m5Encoder0Detected && !g_bootAnimDone) {
-        write_m5encoder_idle_locked();
-      }
+      if (g_m5Encoder0Detected) write_m5encoder_idle_locked();
       if (cfg::kDebugLog) {
         Serial.printf("[SlavePico][I2C] M5Encoder0 %s on hub ch%d\n", g_m5Encoder0Detected ? "detected" : "missing", devices::HUB_CH_M5_ENC_0);
       }
     }
-
-    if (m5Encoder0DetectedNow) {
+    if (m5Encoder0DetectedNow && i2c_hub_select(devices::HUB_CH_M5_ENC_0)) {
       for (uint8_t enc = 0; enc < kEncodersPerModule; ++enc) {
         int32_t counter = g_m5Encoder0.getAbsCounter(enc);
         int32_t delta = counter - g_prevM5Counter0[enc];
@@ -458,16 +656,9 @@ void input_manager_poll_i2c() {
           if (abs((int)delta) <= kM5DeltaClamp) {
             int16_t signedDelta = static_cast<int16_t>(-delta);
             (void)push_event(devices::CTRL_M5_ENC_BANK_0, enc, signedDelta, 0);
-            uint8_t red = signedDelta > 0 ? 0 : 70;
-            uint8_t green = signedDelta > 0 ? 70 : 12;
-            uint8_t blue = 18;
-            (void)g_m5Encoder0.writeRGB(enc, red, green, blue);
-            if (cfg::kDebugLog) {
-              Serial.printf("[SlavePico][I2C] M5Encoder0 enc=%u delta=%d counter=%ld\n", enc, signedDelta, (long)counter);
-            }
+            if (cfg::kDebugLog) Serial.printf("[SlavePico][I2C] M5Enc0 enc=%u d=%d\n", enc, signedDelta);
           }
         }
-
         bool btnNow = g_m5Encoder0.getKeyPressed(enc);
         if (btnNow) {
           if (g_m5ButtonConfirm0[enc] < 255) g_m5ButtonConfirm0[enc]++;
@@ -475,20 +666,81 @@ void input_manager_poll_i2c() {
           g_m5ButtonConfirm0[enc] = 0;
           g_m5ButtonArmed0[enc] = true;
         }
-
         if (g_m5ButtonConfirm0[enc] >= 3 && g_m5ButtonArmed0[enc]) {
           unsigned long now = millis();
           if (now - g_lastM5ButtonPress0[enc] >= 250) {
             g_lastM5ButtonPress0[enc] = now;
             g_m5ButtonArmed0[enc] = false;
             (void)push_event(devices::CTRL_M5_ENC_BANK_0, enc, 1, 1);
-            (void)g_m5Encoder0.writeRGB(enc, 90, 0, 12);
-            if (cfg::kDebugLog) {
-              Serial.printf("[SlavePico][I2C] M5Encoder0 button enc=%u\n", enc);
-            }
+            if (cfg::kDebugLog) Serial.printf("[SlavePico][I2C] M5Enc0 btn enc=%u\n", enc);
           }
         }
       }
+      for (uint8_t enc = 0; enc < kEncodersPerModule; ++enc) {
+        if (!g_pendingEncLed0[enc].dirty) continue;
+        g_pendingEncLed0[enc].dirty = false;
+        (void)g_m5Encoder0.writeRGB(enc, g_pendingEncLed0[enc].r, g_pendingEncLed0[enc].g, g_pendingEncLed0[enc].b);
+      }
+      i2c_hub_deselect();
+    }
+
+    // ── M5Encoder module 1 (hub ch 3, tracks 8-15) ─────────────────────────
+    bool m5Encoder1AckNow = false;
+    if (i2c_hub_select(devices::HUB_CH_M5_ENC_1)) {
+      m5Encoder1AckNow = probe_selected_bus_device(cfg::kAddrM5Encoder8);
+      i2c_hub_deselect();
+    }
+    if (m5Encoder1AckNow) {
+      if (g_m5Encoder1PresenceCount < 255) g_m5Encoder1PresenceCount++;
+    } else {
+      g_m5Encoder1PresenceCount = 0;
+    }
+    bool m5Encoder1DetectedNow = false;
+    if (g_m5Encoder1PresenceCount >= 2) {
+      m5Encoder1DetectedNow = detect_m5encoder1_locked();
+    }
+    if (m5Encoder1DetectedNow != g_m5Encoder1Detected) {
+      g_m5Encoder1Detected = m5Encoder1DetectedNow;
+      if (g_m5Encoder1Detected) write_m5encoder_idle_locked();
+      if (cfg::kDebugLog) {
+        Serial.printf("[SlavePico][I2C] M5Encoder1 %s on hub ch%d\n", g_m5Encoder1Detected ? "detected" : "missing", devices::HUB_CH_M5_ENC_1);
+      }
+    }
+    if (m5Encoder1DetectedNow && i2c_hub_select(devices::HUB_CH_M5_ENC_1)) {
+      for (uint8_t enc = 0; enc < kEncodersPerModule; ++enc) {
+        int32_t counter = g_m5Encoder1.getAbsCounter(enc);
+        int32_t delta = counter - g_prevM5Counter1[enc];
+        if (delta != 0) {
+          g_prevM5Counter1[enc] = counter;
+          if (abs((int)delta) <= kM5DeltaClamp) {
+            int16_t signedDelta = static_cast<int16_t>(-delta);
+            (void)push_event(devices::CTRL_M5_ENC_BANK_1, enc, signedDelta, 0);
+            if (cfg::kDebugLog) Serial.printf("[SlavePico][I2C] M5Enc1 enc=%u d=%d\n", enc, signedDelta);
+          }
+        }
+        bool btnNow = g_m5Encoder1.getKeyPressed(enc);
+        if (btnNow) {
+          if (g_m5ButtonConfirm1[enc] < 255) g_m5ButtonConfirm1[enc]++;
+        } else {
+          g_m5ButtonConfirm1[enc] = 0;
+          g_m5ButtonArmed1[enc] = true;
+        }
+        if (g_m5ButtonConfirm1[enc] >= 3 && g_m5ButtonArmed1[enc]) {
+          unsigned long now = millis();
+          if (now - g_lastM5ButtonPress1[enc] >= 250) {
+            g_lastM5ButtonPress1[enc] = now;
+            g_m5ButtonArmed1[enc] = false;
+            (void)push_event(devices::CTRL_M5_ENC_BANK_1, enc, 1, 1);
+            if (cfg::kDebugLog) Serial.printf("[SlavePico][I2C] M5Enc1 btn enc=%u\n", enc);
+          }
+        }
+      }
+      for (uint8_t enc = 0; enc < kEncodersPerModule; ++enc) {
+        if (!g_pendingEncLed1[enc].dirty) continue;
+        g_pendingEncLed1[enc].dirty = false;
+        (void)g_m5Encoder1.writeRGB(enc, g_pendingEncLed1[enc].r, g_pendingEncLed1[enc].g, g_pendingEncLed1[enc].b);
+      }
+      i2c_hub_deselect();
     }
   }
 
@@ -518,4 +770,30 @@ bool input_manager_pop_event(InputEvent& out) {
   out = g_queue[g_tail];
   g_tail = static_cast<uint8_t>((g_tail + 1) % kQueueLen);
   return true;
+}
+
+#if defined(ARDUINO_ARCH_ESP32)
+SemaphoreHandle_t input_get_i2c_semaphore() {
+  return s_i2c_sem;
+}
+#endif
+
+void input_set_bytebutton_led(uint8_t btn, uint8_t r, uint8_t g, uint8_t b) {
+  if (btn >= kByteButtonButtons) return;
+  g_pendingLed0[btn] = {r, g, b, true};
+}
+
+void input_set_bytebutton1_led(uint8_t btn, uint8_t r, uint8_t g, uint8_t b) {
+  if (btn >= kByteButtonButtons) return;
+  g_pendingLed1[btn] = {r, g, b, true};
+}
+
+void input_set_enc0_led(uint8_t enc, uint8_t r, uint8_t g, uint8_t b) {
+  if (enc >= kEncodersPerModule) return;
+  g_pendingEncLed0[enc] = {r, g, b, true};
+}
+
+void input_set_enc1_led(uint8_t enc, uint8_t r, uint8_t g, uint8_t b) {
+  if (enc >= kEncodersPerModule) return;
+  g_pendingEncLed1[enc] = {r, g, b, true};
 }

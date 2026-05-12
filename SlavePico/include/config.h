@@ -20,7 +20,7 @@ static constexpr uint32_t kHeartbeatMs = 2000;
 // I2C base
 static constexpr uint8_t kI2cSdaPin = 7;
 static constexpr uint8_t kI2cSclPin = 8;
-static constexpr uint32_t kI2cClockHz = 100000;
+static constexpr uint32_t kI2cClockHz = 400000;  // Fast mode (was 100kHz)
 static constexpr uint8_t kI2cHubAddr = 0x70; // PCA9548A
 static constexpr uint32_t kI2cHubSettleUs = 8;
 static constexpr bool kI2cBaseIsolationMode = false;
@@ -30,17 +30,30 @@ static constexpr uint8_t kAddrDfRobotRotary = 0x54;
 static constexpr uint8_t kAddrM5Encoder8 = 0x41;
 static constexpr uint8_t kAddrM5ByteButton = 0x47;
 static constexpr bool kEnableDfRotary = true;
-static constexpr bool kEnableM5Encoder = false;
-static constexpr bool kEnableM5ByteButton = false;
+  static constexpr bool kEnableM5Encoder = true;
+static constexpr bool kEnableM5ByteButton = true;   // ByteButton module on hub ch0
 
 static constexpr float kTempoMin = 60.0f;
 static constexpr float kTempoMax = 200.0f;
 
 // Polling
 static constexpr bool kEnableI2cPolling = true;
-static constexpr uint32_t kInputPollMs = 10;
+static constexpr uint32_t kInputPollMs = 5;    // I2C poll interval (was 10ms)
 static constexpr uint32_t kButtonPollMs = 12;
 static constexpr uint32_t kFaderPollMs = 15;
+
+// Rotary encoder quality
+// Gain: higher = more raw units per physical click = more responsive.
+// The visual smoothness comes from the P4 display lerp, NOT from EMA here.
+static constexpr uint8_t  kRotaryGainCoeff        = 20;    // was 5 (too slow), 20 = ~2% FX per click
+static constexpr float    kRotarySmoothAlpha       = 1.0f;  // 1.0 = NO EMA (raw value, P4 lerps)
+static constexpr uint32_t kRotaryMinSendIntervalMs = 16;    // ~60Hz max UDP rate per encoder
+
+// Interrupt-driven I2C wake (optional, requires INT pins wired to GPIOs).
+// Set kEnableDfRotaryInterrupt=true and fill kDfRotaryIntPins with real GPIO numbers.
+// While disabled, the task falls back to kInputPollMs timeout.
+static constexpr bool    kEnableDfRotaryInterrupt  = false;
+static constexpr int8_t  kDfRotaryIntPins[4]       = {-1, -1, -1, -1}; // GPIO per encoder
 
 // Fader unit analog
 static constexpr bool kEnableFaderAnalog = false;

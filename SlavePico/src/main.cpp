@@ -17,9 +17,12 @@ namespace {
 uint32_t g_lastSerialAliveMs = 0;
 
 void task_input_i2c(void* /*arg*/) {
+  SemaphoreHandle_t sem = input_get_i2c_semaphore();
   for (;;) {
+    // Block until INT fires (instant) or kInputPollMs timeout (fallback).
+    // When kEnableDfRotaryInterrupt=false, only the timeout path runs.
+    xSemaphoreTake(sem, pdMS_TO_TICKS(cfg::kInputPollMs));
     input_manager_poll_i2c();
-    vTaskDelay(pdMS_TO_TICKS(cfg::kInputPollMs));
   }
 }
 

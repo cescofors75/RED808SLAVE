@@ -2763,49 +2763,65 @@ static void update_fx_screen(void) {
         { p4.pot_value[2], p4.pot_muted[2] },  // Limiter macro (S3 pot2)
     };
 
-    static uint16_t prev_key[6] = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
+    // Smooth animation: lerp arc from current animated position toward target.
+    // Alpha 0.40 at ~16ms tick → ~100ms to reach target (professional feel).
+    static float  s_arc_anim[6]   = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    static uint16_t prev_key[6]   = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
+
     for (int cell = 0; cell < 6; cell++) {
-        int val   = src[cell].val;
+        int val    = src[cell].val;
         bool muted = src[cell].muted;
-
         int display_val = muted ? 0 : val;
-        uint16_t key = (uint16_t)((muted ? 0x100 : 0) | (display_val & 0xFF));
-        if (key == prev_key[cell]) continue;
-        prev_key[cell] = key;
 
-        int pct = (int)((float)display_val / 127.0f * 100.0f + 0.5f);
+        // Lerp toward target
+        s_arc_anim[cell] += ((float)display_val - s_arc_anim[cell]) * 0.40f;
+        int anim_val = (int)(s_arc_anim[cell] + 0.5f);
+
+        // Key: tracks mute + target (for expensive style ops)
+        uint16_t key = (uint16_t)((muted ? 0x100 : 0) | (display_val & 0xFF));
+        bool still_animating = (fabsf(s_arc_anim[cell] - (float)display_val) > 0.4f);
+        bool key_changed = (key != prev_key[cell]);
+
+        if (!still_animating && !key_changed) continue;
+
+        int pct = (int)((float)anim_val / 127.0f * 100.0f + 0.5f);
 
         s_fx_ui_syncing = true;
         if (fx_arcs[cell])
-            lv_arc_set_value(fx_arcs[cell], display_val);
+            lv_arc_set_value(fx_arcs[cell], anim_val);
         s_fx_ui_syncing = false;
 
         if (fx_value_labels[cell])
             lv_label_set_text_fmt(fx_value_labels[cell], "%d", pct);
 
-        // Update card border glow intensity based on value
-        lv_obj_t* card = fx_arcs[cell] ? lv_obj_get_parent(fx_arcs[cell]) : NULL;
-        if (card && !muted && val > 0) {
-            lv_obj_set_style_border_opa(card, LV_OPA_90, 0);
-            lv_obj_set_style_outline_opa(card, LV_OPA_50, 0);
-        } else if (card) {
-            lv_obj_set_style_border_opa(card, muted ? LV_OPA_20 : LV_OPA_40, 0);
-            lv_obj_set_style_outline_opa(card, LV_OPA_10, 0);
-        }
+        // Expensive style ops only when the logical key changes (not every lerp tick)
+        if (key_changed) {
+            prev_key[cell] = key;
 
-        // Update toggle button
-        if (fx_toggle_btns[cell]) {
-            lv_obj_t* lbl = lv_obj_get_child(fx_toggle_btns[cell], 0);
-            if (lbl) lv_label_set_text(lbl, muted ? "OFF" : "ON");
-            lv_color_t tc = lv_color_hex(fx_colors[cell]);
-            lv_obj_set_style_bg_opa(fx_toggle_btns[cell], muted ? LV_OPA_10 : LV_OPA_20, 0);
-            lv_obj_set_style_shadow_opa(fx_toggle_btns[cell], muted ? LV_OPA_0 : LV_OPA_40, 0);
-            if (lbl) lv_obj_set_style_text_color(lbl, muted ? RED808_TEXT_DIM : tc, 0);
-        }
+            // Update card border glow intensity based on value
+            lv_obj_t* card = fx_arcs[cell] ? lv_obj_get_parent(fx_arcs[cell]) : NULL;
+            if (card && !muted && val > 0) {
+                lv_obj_set_style_border_opa(card, LV_OPA_90, 0);
+                lv_obj_set_style_outline_opa(card, LV_OPA_50, 0);
+            } else if (card) {
+                lv_obj_set_style_border_opa(card, muted ? LV_OPA_20 : LV_OPA_40, 0);
+                lv_obj_set_style_outline_opa(card, LV_OPA_10, 0);
+            }
 
-        // Update arc indicator color (dim if muted)
-        if (fx_arcs[cell]) {
-            lv_obj_set_style_arc_opa(fx_arcs[cell], muted ? LV_OPA_20 : LV_OPA_COVER, LV_PART_INDICATOR);
+            // Update toggle button
+            if (fx_toggle_btns[cell]) {
+                lv_obj_t* lbl = lv_obj_get_child(fx_toggle_btns[cell], 0);
+                if (lbl) lv_label_set_text(lbl, muted ? "OFF" : "ON");
+                lv_color_t tc = lv_color_hex(fx_colors[cell]);
+                lv_obj_set_style_bg_opa(fx_toggle_btns[cell], muted ? LV_OPA_10 : LV_OPA_20, 0);
+                lv_obj_set_style_shadow_opa(fx_toggle_btns[cell], muted ? LV_OPA_0 : LV_OPA_40, 0);
+                if (lbl) lv_obj_set_style_text_color(lbl, muted ? RED808_TEXT_DIM : tc, 0);
+            }
+
+            // Update arc indicator color (dim if muted)
+            if (fx_arcs[cell]) {
+                lv_obj_set_style_arc_opa(fx_arcs[cell], muted ? LV_OPA_20 : LV_OPA_COVER, LV_PART_INDICATOR);
+            }
         }
     }
 }
@@ -7863,6 +7879,13 @@ void ui_update_current_screen(void) {
 
     ui_update_header();
 
+    // Force fx_screen repaint IMMEDIATELY when UDP receives new FX values.
+    // Must be BEFORE the period throttle so dirty updates aren't delayed up to 33ms.
+    if (g_fx_screen_dirty) {
+        g_fx_screen_dirty = false;
+        update_fx_screen();
+    }
+
     // Per-screen pacing. LIVE and STEPS need 60Hz for pad fades/playhead.
     // Static editors do not: most interaction is handled by event callbacks.
     static unsigned long last_active_update_ms = 0;
@@ -7873,14 +7896,9 @@ void ui_update_current_screen(void) {
     else if (active == scr_sdcard) period_ms = p4sd.needs_refresh ? 16 : 100;
     else if (active == scr_piano) period_ms = 16;
     else if (active == scr_piano_params) period_ms = 50;
+    else if (active == scr_fx) period_ms = 16;
     if (now - last_active_update_ms < period_ms) return;
     last_active_update_ms = now;
-
-    // Force fx_screen repaint if UDP received new FX values (even if not on scr_fx)
-    if (g_fx_screen_dirty) {
-        g_fx_screen_dirty = false;
-        update_fx_screen();
-    }
 
     // Update active screen content
     if (active == scr_live) update_live_screen();

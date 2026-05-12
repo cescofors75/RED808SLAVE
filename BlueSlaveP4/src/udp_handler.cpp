@@ -1087,6 +1087,26 @@ static void processJson(const char* json, int len) {
     }
 
     const char* eventType = doc["type"] | "";
+    if (strcmp(eventType, "trackVolumeSet") == 0) {
+        int track = doc["track"] | -1;
+        if (track >= 0 && track < 16) {
+            unsigned long nowMs = millis();
+            int vol = clamp_int(doc["volume"] | 100, 0, 150);
+            if (!is_track_volume_owned_recent(track, nowMs)) {
+                p4.track_volume[track] = vol;
+            }
+        }
+        return;
+    }
+    if (strcmp(eventType, "songPattern") == 0) {
+        int pat = clamp_int(doc["pattern"] | p4.current_pattern, 0, 15);
+        p4.current_pattern = pat;
+        p4.current_step = 0;
+        uart_send_to_s3(MSG_SYSTEM, SYS_PATTERN, (uint8_t)pat);
+        uart_send_to_s3(MSG_SYSTEM, SYS_STEP, 0);
+        udp_send_get_pattern(pat);
+        return;
+    }
     if (strcmp(eventType, "masterFx") == 0) {
         apply_remote_master_fx_param(doc["param"] | "", doc["value"]);
         return;
