@@ -47,7 +47,7 @@ static unsigned long lastLocalTrackVolMs[16] = {};
 // Master broadcasts state_sync about every 2 s. Keep a slightly larger local
 // ownership window so near-race packets do not pull FX/track values back right
 // after a local touch interaction.
-static const unsigned long LOCAL_OWNERSHIP_MS = 2600;
+static const unsigned long LOCAL_OWNERSHIP_MS = 4000;
 static const unsigned long LOCAL_STEP_OWNERSHIP_MS = 700;
 static int pendingPatternRequest = -1;
 static unsigned long pendingPatternLastTxMs = 0;
@@ -128,7 +128,7 @@ static inline void forward_fx_bitcrush_to_s3(int bits) {
 }
 
 static inline void forward_fx_samplerate_to_s3(int sampleRateHz) {
-    int v = clamp_int(sampleRateHz, 1000, 44100);
+    int v = (sampleRateHz <= 0) ? 0 : clamp_int(sampleRateHz, 9000, 32000);
     uart_send_to_s3(MSG_FX, FX_SAMPLERATE_H, (uint8_t)((v >> 8) & 0xFF));
     uart_send_to_s3(MSG_FX, FX_SAMPLERATE_L, (uint8_t)(v & 0xFF));
 }
@@ -283,6 +283,24 @@ static void apply_remote_master_fx_param(const char* param, JsonVariantConst val
         if (!is_fx_owned_recent(FX_OWN_PHASER, nowMs)) p4.pot_muted[2] = !value.as<bool>();
     } else if (strcmp(param, "phaserDepth") == 0) {
         if (!is_fx_owned_recent(FX_OWN_PHASER, nowMs)) p4.pot_value[2] = phaser_depth_to_u7(value, p4.pot_value[2]);
+    } else if (strcmp(param, "bitCrush") == 0) {
+        if (!is_fx_owned_recent(FX_OWN_BITCRUSH, nowMs)) {
+            p4.bitcrush_bits = clamp_int(value.as<int>(), 8, 16);
+            forward_fx_bitcrush_to_s3(p4.bitcrush_bits);
+        }
+    } else if (strcmp(param, "sampleRate") == 0) {
+        if (!is_fx_owned_recent(FX_OWN_SAMPLE_RATE, nowMs)) {
+            int sr = value.as<int>();
+            p4.sample_rate_hz = (sr <= 0) ? 0 : clamp_int(sr, 9000, 32000);
+            forward_fx_samplerate_to_s3(p4.sample_rate_hz);
+        }
+    } else if (strcmp(param, "distortion") == 0) {
+        if (!is_fx_owned_recent(FX_OWN_DISTORTION, nowMs)) {
+            float amount = value.as<float>();
+            if (amount > 1.0f) amount /= 100.0f;
+            p4.distortion_pct = clamp_int((int)(amount * 100.0f + 0.5f), 0, 100);
+            forward_fx_distortion_to_s3(p4.distortion_pct);
+        }
     } else {
         handled = false;
     }
@@ -584,7 +602,8 @@ static bool fetch_master_state_http(void) {
             forward_fx_bitcrush_to_s3(p4.bitcrush_bits);
         }
         if (!is_fx_owned_recent(FX_OWN_SAMPLE_RATE, nowMs)) {
-            p4.sample_rate_hz = clamp_int(fx["sampleRate"] | p4.sample_rate_hz, 1000, 48000);
+            int sr = fx["sampleRate"] | p4.sample_rate_hz;
+            p4.sample_rate_hz = (sr <= 0) ? 0 : clamp_int(sr, 9000, 32000);
             forward_fx_samplerate_to_s3(p4.sample_rate_hz);
         }
         apply_remote_macro_fx_state(fx, "http", lastRemoteHttpFxLogMs);
@@ -935,6 +954,23 @@ void udp_send_set_distortion(float val) {
     sendJson(buf);
 }
 
+void udp_send_set_bitcrush(int bits) {
+    mark_local_fx(FX_OWN_BITCRUSH);
+    int clamped = clamp_int(bits, 8, 16);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"setBitCrush\",\"value\":%d}", clamped);
+    sendJson(buf);
+}
+
+void udp_send_set_sample_rate(int rateHz) {
+    mark_local_fx(FX_OWN_SAMPLE_RATE);
+    // 0 is accepted by master as bypass/off; non-zero uses audible SRATE range.
+    int clamped = (rateHz <= 0) ? 0 : clamp_int(rateHz, 9000, 32000);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"setSampleRate\",\"value\":%d}", clamped);
+    sendJson(buf);
+}
+
 // =============================================================================
 // FX LIVE COMMANDS — enc/pot values → Master FX engine
 // Ranges are intentionally conservative: audible first, no harsh clipping.
@@ -1251,7 +1287,8 @@ static void processJson(const char* json, int len) {
                 forward_fx_bitcrush_to_s3(p4.bitcrush_bits);
             }
             if (!is_fx_owned_recent(FX_OWN_SAMPLE_RATE, nowMs)) {
-                p4.sample_rate_hz = clamp_int(fx["sampleRate"] | p4.sample_rate_hz, 1000, 48000);
+                int sr = fx["sampleRate"] | p4.sample_rate_hz;
+                p4.sample_rate_hz = (sr <= 0) ? 0 : clamp_int(sr, 9000, 32000);
                 forward_fx_samplerate_to_s3(p4.sample_rate_hz);
             }
             apply_remote_macro_fx_state(fx, "state_sync", lastRemoteStateSyncFxLogMs);

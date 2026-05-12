@@ -2993,7 +2993,10 @@ static int fx_card_current_value_u7(int cell) {
         case FX_CARD_DELAY:  return p4.enc_value[1];
         case FX_CARD_REVERB: return p4.enc_value[2];
         case FX_CARD_FOLD:   return p4.pot_value[3];
-        case FX_CARD_CRUSH:  return p4.pot_value[1];
+        case FX_CARD_CRUSH: {
+            float norm = (float)(16 - constrain(p4.bitcrush_bits, 8, 16)) / 8.0f;
+            return constrain((int)(norm * 127.0f + 0.5f), 0, 127);
+        }
         case FX_CARD_PHASER: return p4.pot_value[2];
         case FX_CARD_CUTOFF: {
             float norm = (float)(constrain(p4.cutoff_hz, 20, 20000) - 20) / 19980.0f;
@@ -3031,13 +3034,13 @@ static bool fx_card_is_muted(int cell) {
         case FX_CARD_DELAY:  return p4.enc_muted[1];
         case FX_CARD_REVERB: return p4.enc_muted[2];
         case FX_CARD_FOLD:   return p4.pot_muted[0];
-        case FX_CARD_CRUSH:  return p4.pot_muted[1];
+        case FX_CARD_CRUSH:  return p4.bitcrush_bits >= 16;
         case FX_CARD_PHASER: return p4.pot_muted[2];
         case FX_CARD_CUTOFF: return p4.cutoff_hz >= 19950;
         case FX_CARD_RESO:   return p4.resonance_x10 <= 11;
         case FX_CARD_DRIVE:  return p4.distortion_pct <= 0;
         case FX_CARD_BITS:   return p4.bitcrush_bits >= 16;
-        case FX_CARD_SRATE:  return p4.sample_rate_hz >= 43000;
+        case FX_CARD_SRATE:  return (p4.sample_rate_hz <= 0) || (p4.sample_rate_hz >= 31800);
         case FX_CARD_FILTER: return p4.filter_type == 0;
     }
     return false;
@@ -3050,6 +3053,7 @@ static const char* fx_card_button_text(int cell, bool muted) {
 
 static int fx_card_neutral_u7(int cell) {
     switch (cell) {
+        case FX_CARD_CRUSH:  return 0;
         case FX_CARD_CUTOFF: return 127;
         case FX_CARD_RESO:   return 0;
         case FX_CARD_DRIVE:  return 0;
@@ -3062,7 +3066,7 @@ static int fx_card_neutral_u7(int cell) {
 
 static void fx_card_send_value(int cell, int u7) {
     int neutral_u7 = fx_card_neutral_u7(cell);
-    if (cell >= FX_CARD_CUTOFF && u7 != neutral_u7) {
+    if (u7 != neutral_u7) {
         s_fx_last_active_u7[cell] = (uint8_t)u7;
     }
 
@@ -3079,7 +3083,8 @@ static void fx_card_send_value(int cell, int u7) {
             break;
         case FX_CARD_CRUSH:
             p4.pot_value[1] = (uint8_t)u7;
-            if (udp_wifi_connected()) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
+            p4.bitcrush_bits = constrain((int)(16.0f - ((float)u7 / 127.0f) * 8.0f + 0.5f), 8, 16);
+            if (udp_wifi_connected()) udp_send_set_bitcrush(p4.bitcrush_bits);
             break;
         case FX_CARD_PHASER:
             p4.pot_value[2] = (uint8_t)u7;
@@ -3108,15 +3113,14 @@ static void fx_card_send_value(int cell, int u7) {
             int bits = constrain((int)(16.0f - ((float)u7 / 127.0f) * 8.0f + 0.5f), 8, 16);
             p4.bitcrush_bits = bits;
             p4.pot_value[1] = (uint8_t)u7;
-            if (udp_wifi_connected()) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
+            if (udp_wifi_connected()) udp_send_set_bitcrush(bits);
             break;
         }
         case FX_CARD_SRATE: {
             // Match udp_send_fx_pot(pot=1): 32000..9000 Hz across u7 range.
             int sr = constrain((int)(32000.0f - ((float)u7 / 127.0f) * 22000.0f + 0.5f), 9000, 32000);
             p4.sample_rate_hz = sr;
-            p4.pot_value[1] = (uint8_t)u7;
-            if (udp_wifi_connected()) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
+            if (udp_wifi_connected()) udp_send_set_sample_rate(sr);
             break;
         }
         case FX_CARD_FILTER: {
@@ -3131,6 +3135,7 @@ static void fx_card_send_value(int cell, int u7) {
 
 static void fx_card_reset(int cell) {
     switch (cell) {
+        case FX_CARD_CRUSH: fx_card_send_value(cell, 0); break;
         case FX_CARD_CUTOFF: fx_card_send_value(cell, 127); break;
         case FX_CARD_RESO: fx_card_send_value(cell, 0); break;
         case FX_CARD_DRIVE: fx_card_send_value(cell, 0); break;
@@ -3187,7 +3192,7 @@ static void fx_apply_layout(void) {
     const lv_font_t* titleFont = compact12 ? &lv_font_montserrat_12 : (compact6 ? &lv_font_montserrat_16 : &lv_font_montserrat_22);
     const lv_font_t* valueFont = compact12 ? &lv_font_montserrat_20 : (compact6 ? &lv_font_montserrat_28 : &lv_font_montserrat_40);
     const lv_font_t* srcFont = compact12 ? &lv_font_montserrat_10 : (compact6 ? &lv_font_montserrat_10 : &lv_font_montserrat_12);
-    const lv_font_t* toggleFont = compact12 ? &lv_font_montserrat_11 : (compact6 ? &lv_font_montserrat_12 : &lv_font_montserrat_16);
+    const lv_font_t* toggleFont = compact12 ? &lv_font_montserrat_12 : (compact6 ? &lv_font_montserrat_12 : &lv_font_montserrat_16);
 
     int nameY = compact12 ? 4 : (compact6 ? 8 : 14);
     int srcY = compact12 ? 20 : (compact6 ? 28 : 42);
@@ -3275,7 +3280,16 @@ static void fx_toggle_cb(lv_event_t* e) {
                 p4.pot_muted[pot_idx] = !p4.pot_muted[pot_idx];
                 if (udp_wifi_connected()) {
                     if (pot_idx == 0) udp_send_fx_pot(0, p4.pot_value[3], p4.pot_muted[0]);
-                    else if (pot_idx == 1) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
+                    else if (pot_idx == 1) {
+                        // CRUSH card in touch UI controls bitcrush only (no chained SRATE/DIST).
+                        if (p4.pot_muted[1]) {
+                            p4.bitcrush_bits = 16;
+                            udp_send_set_bitcrush(16);
+                        } else {
+                            if (p4.bitcrush_bits >= 16) p4.bitcrush_bits = 12;
+                            udp_send_set_bitcrush(p4.bitcrush_bits);
+                        }
+                    }
                     else udp_send_fx_pot(2, p4.pot_value[2], p4.pot_muted[2]);
                 }
             } else {
@@ -8460,8 +8474,8 @@ static void ui_reload_themed_screens(void) {
     }
     for (int i = 0; i < FX_CARD_COUNT; i++) {
         fx_cards[i] = NULL; fx_arcs[i] = NULL; fx_value_labels[i] = NULL;
-        fx_name_labels[i] = NULL; fx_toggle_btns[i] = NULL;
-        fx_pct_ring[i] = NULL;
+        fx_name_labels[i] = NULL; fx_src_labels[i] = NULL; fx_toggle_btns[i] = NULL;
+        fx_pct_labels[i] = NULL;
     }
     for (int i = 0; i < FX_PAGE_DOT_COUNT; i++) fx_page_dot[i] = NULL;
     fx_page_lbl = NULL;

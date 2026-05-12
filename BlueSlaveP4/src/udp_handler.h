@@ -39,6 +39,8 @@ void udp_send_set_filter(int type);
 void udp_send_set_filter_cutoff(int hz);
 void udp_send_set_filter_resonance(float val);
 void udp_send_set_distortion(float val);
+void udp_send_set_bitcrush(int bits);
+void udp_send_set_sample_rate(int rateHz);
 
 // FX live commands (encoder/pot → Master)
 // enc_id: 0=Flanger, 1=Delay, 2=Reverb

@@ -25,7 +25,7 @@ P4State p4 = {
     .resonance_x10   = 10,                   // Q=1.0 neutral
     .distortion_pct  = 0,                    // OFF
     .bitcrush_bits   = 16,                   // 16-bit = bypass
-    .sample_rate_hz  = 44100,                // full rate = bypass
+    .sample_rate_hz  = 32000,                // neutral for UI SRATE mapping
 };
 
 // P4 SD remote browse state
@@ -144,7 +144,7 @@ void uart_handler_init(void) {
     p4.cutoff_hz = 20000;
     p4.resonance_x10 = 10;
     p4.bitcrush_bits = 16;
-    p4.sample_rate_hz = 44100;
+    p4.sample_rate_hz = 32000;
     for (int i = 0; i < 16; i++) p4.track_volume[i] = 75;
 
     // SD / MIDI load state
@@ -499,7 +499,7 @@ static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
                 case FX_DISTORTION:   p4.distortion_pct = val;            break;
                 case FX_BITCRUSH:     p4.bitcrush_bits = val;             break;
                 case FX_SAMPLERATE_H: {
-                    static int s_sr_staging = 44100;
+                    static int s_sr_staging = 32000;
                     s_sr_staging = (s_sr_staging & 0x00FF) | (val << 8);
                     p4.sample_rate_hz = s_sr_staging;
                     break;
