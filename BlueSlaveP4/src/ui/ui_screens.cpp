@@ -2946,14 +2946,19 @@ static lv_obj_t* fx_cards[FX_CARD_COUNT]       = {};
 static lv_obj_t* fx_arcs[FX_CARD_COUNT]        = {};
 static lv_obj_t* fx_value_labels[FX_CARD_COUNT]= {};
 static lv_obj_t* fx_name_labels[FX_CARD_COUNT] = {};
+static lv_obj_t* fx_src_labels[FX_CARD_COUNT]  = {};
 static lv_obj_t* fx_toggle_btns[FX_CARD_COUNT] = {};
-static lv_obj_t* fx_pct_ring[FX_CARD_COUNT]    = {};
+static lv_obj_t* fx_pct_labels[FX_CARD_COUNT]  = {};
 static lv_obj_t* fx_page_dot[FX_PAGE_DOT_COUNT]= {};
 static lv_obj_t* fx_page_lbl                   = NULL;
 static lv_obj_t* fx_view_btn                   = NULL;
 static lv_obj_t* fx_view_lbl                   = NULL;
 static bool s_fx_ui_syncing = false;
 static uint32_t s_fx_toggle_last_ms[FX_CARD_COUNT] = {};
+static uint32_t s_fx_any_toggle_last_ms = 0;          // global across all FX buttons
+static float    s_fx_arc_anim[FX_CARD_COUNT] = {};    // file-scope for snap access
+static uint32_t s_fx_arc_user_ms[FX_CARD_COUNT] = {}; // last user-touch timestamp
+static uint8_t  s_fx_last_active_u7[FX_CARD_COUNT] = {64, 64, 64, 64, 64, 64, 96, 64, 64, 64, 64, 64};
 
 static const char* fx_names[FX_CARD_COUNT] = {
     "FLANGE", "DELAY", "REVERB", "FOLD", "CRUSH", "PHASER",
@@ -2970,8 +2975,16 @@ static const char* fx_src[FX_CARD_COUNT] = {
     "FILTER", "FILTER", "MASTER", "CRUSH", "CRUSH", "FILTER"
 };
 
+static lv_color_t fx_safe_text_color(uint32_t hexColor) {
+    uint8_t r = (uint8_t)((hexColor >> 16) & 0xFF);
+    uint8_t g = (uint8_t)((hexColor >> 8) & 0xFF);
+    uint8_t b = (uint8_t)(hexColor & 0xFF);
+    int luminance = (int)(0.299f * (float)r + 0.587f * (float)g + 0.114f * (float)b);
+    return (luminance > 190) ? RED808_TEXT : lv_color_hex(hexColor);
+}
+
 static bool fx_card_has_onoff(int cell) {
-    return cell >= 0 && cell < 6;
+    return cell >= 0 && cell < FX_CARD_COUNT;
 }
 
 static int fx_card_current_value_u7(int cell) {
@@ -2995,11 +3008,13 @@ static int fx_card_current_value_u7(int cell) {
             return constrain((int)(norm * 127.0f + 0.5f), 0, 127);
         }
         case FX_CARD_BITS: {
-            float norm = (float)(16 - constrain(p4.bitcrush_bits, 4, 16)) / 12.0f;
+            // Keep UI mapping aligned with CRUSH macro pot#1 command path.
+            float norm = (float)(16 - constrain(p4.bitcrush_bits, 8, 16)) / 8.0f;
             return constrain((int)(norm * 127.0f + 0.5f), 0, 127);
         }
         case FX_CARD_SRATE: {
-            float norm = (float)(44100 - constrain(p4.sample_rate_hz, 1000, 44100)) / 43100.0f;
+            // Keep UI mapping aligned with CRUSH macro pot#1 command path.
+            float norm = (float)(32000 - constrain(p4.sample_rate_hz, 9000, 32000)) / 22000.0f;
             return constrain((int)(norm * 127.0f + 0.5f), 0, 127);
         }
         case FX_CARD_FILTER: {
@@ -3030,10 +3045,27 @@ static bool fx_card_is_muted(int cell) {
 
 static const char* fx_card_button_text(int cell, bool muted) {
     if (fx_card_has_onoff(cell)) return muted ? "OFF" : "ON";
-    return muted ? "RESET" : "SET";
+    return muted ? "OFF" : "ON";
+}
+
+static int fx_card_neutral_u7(int cell) {
+    switch (cell) {
+        case FX_CARD_CUTOFF: return 127;
+        case FX_CARD_RESO:   return 0;
+        case FX_CARD_DRIVE:  return 0;
+        case FX_CARD_BITS:   return 0;
+        case FX_CARD_SRATE:  return 0;
+        case FX_CARD_FILTER: return 0;
+        default:             return 0;
+    }
 }
 
 static void fx_card_send_value(int cell, int u7) {
+    int neutral_u7 = fx_card_neutral_u7(cell);
+    if (cell >= FX_CARD_CUTOFF && u7 != neutral_u7) {
+        s_fx_last_active_u7[cell] = (uint8_t)u7;
+    }
+
     switch (cell) {
         case FX_CARD_FLANGE:
         case FX_CARD_DELAY:
@@ -3072,14 +3104,16 @@ static void fx_card_send_value(int cell, int u7) {
             break;
         }
         case FX_CARD_BITS: {
-            int bits = constrain((int)(16.0f - ((float)u7 / 127.0f) * 12.0f + 0.5f), 4, 16);
+            // Match udp_send_fx_pot(pot=1): 16..8 bits across u7 range.
+            int bits = constrain((int)(16.0f - ((float)u7 / 127.0f) * 8.0f + 0.5f), 8, 16);
             p4.bitcrush_bits = bits;
             p4.pot_value[1] = (uint8_t)u7;
             if (udp_wifi_connected()) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
             break;
         }
         case FX_CARD_SRATE: {
-            int sr = constrain((int)(44100.0f - ((float)u7 / 127.0f) * 43100.0f + 0.5f), 1000, 44100);
+            // Match udp_send_fx_pot(pot=1): 32000..9000 Hz across u7 range.
+            int sr = constrain((int)(32000.0f - ((float)u7 / 127.0f) * 22000.0f + 0.5f), 9000, 32000);
             p4.sample_rate_hz = sr;
             p4.pot_value[1] = (uint8_t)u7;
             if (udp_wifi_connected()) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
@@ -3142,11 +3176,23 @@ static void fx_apply_layout(void) {
     int gridH = LCD_V_RES - topY - bottomPad;
     int cardW = (LCD_H_RES - sidePad * 2 - gap * (cols - 1)) / cols;
     int cardH = (gridH - gap * (rows - 1)) / rows;
-    int arcSize = constrain((cardW < cardH ? cardW : cardH) - 72, 90, 290);
-    const lv_font_t* titleFont = visibleCount >= 9 ? &lv_font_montserrat_16 : &lv_font_montserrat_22;
-    const lv_font_t* valueFont = visibleCount >= 9 ? &lv_font_montserrat_28 : &lv_font_montserrat_40;
-    const lv_font_t* srcFont = visibleCount >= 9 ? &lv_font_montserrat_10 : &lv_font_montserrat_12;
-    const lv_font_t* toggleFont = visibleCount >= 9 ? &lv_font_montserrat_12 : &lv_font_montserrat_16;
+    bool compact12 = (visibleCount >= 12);
+    bool compact6 = (!compact12 && visibleCount >= 6);
+    int arcSize = compact12
+        ? constrain((cardW < cardH ? cardW : cardH) - 96, 72, 130)
+        : (compact6
+            ? constrain((cardW < cardH ? cardW : cardH) - 84, 96, 190)
+            : constrain((cardW < cardH ? cardW : cardH) - 72, 120, 290));
+
+    const lv_font_t* titleFont = compact12 ? &lv_font_montserrat_12 : (compact6 ? &lv_font_montserrat_16 : &lv_font_montserrat_22);
+    const lv_font_t* valueFont = compact12 ? &lv_font_montserrat_20 : (compact6 ? &lv_font_montserrat_28 : &lv_font_montserrat_40);
+    const lv_font_t* srcFont = compact12 ? &lv_font_montserrat_10 : (compact6 ? &lv_font_montserrat_10 : &lv_font_montserrat_12);
+    const lv_font_t* toggleFont = compact12 ? &lv_font_montserrat_11 : (compact6 ? &lv_font_montserrat_12 : &lv_font_montserrat_16);
+
+    int nameY = compact12 ? 4 : (compact6 ? 8 : 14);
+    int srcY = compact12 ? 20 : (compact6 ? 28 : 42);
+    int centerY = compact12 ? -4 : (compact6 ? -8 : -18);
+    int pctY = compact12 ? 10 : (compact6 ? 4 : -2);
 
     for (int cell = 0; cell < FX_CARD_COUNT; cell++) {
         if (!fx_cards[cell]) continue;
@@ -3167,31 +3213,35 @@ static void fx_apply_layout(void) {
         if (fx_name_labels[cell]) {
             lv_obj_set_width(fx_name_labels[cell], cardW);
             lv_obj_set_style_text_font(fx_name_labels[cell], titleFont, 0);
-            lv_obj_align(fx_name_labels[cell], LV_ALIGN_TOP_MID, 0, visibleCount >= 9 ? 8 : 14);
+            lv_obj_align(fx_name_labels[cell], LV_ALIGN_TOP_MID, 0, nameY);
         }
         if (fx_arcs[cell]) {
             lv_obj_set_size(fx_arcs[cell], arcSize, arcSize);
-            lv_obj_align(fx_arcs[cell], LV_ALIGN_CENTER, 0, visibleCount >= 9 ? -8 : -18);
+            lv_obj_align(fx_arcs[cell], LV_ALIGN_CENTER, 0, centerY);
         }
         if (fx_value_labels[cell]) {
             lv_obj_set_width(fx_value_labels[cell], cardW);
             lv_obj_set_style_text_font(fx_value_labels[cell], valueFont, 0);
-            lv_obj_align(fx_value_labels[cell], LV_ALIGN_CENTER, 0, visibleCount >= 9 ? -8 : -18);
+            lv_obj_align(fx_value_labels[cell], LV_ALIGN_CENTER, 0, centerY);
         }
-        lv_obj_t* src_lbl = lv_obj_get_child(fx_cards[cell], 1);
-        if (src_lbl) {
-            lv_obj_set_width(src_lbl, cardW);
-            lv_obj_set_style_text_font(src_lbl, srcFont, 0);
-            lv_obj_align(src_lbl, LV_ALIGN_TOP_MID, 0, visibleCount >= 9 ? 28 : 42);
+        if (fx_src_labels[cell]) {
+            lv_obj_set_width(fx_src_labels[cell], cardW);
+            lv_obj_set_style_text_font(fx_src_labels[cell], srcFont, 0);
+            lv_obj_align(fx_src_labels[cell], LV_ALIGN_TOP_MID, 0, srcY);
+            if (compact12) lv_obj_add_flag(fx_src_labels[cell], LV_OBJ_FLAG_HIDDEN);
+            else lv_obj_clear_flag(fx_src_labels[cell], LV_OBJ_FLAG_HIDDEN);
         }
         if (fx_toggle_btns[cell]) {
-            lv_obj_set_size(fx_toggle_btns[cell], visibleCount >= 9 ? 86 : 100, visibleCount >= 9 ? 32 : 38);
-            lv_obj_align(fx_toggle_btns[cell], LV_ALIGN_BOTTOM_MID, 0, visibleCount >= 9 ? -10 : -14);
+            lv_obj_set_size(fx_toggle_btns[cell], compact12 ? 72 : (compact6 ? 86 : 100), compact12 ? 24 : (compact6 ? 32 : 38));
+            lv_obj_align(fx_toggle_btns[cell], LV_ALIGN_BOTTOM_MID, 0, compact12 ? -6 : (compact6 ? -10 : -14));
             lv_obj_t* lbl = lv_obj_get_child(fx_toggle_btns[cell], 0);
             if (lbl) lv_obj_set_style_text_font(lbl, toggleFont, 0);
         }
-        lv_obj_t* pctLbl = lv_obj_get_child(fx_cards[cell], 3);
-        if (pctLbl) lv_obj_align(pctLbl, LV_ALIGN_CENTER, arcSize / 4, visibleCount >= 9 ? 4 : -2);
+        if (fx_pct_labels[cell]) {
+            lv_obj_align(fx_pct_labels[cell], LV_ALIGN_CENTER, arcSize / 4, pctY);
+            if (compact12) lv_obj_add_flag(fx_pct_labels[cell], LV_OBJ_FLAG_HIDDEN);
+            else lv_obj_clear_flag(fx_pct_labels[cell], LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
@@ -3200,19 +3250,49 @@ static void fx_toggle_cb(lv_event_t* e) {
     int cell = (int)(intptr_t)lv_event_get_user_data(e);
     if (cell < 0 || cell >= FX_CARD_COUNT) return;
     uint32_t now = millis();
-    if (now - s_fx_toggle_last_ms[cell] < 250) return;
+    // Per-button debounce (700ms) + global cross-button cooldown (200ms).
+    // GT911 on P4 with LVGL can fire duplicate CLICKED events within <300ms;
+    // the global guard prevents two adjacent buttons from both triggering on
+    // a sloppy wide tap.
+    if (now - s_fx_toggle_last_ms[cell] < 700) return;
+    if (now - s_fx_any_toggle_last_ms  < 200) return;
     s_fx_toggle_last_ms[cell] = now;
+    s_fx_any_toggle_last_ms   = now;
     if (fx_card_has_onoff(cell)) {
         if (cell < 3) {
+            bool unmuting = p4.enc_muted[cell];
             p4.enc_muted[cell] = !p4.enc_muted[cell];
+            // Delay/Reverb/Flange need a non-zero value when enabling, otherwise
+            // active=false in UDP path and it looks ON but sounds OFF.
+            if (unmuting && p4.enc_value[cell] == 0) {
+                p4.enc_value[cell] = 48;
+                s_fx_arc_anim[cell] = 48.0f;
+            }
             if (udp_wifi_connected()) udp_send_fx_enc(cell, p4.enc_value[cell], p4.enc_muted[cell]);
         } else {
-            int pot_idx = cell - 3;
-            p4.pot_muted[pot_idx] = !p4.pot_muted[pot_idx];
-            if (udp_wifi_connected()) {
-                if (pot_idx == 0) udp_send_fx_pot(0, p4.pot_value[3], p4.pot_muted[0]);
-                else if (pot_idx == 1) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
-                else udp_send_fx_pot(2, p4.pot_value[2], p4.pot_muted[2]);
+            if (cell < 6) {
+                int pot_idx = cell - 3;
+                p4.pot_muted[pot_idx] = !p4.pot_muted[pot_idx];
+                if (udp_wifi_connected()) {
+                    if (pot_idx == 0) udp_send_fx_pot(0, p4.pot_value[3], p4.pot_muted[0]);
+                    else if (pot_idx == 1) udp_send_fx_pot(1, p4.pot_value[1], p4.pot_muted[1]);
+                    else udp_send_fx_pot(2, p4.pot_value[2], p4.pot_muted[2]);
+                }
+            } else {
+                bool muted = fx_card_is_muted(cell);
+                if (muted) {
+                    int val = (int)s_fx_last_active_u7[cell];
+                    int neutral_u7 = fx_card_neutral_u7(cell);
+                    if (val == neutral_u7) {
+                        val = (cell == FX_CARD_CUTOFF) ? 96 : 64;
+                    }
+                    fx_card_send_value(cell, val);
+                    s_fx_arc_anim[cell] = (float)val;
+                } else {
+                    int neutral_u7 = fx_card_neutral_u7(cell);
+                    fx_card_send_value(cell, neutral_u7);
+                    s_fx_arc_anim[cell] = (float)neutral_u7;
+                }
             }
         }
     } else {
@@ -3227,6 +3307,10 @@ static void fx_arc_cb(lv_event_t* e) {
     if (cell < 0 || cell >= FX_CARD_COUNT) return;
     lv_obj_t* arc = (lv_obj_t*)lv_event_get_target(e);
     int val = lv_arc_get_value(arc);
+    // Snap the lerp animation immediately to avoid the animation overwriting the
+    // value the user just set (e.g. set 50, sees 22 because lerp was still at 0).
+    s_fx_arc_anim[cell] = (float)val;
+    s_fx_arc_user_ms[cell] = millis();   // own this arc for 800ms
     fx_card_send_value(cell, val);
 }
 
@@ -3297,13 +3381,13 @@ static void create_fx_screen(void) {
         lv_obj_align(fx_name_labels[cell], LV_ALIGN_TOP_MID, 0, 14);
 
         // Source tag — subtle under name
-        lv_obj_t* src_lbl = lv_label_create(card);
-        lv_label_set_text(src_lbl, fx_src[cell]);
-        lv_obj_set_style_text_font(src_lbl, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(src_lbl, lv_color_hex(fx_colors[cell] & 0x7F7F7F), 0);
-        lv_obj_set_width(src_lbl, 320);
-        lv_obj_set_style_text_align(src_lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_align(src_lbl, LV_ALIGN_TOP_MID, 0, 42);
+        fx_src_labels[cell] = lv_label_create(card);
+        lv_label_set_text(fx_src_labels[cell], fx_src[cell]);
+        lv_obj_set_style_text_font(fx_src_labels[cell], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(fx_src_labels[cell], RED808_TEXT_DIM, 0);
+        lv_obj_set_width(fx_src_labels[cell], 320);
+        lv_obj_set_style_text_align(fx_src_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(fx_src_labels[cell], LV_ALIGN_TOP_MID, 0, 42);
 
         // ── BIG ARC (neon circle indicator) ──
         fx_arcs[cell] = lv_arc_create(card);
@@ -3333,17 +3417,17 @@ static void create_fx_screen(void) {
         fx_value_labels[cell] = lv_label_create(card);
         lv_label_set_text(fx_value_labels[cell], "000");
         lv_obj_set_style_text_font(fx_value_labels[cell], &lv_font_montserrat_40, 0);
-        lv_obj_set_style_text_color(fx_value_labels[cell], lv_color_hex(fx_colors[cell]), 0);
+        lv_obj_set_style_text_color(fx_value_labels[cell], RED808_TEXT, 0);
         lv_obj_set_width(fx_value_labels[cell], 320);
         lv_obj_set_style_text_align(fx_value_labels[cell], LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(fx_value_labels[cell], LV_ALIGN_CENTER, 0, -18);
 
         // Percentage sub-label
-        lv_obj_t* pct = lv_label_create(card);
-        lv_label_set_text(pct, "%");
-        lv_obj_set_style_text_font(pct, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(pct, lv_color_hex(fx_colors[cell] & 0x9F9F9F), 0);
-        lv_obj_align(pct, LV_ALIGN_CENTER, 55, -2);
+        fx_pct_labels[cell] = lv_label_create(card);
+        lv_label_set_text(fx_pct_labels[cell], "%");
+        lv_obj_set_style_text_font(fx_pct_labels[cell], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(fx_pct_labels[cell], RED808_TEXT_DIM, 0);
+        lv_obj_align(fx_pct_labels[cell], LV_ALIGN_CENTER, 55, -2);
 
         // ── ON/OFF Toggle Button ──
         fx_toggle_btns[cell] = lv_btn_create(card);
@@ -3361,7 +3445,7 @@ static void create_fx_screen(void) {
         lv_obj_t* tog_lbl = lv_label_create(fx_toggle_btns[cell]);
         lv_label_set_text(tog_lbl, fx_card_button_text(cell, fx_card_is_muted(cell)));
         lv_obj_set_style_text_font(tog_lbl, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(tog_lbl, lv_color_hex(fx_colors[cell]), 0);
+        lv_obj_set_style_text_color(tog_lbl, fx_safe_text_color(fx_colors[cell]), 0);
         lv_obj_center(tog_lbl);
     }
 
@@ -3424,7 +3508,6 @@ static void create_fx_screen(void) {
 }
 
 static void update_fx_screen(void) {
-    static float  s_arc_anim[FX_CARD_COUNT] = {};
     static uint16_t prev_key[FX_CARD_COUNT];
     static bool prev_init = false;
     if (!prev_init) {
@@ -3432,18 +3515,24 @@ static void update_fx_screen(void) {
         for (int i = 0; i < FX_CARD_COUNT; i++) prev_key[i] = 0xFFFF;
     }
 
+    uint32_t now = millis();
+
     for (int cell = 0; cell < FX_CARD_COUNT; cell++) {
         int val = fx_card_current_value_u7(cell);
         bool muted = fx_card_is_muted(cell);
         int display_val = muted ? 0 : val;
 
-        // Lerp toward target
-        s_arc_anim[cell] += ((float)display_val - s_arc_anim[cell]) * 0.40f;
-        int anim_val = (int)(s_arc_anim[cell] + 0.5f);
+        // If the user just touched this arc, hold the lerp for 800ms so the
+        // animation does NOT overwrite what they set (root cause of "set 50 → shows 22").
+        bool user_owns = (now - s_fx_arc_user_ms[cell]) < 800;
+        if (!user_owns) {
+            s_fx_arc_anim[cell] += ((float)display_val - s_fx_arc_anim[cell]) * 0.40f;
+        }
+        int anim_val = (int)(s_fx_arc_anim[cell] + 0.5f);
 
         // Key: tracks mute + target (for expensive style ops)
         uint16_t key = (uint16_t)((muted ? 0x100 : 0) | (display_val & 0xFF));
-        bool still_animating = (fabsf(s_arc_anim[cell] - (float)display_val) > 0.4f);
+        bool still_animating = (fabsf(s_fx_arc_anim[cell] - (float)display_val) > 0.4f);
         bool key_changed = (key != prev_key[cell]);
 
         if (!still_animating && !key_changed) continue;
@@ -3476,7 +3565,7 @@ static void update_fx_screen(void) {
             if (fx_toggle_btns[cell]) {
                 lv_obj_t* lbl = lv_obj_get_child(fx_toggle_btns[cell], 0);
                 if (lbl) lv_label_set_text(lbl, fx_card_button_text(cell, muted));
-                lv_color_t tc = lv_color_hex(fx_colors[cell]);
+                lv_color_t tc = fx_safe_text_color(fx_colors[cell]);
                 lv_obj_set_style_bg_opa(fx_toggle_btns[cell], muted ? LV_OPA_10 : LV_OPA_20, 0);
                 lv_obj_set_style_shadow_opa(fx_toggle_btns[cell], muted ? LV_OPA_0 : LV_OPA_40, 0);
                 if (lbl) lv_obj_set_style_text_color(lbl, muted ? RED808_TEXT_DIM : tc, 0);

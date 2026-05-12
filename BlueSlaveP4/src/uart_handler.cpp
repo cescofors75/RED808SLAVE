@@ -14,7 +14,19 @@
 #endif
 
 // P4 local state — single source of truth for UI rendering
-P4State p4 = {};
+// All FX start muted (OFF) so the UI is consistent with the DSP default state.
+// If enc_muted/pot_muted were false by default the FX buttons would show "ON"
+// even though the DSP never received an enable command (→ reverb ON but no sound).
+P4State p4 = {
+    .enc_muted       = {true, true, true},   // FLANGE/DELAY/REVERB start OFF
+    .pot_muted       = {true, true, true},   // FOLD/CRUSH/PHASER start OFF
+    .filter_type     = 0,                    // OFF
+    .cutoff_hz       = 20000,                // neutral/open (treated as OFF in UI)
+    .resonance_x10   = 10,                   // Q=1.0 neutral
+    .distortion_pct  = 0,                    // OFF
+    .bitcrush_bits   = 16,                   // 16-bit = bypass
+    .sample_rate_hz  = 44100,                // full rate = bypass
+};
 
 // P4 SD remote browse state
 P4SdState p4sd = {};

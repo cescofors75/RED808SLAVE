@@ -44,12 +44,10 @@ static bool sessionCleanSent = false;
 static unsigned long lastLocalMuteMs[16] = {};
 static unsigned long lastLocalSoloMs[16] = {};
 static unsigned long lastLocalTrackVolMs[16] = {};
-// Master broadcasts state_sync every 2 s. Pick a window > broadcast period so
-// any state_sync arriving right after a P4-initiated SOLO/UNMUTE-ALL is
-// suppressed (the master already has the correct state — re-applying it just
-// causes UI flicker). Keep it below 2 s to improve responsiveness while still
-// filtering near-race packets.
-static const unsigned long LOCAL_OWNERSHIP_MS = 1800;
+// Master broadcasts state_sync about every 2 s. Keep a slightly larger local
+// ownership window so near-race packets do not pull FX/track values back right
+// after a local touch interaction.
+static const unsigned long LOCAL_OWNERSHIP_MS = 2600;
 static const unsigned long LOCAL_STEP_OWNERSHIP_MS = 700;
 static int pendingPatternRequest = -1;
 static unsigned long pendingPatternLastTxMs = 0;
@@ -60,7 +58,7 @@ static int patternRowPattern = -1;
 static int patternRowStepCount = 16;
 static unsigned long lastLocalStepMs[16][64] = {};
 static unsigned long lastMasterStepSyncMs = 0;
-static unsigned long lastLocalFxMs[6] = {};
+static unsigned long lastLocalFxMs[9] = {};
 static unsigned long lastRemoteMasterFxLogMs = 0;
 static unsigned long lastRemoteStateSyncFxLogMs = 0;
 static unsigned long lastRemoteHttpFxLogMs = 0;
@@ -84,6 +82,9 @@ enum FxOwnershipIndex : int {
     FX_OWN_DISTORTION,
     FX_OWN_BITCRUSH,
     FX_OWN_SAMPLE_RATE,
+    FX_OWN_DELAY,
+    FX_OWN_REVERB,
+    FX_OWN_PHASER,
 };
 
 static inline bool is_track_volume_owned_recent(int track, unsigned long nowMs) {
@@ -146,6 +147,7 @@ static int scale_unit_to_u7(float value) {
 static uint8_t delay_mix_to_u7(JsonVariantConst value, uint8_t fallback) {
     if (value.isNull()) return fallback;
     float mixPct = value.as<float>();
+    if (mixPct <= 1.0f) mixPct *= 100.0f;
     float norm = (mixPct - 8.0f) / 50.0f;
     return (uint8_t)scale_unit_to_u7(norm);
 }
@@ -231,21 +233,29 @@ static void log_remote_master_fx_param(const char* param, JsonVariantConst value
 }
 
 static void apply_remote_macro_fx_state(JsonObjectConst fx, const char* source, unsigned long& lastLogMs) {
+    unsigned long nowMs = millis();
+
     bool delayActive = fx["delayActive"].isNull() ? !p4.enc_muted[1] : (fx["delayActive"].as<bool>());
     bool reverbActive = fx["reverbActive"].isNull() ? !p4.enc_muted[2] : (fx["reverbActive"].as<bool>());
     bool phaserActive = fx["phaserActive"].isNull() ? !p4.pot_muted[2] : (fx["phaserActive"].as<bool>());
 
-    p4.enc_muted[1] = !delayActive;
-    p4.enc_muted[2] = !reverbActive;
-    p4.pot_muted[2] = !phaserActive;
+    if (!is_fx_owned_recent(FX_OWN_DELAY, nowMs)) {
+        p4.enc_muted[1] = !delayActive;
+    }
+    if (!is_fx_owned_recent(FX_OWN_REVERB, nowMs)) {
+        p4.enc_muted[2] = !reverbActive;
+    }
+    if (!is_fx_owned_recent(FX_OWN_PHASER, nowMs)) {
+        p4.pot_muted[2] = !phaserActive;
+    }
 
-    if (!fx["delayMix"].isNull()) {
+    if (!is_fx_owned_recent(FX_OWN_DELAY, nowMs) && !fx["delayMix"].isNull()) {
         p4.enc_value[1] = delay_mix_to_u7(fx["delayMix"], p4.enc_value[1]);
     }
-    if (!fx["reverbMix"].isNull()) {
+    if (!is_fx_owned_recent(FX_OWN_REVERB, nowMs) && !fx["reverbMix"].isNull()) {
         p4.enc_value[2] = reverb_mix_to_u7(fx["reverbMix"], p4.enc_value[2]);
     }
-    if (!fx["phaserDepth"].isNull()) {
+    if (!is_fx_owned_recent(FX_OWN_PHASER, nowMs) && !fx["phaserDepth"].isNull()) {
         p4.pot_value[2] = phaser_depth_to_u7(fx["phaserDepth"], p4.pot_value[2]);
     }
 
@@ -260,18 +270,19 @@ static void apply_remote_master_fx_param(const char* param, JsonVariantConst val
     }
 
     bool handled = true;
+    unsigned long nowMs = millis();
     if (strcmp(param, "delayActive") == 0) {
-        p4.enc_muted[1] = !value.as<bool>();
+        if (!is_fx_owned_recent(FX_OWN_DELAY, nowMs)) p4.enc_muted[1] = !value.as<bool>();
     } else if (strcmp(param, "delayMix") == 0) {
-        p4.enc_value[1] = delay_mix_to_u7(value, p4.enc_value[1]);
+        if (!is_fx_owned_recent(FX_OWN_DELAY, nowMs)) p4.enc_value[1] = delay_mix_to_u7(value, p4.enc_value[1]);
     } else if (strcmp(param, "reverbActive") == 0) {
-        p4.enc_muted[2] = !value.as<bool>();
+        if (!is_fx_owned_recent(FX_OWN_REVERB, nowMs)) p4.enc_muted[2] = !value.as<bool>();
     } else if (strcmp(param, "reverbMix") == 0) {
-        p4.enc_value[2] = reverb_mix_to_u7(value, p4.enc_value[2]);
+        if (!is_fx_owned_recent(FX_OWN_REVERB, nowMs)) p4.enc_value[2] = reverb_mix_to_u7(value, p4.enc_value[2]);
     } else if (strcmp(param, "phaserActive") == 0) {
-        p4.pot_muted[2] = !value.as<bool>();
+        if (!is_fx_owned_recent(FX_OWN_PHASER, nowMs)) p4.pot_muted[2] = !value.as<bool>();
     } else if (strcmp(param, "phaserDepth") == 0) {
-        p4.pot_value[2] = phaser_depth_to_u7(value, p4.pot_value[2]);
+        if (!is_fx_owned_recent(FX_OWN_PHASER, nowMs)) p4.pot_value[2] = phaser_depth_to_u7(value, p4.pot_value[2]);
     } else {
         handled = false;
     }
@@ -963,6 +974,7 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
             }
             break;
         case 1: // Delay — unmistakable echo effect
+            mark_local_fx(FX_OWN_DELAY);
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setDelayActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
@@ -981,6 +993,7 @@ void udp_send_fx_enc(int enc_id, uint8_t value, bool muted) {
             }
             break;
         case 2: // Reverb — unmistakable room/hall effect
+            mark_local_fx(FX_OWN_REVERB);
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setReverbActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
             if (active) {
@@ -1044,6 +1057,7 @@ void udp_send_fx_pot(int pot_id, uint8_t value, bool muted) {
             break;
         }
         case 2: {  // PHASER macro: audible sweep without the tremolo/limiter gain issues.
+            mark_local_fx(FX_OWN_PHASER);
             bool active = !muted;
             snprintf(buf, sizeof(buf), "{\"cmd\":\"setPhaserActive\",\"value\":%d}", active ? 1 : 0);
             sendJson(buf);
