@@ -1,0 +1,36 @@
+{
+    admin off
+}
+
+https://192.168.4.2:8443 https://localhost:8443 {
+    tls internal
+    encode gzip
+
+    root C:/Users/cesco/Documents/Arduino/XboxBLE/RedMaster_ESP32S3/data/web
+
+    handle /gesture {
+        rewrite * /gesture.html
+        file_server
+    }
+
+    handle /gesture-pro {
+        rewrite * /gesture-pro.html
+        file_server
+    }
+
+    handle /ws* {
+        reverse_proxy http://192.168.4.1:80 {
+            header_up Host {upstream_hostport}
+        }
+    }
+
+    handle /api/* {
+        reverse_proxy http://192.168.4.1:80 {
+            header_up Host {upstream_hostport}
+        }
+    }
+
+    handle {
+        file_server
+    }
+}

@@ -206,6 +206,36 @@
 				"${workspaceFolder}/BlueSlaveP4/data/mid"
 			],
 			"problemMatcher": []
+		},
+		{
+			"label": "RED808: Start HTTPS Proxy",
+			"type": "shell",
+			"command": "pwsh.exe",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-File", "${workspaceFolder}/.vscode/start_https_proxy.ps1",
+				"-EspHost", "192.168.4.1",
+				"-ListenPort", "8443"
+			],
+			"problemMatcher": [],
+			"isBackground": true,
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true
+			}
+		},
+		{
+			"label": "RED808: Stop HTTPS Proxy",
+			"type": "shell",
+			"command": "pwsh.exe",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-File", "${workspaceFolder}/.vscode/stop_https_proxy.ps1"
+			],
+			"problemMatcher": []
 		}
 	]
 }
