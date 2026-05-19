@@ -1,0 +1,5 @@
+# Name,   Type, SubType, Offset,  Size,     Flags
+# RedMaster ESP32-S3 N16R8 — factory scheme (no OTA, simpler boot)
+nvs,      data, nvs,     0x9000,  0x5000,
+app0,     app,  factory, 0x10000, 0x400000,
+spiffs,   data, spiffs,  0x410000, 0xB00000,

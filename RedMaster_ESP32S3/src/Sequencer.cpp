@@ -1,0 +1,882 @@
+/*
+ * Sequencer.cpp
+ * Implementació del sequencer de 16 steps
+ */
+
+#include "Sequencer.h"
+#include "SPIMaster.h"
+#include <esp_heap_caps.h>    // ps_calloc / heap_caps_malloc
+
+Sequencer::Sequencer() : 
+  playing(false), 
+  currentPattern(0), 
+  currentStep(0), 
+  tempo(120.0f),
+  lastStepTime(0),
+  nextStepInterval(0),
+  humanizeTimingMs(0),
+  humanizeVelocityAmount(0),
+  stepCallback(nullptr),
+  stepAutomationCallback(nullptr),
+  stepChangeCallback(nullptr),
+  patternChangeCallback(nullptr),
+  songMode(false),
+  songLength(1),
+  songChainActive(false),
+  songChainCount(0),
+  songChainIdx(0),
+  songChainRepeatCnt(0),
+  patternLength(16) {
+
+  memset(songChain, 0, sizeof(songChain));
+
+  // ── Allocate pattern storage in PSRAM. Internal DRAM is too small for this
+  // block plus AsyncTCP/WebSocket/JSON, so PSRAM is a hard requirement.
+  pd = (PatternData*)ps_calloc(1, sizeof(PatternData));
+  if (!pd) {
+    Serial.println("[SEQ] FATAL: PSRAM allocation failed for PatternData");
+    delay(100);
+    ESP.restart();
+  }
+  // steps[] already zeroed by calloc; set non-zero defaults
+  for (int p = 0; p < MAX_PATTERNS; p++) {
+    for (int t = 0; t < MAX_TRACKS; t++) {
+      for (int s = 0; s < STEPS_PER_PATTERN; s++) {
+        pd->velocities[p][t][s] = 127;
+        pd->noteLenDivs[p][t][s] = 1;  // Default: full note
+        pd->probabilities[p][t][s] = 100;
+        pd->ratchets[p][t][s] = 1;
+        pd->stepVolumeLockEnabled[p][t][s] = false;
+        pd->stepVolumeLockValue[p][t][s] = 100;
+        pd->stepCutoffLockEnabled[p][t][s] = false;
+        pd->stepCutoffLockHz[p][t][s] = 1000;
+        pd->stepReverbSendLockEnabled[p][t][s] = false;
+        pd->stepReverbSendLockValue[p][t][s] = 0;
+      }
+    }
+  }
+  
+  for (int t = 0; t < MAX_TRACKS; t++) {
+    trackMuted[t] = false;
+    trackVolume[t] = 100;
+    loopActive[t] = false;
+    loopPaused[t] = false;
+    loopType[t] = LOOP_EVERY_STEP;
+    loopStepCounter[t] = 0;
+  }
+  
+  calculateStepInterval();
+  nextStepInterval = stepInterval;
+}
+
+Sequencer::~Sequencer() {
+}
+
+void Sequencer::start() {
+  playing = true;
+  lastStepTime = micros();
+}
+
+void Sequencer::stop() {
+  playing = false;
+}
+
+void Sequencer::reset() {
+  currentStep = 0;
+  lastStepTime = micros();
+}
+
+bool Sequencer::isPlaying() {
+  return playing;
+}
+
+void Sequencer::setTempo(float bpm) {
+  if (bpm < 40.0f) bpm = 40.0f;
+  if (bpm > 300.0f) bpm = 300.0f;
+  tempo = bpm;
+  calculateStepInterval();
+}
+
+float Sequencer::getTempo() {
+  return tempo;
+}
+
+void Sequencer::calculateStepInterval() {
+  // 16th notes
+  // 1 beat = 60/BPM seconds
+  // 1 16th note = (60/BPM) / 4 seconds
+  // Convert to microseconds
+  stepInterval = (uint32_t)((60.0f / tempo / 4.0f) * 1000000.0f);
+  if (nextStepInterval == 0) nextStepInterval = stepInterval;
+}
+
+void Sequencer::update() {
+  if (!playing) return;
+  
+  uint32_t now = micros();
+  
+  // Check if it's time for next step
+  uint32_t intervalToUse = nextStepInterval > 0 ? nextStepInterval : stepInterval;
+  if (now - lastStepTime >= intervalToUse) {
+    lastStepTime = now;
+    
+    // PRIMERO: Notificar el step ACTUAL (antes de avanzar)
+    // Esto sincroniza la visualización con el audio
+    if (stepChangeCallback != nullptr) {
+      stepChangeCallback(currentStep);
+    }
+    
+    // SEGUNDO: Procesar el audio del step actual
+    processStep();
+    
+    // TERCERO: Avanzar al siguiente step para la próxima iteración
+    currentStep++;
+    if (currentStep >= patternLength) {
+      currentStep = 0;
+      
+      // Song Chain mode: custom pattern chain with repeats
+      if (songChainActive && songChainCount > 0) {
+        songChainRepeatCnt++;
+        uint8_t needed = songChain[songChainIdx].repeats;
+        if (needed == 0) needed = 1;
+        if (songChainRepeatCnt >= needed) {
+          // Advance to next entry in chain
+          songChainIdx++;
+          songChainRepeatCnt = 0;
+          if (songChainIdx >= songChainCount) {
+            // Chain ended — stop song chain
+            songChainActive = false;
+          } else {
+            currentPattern = songChain[songChainIdx].pattern % MAX_PATTERNS;
+            if (patternChangeCallback) {
+              patternChangeCallback(currentPattern, songChainCount);
+            }
+          }
+        }
+      }
+      // Legacy song mode: linear pattern advance
+      else if (songMode && songLength > 1) {
+        int nextPattern = currentPattern + 1;
+        if (nextPattern >= songLength) {
+          nextPattern = 0; // Loop back to start
+        }
+        currentPattern = nextPattern;
+        if (patternChangeCallback != nullptr) {
+          patternChangeCallback(currentPattern, songLength);
+        }
+      }
+    }
+
+    if (humanizeTimingMs > 0) {
+      int32_t jitterUs = (int32_t)random(-(int)humanizeTimingMs, (int)humanizeTimingMs + 1) * 1000;
+      int32_t candidate = (int32_t)stepInterval + jitterUs;
+      int32_t minStep = (int32_t)stepInterval / 2;
+      if (candidate < minStep) candidate = minStep;
+      nextStepInterval = (uint32_t)candidate;
+    } else {
+      nextStepInterval = stepInterval;
+    }
+  }
+}
+
+void Sequencer::processStep() {
+  // First: Process looped tracks
+  processLoops();
+  
+  // Trigger all active tracks at current step
+  for (int track = 0; track < MAX_TRACKS; track++) {
+    // Check sequencer steps
+    if (pd->steps[currentPattern][track][currentStep] && !trackMuted[track]) {
+      uint8_t probability = pd->probabilities[currentPattern][track][currentStep];
+      if (probability < 100) {
+        long roll = random(0, 100);
+        if (roll >= probability) {
+          continue;
+        }
+      }
+
+      uint8_t velocity = pd->velocities[currentPattern][track][currentStep];
+      uint8_t div = pd->noteLenDivs[currentPattern][track][currentStep];
+      uint8_t ratchet = pd->ratchets[currentPattern][track][currentStep];
+      if (ratchet < 1) ratchet = 1;
+      if (ratchet > 4) ratchet = 4;
+      uint8_t outTrackVolume = pd->stepVolumeLockEnabled[currentPattern][track][currentStep]
+                ? pd->stepVolumeLockValue[currentPattern][track][currentStep]
+                : trackVolume[track];
+
+      if (stepAutomationCallback != nullptr) {
+        stepAutomationCallback(
+          track,
+          currentStep,
+          pd->stepCutoffLockEnabled[currentPattern][track][currentStep],
+          pd->stepCutoffLockHz[currentPattern][track][currentStep],
+          pd->stepReverbSendLockEnabled[currentPattern][track][currentStep],
+          pd->stepReverbSendLockValue[currentPattern][track][currentStep],
+          pd->stepVolumeLockEnabled[currentPattern][track][currentStep],
+          outTrackVolume
+        );
+      }
+      
+      // Compute max samples for note length (0 = full sample)
+      uint32_t noteLenSamples = 0;
+      if (div > 1) {
+        noteLenSamples = (uint32_t)(((uint64_t)stepInterval * SAMPLE_RATE) / ((uint32_t)div * 1000000UL));
+        if (noteLenSamples < 64) noteLenSamples = 64;  // minimum
+      }
+      
+      // Call callback if set
+      if (stepCallback != nullptr) {
+        for (uint8_t r = 0; r < ratchet; r++) {
+          uint8_t outVelocity = velocity;
+          if (humanizeVelocityAmount > 0) {
+            int maxDelta = (int)((127 * humanizeVelocityAmount) / 100);
+            int jitter = random(-maxDelta, maxDelta + 1);
+            int v = (int)velocity + jitter;
+            if (v < 1) v = 1;
+            if (v > 127) v = 127;
+            outVelocity = (uint8_t)v;
+          }
+
+          uint32_t subNoteLen = noteLenSamples;
+          if (ratchet > 1 && noteLenSamples > 0) {
+            subNoteLen = noteLenSamples / ratchet;
+            if (subNoteLen < 64) subNoteLen = 64;
+          }
+          stepCallback(track, outVelocity, outTrackVolume, subNoteLen);
+        }
+      }
+    }
+  }
+}
+
+void Sequencer::setStep(int track, int step, bool active, uint8_t velocity) {
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  
+  pd->steps[currentPattern][track][step] = active;
+  pd->velocities[currentPattern][track][step] = velocity;
+}
+
+bool Sequencer::getStep(int track, int step) {
+  if (track < 0 || track >= MAX_TRACKS) return false;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return false;
+  
+  return pd->steps[currentPattern][track][step];
+}
+
+bool Sequencer::getStep(int pattern, int track, int step) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return false;
+  if (track < 0 || track >= MAX_TRACKS) return false;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return false;
+  
+  return pd->steps[pattern][track][step];
+}
+
+void Sequencer::clearPattern(int pattern) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  
+  // Bulk memset — orders of magnitude faster than element-by-element on PSRAM
+  memset(pd->steps[pattern],                  0, sizeof(pd->steps[pattern]));           // false
+  memset(pd->velocities[pattern],           127, sizeof(pd->velocities[pattern]));      // 127
+  memset(pd->noteLenDivs[pattern],            1, sizeof(pd->noteLenDivs[pattern]));     // 1
+  memset(pd->probabilities[pattern],        100, sizeof(pd->probabilities[pattern]));   // 100
+  memset(pd->ratchets[pattern],               1, sizeof(pd->ratchets[pattern]));        // 1
+  memset(pd->stepVolumeLockEnabled[pattern],  0, sizeof(pd->stepVolumeLockEnabled[pattern]));
+  memset(pd->stepVolumeLockValue[pattern],  100, sizeof(pd->stepVolumeLockValue[pattern]));
+  memset(pd->stepCutoffLockEnabled[pattern],  0, sizeof(pd->stepCutoffLockEnabled[pattern]));
+  memset(pd->stepReverbSendLockEnabled[pattern], 0, sizeof(pd->stepReverbSendLockEnabled[pattern]));
+  memset(pd->stepReverbSendLockValue[pattern],   0, sizeof(pd->stepReverbSendLockValue[pattern]));
+  memset(pd->stepNotes[pattern],                  0, sizeof(pd->stepNotes[pattern]));              // 0 = rest
+  memset(pd->stepNoteVoices[pattern],             0, sizeof(pd->stepNoteVoices[pattern]));
+  memset(pd->stepFlags[pattern],                  0, sizeof(pd->stepFlags[pattern]));              // no accent/slide
+  // stepCutoffLockHz is uint16_t — memset can't set 1000, need loop
+  for (int t = 0; t < MAX_TRACKS; t++) {
+    for (int s = 0; s < STEPS_PER_PATTERN; s++) {
+      pd->stepCutoffLockHz[pattern][t][s] = 1000;
+    }
+  }
+}
+
+void Sequencer::clearPattern() {
+  clearPattern(currentPattern);
+}
+
+void Sequencer::clearTrack(int track) {
+  if (track < 0 || track >= MAX_TRACKS) return;
+  
+  for (int s = 0; s < STEPS_PER_PATTERN; s++) {
+    pd->steps[currentPattern][track][s] = false;
+  }
+  
+}
+
+// ============= VELOCITY EDITING =============
+
+void Sequencer::setStepVelocity(int track, int step, uint8_t velocity) {
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  pd->velocities[currentPattern][track][step] = constrain(velocity, 1, 127);
+}
+
+void Sequencer::setStepVelocity(int pattern, int track, int step, uint8_t velocity) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  pd->velocities[pattern][track][step] = constrain(velocity, 1, 127);
+}
+
+uint8_t Sequencer::getStepVelocity(int track, int step) {
+  if (track < 0 || track >= MAX_TRACKS) return 127;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 127;
+  
+  return pd->velocities[currentPattern][track][step];
+}
+
+uint8_t Sequencer::getStepVelocity(int pattern, int track, int step) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return 127;
+  if (track < 0 || track >= MAX_TRACKS) return 127;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 127;
+  
+  return pd->velocities[pattern][track][step];
+}
+
+void Sequencer::setStepNoteLen(int track, int step, uint8_t div) {
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  if (div == 0) div = 1;  // Sanitize
+  pd->noteLenDivs[currentPattern][track][step] = div;
+}
+
+uint8_t Sequencer::getStepNoteLen(int track, int step) {
+  if (track < 0 || track >= MAX_TRACKS) return 1;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 1;
+  return pd->noteLenDivs[currentPattern][track][step];
+}
+
+uint8_t Sequencer::getStepNoteLen(int pattern, int track, int step) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return 1;
+  if (track < 0 || track >= MAX_TRACKS) return 1;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 1;
+  return pd->noteLenDivs[pattern][track][step];
+}
+
+// ============= MELODY NOTE PER STEP =============
+
+void Sequencer::setStepNote(int track, int step, uint8_t midiNote) {
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  pd->stepNotes[currentPattern][track][step] = midiNote;
+  pd->stepNoteVoices[currentPattern][track][step][0] = midiNote;
+}
+
+void Sequencer::setStepNote(int pattern, int track, int step, uint8_t midiNote) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  pd->stepNotes[pattern][track][step] = midiNote;
+  pd->stepNoteVoices[pattern][track][step][0] = midiNote;
+}
+
+uint8_t Sequencer::getStepNote(int track, int step) {
+  if (track < 0 || track >= MAX_TRACKS) return 0;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 0;
+  return pd->stepNotes[currentPattern][track][step];
+}
+
+uint8_t Sequencer::getStepNote(int pattern, int track, int step) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return 0;
+  if (track < 0 || track >= MAX_TRACKS) return 0;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 0;
+  return pd->stepNotes[pattern][track][step];
+}
+
+void Sequencer::setStepNoteVoice(int track, int step, int voice, uint8_t midiNote) {
+  setStepNoteVoice(currentPattern, track, step, voice, midiNote);
+}
+
+void Sequencer::setStepNoteVoice(int pattern, int track, int step, int voice, uint8_t midiNote) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  if (voice < 0 || voice >= MELODY_STEP_VOICES) return;
+  pd->stepNoteVoices[pattern][track][step][voice] = midiNote;
+  if (voice == 0) pd->stepNotes[pattern][track][step] = midiNote;
+}
+
+uint8_t Sequencer::getStepNoteVoice(int track, int step, int voice) {
+  return getStepNoteVoice(currentPattern, track, step, voice);
+}
+
+uint8_t Sequencer::getStepNoteVoice(int pattern, int track, int step, int voice) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return 0;
+  if (track < 0 || track >= MAX_TRACKS) return 0;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 0;
+  if (voice < 0 || voice >= MELODY_STEP_VOICES) return 0;
+  return pd->stepNoteVoices[pattern][track][step][voice];
+}
+
+void Sequencer::clearStepNoteVoices(int track, int step) {
+  clearStepNoteVoices(currentPattern, track, step);
+}
+
+void Sequencer::clearStepNoteVoices(int pattern, int track, int step) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  memset(pd->stepNoteVoices[pattern][track][step], 0, MELODY_STEP_VOICES);
+  pd->stepNotes[pattern][track][step] = 0;
+}
+
+void Sequencer::setStepFlags(int track, int step, uint8_t flags) {
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  pd->stepFlags[currentPattern][track][step] = flags;
+}
+
+void Sequencer::setStepFlags(int pattern, int track, int step, uint8_t flags) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  pd->stepFlags[pattern][track][step] = flags;
+}
+
+uint8_t Sequencer::getStepFlags(int track, int step) {
+  if (track < 0 || track >= MAX_TRACKS) return 0;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 0;
+  return pd->stepFlags[currentPattern][track][step];
+}
+
+uint8_t Sequencer::getStepFlags(int pattern, int track, int step) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return 0;
+  if (track < 0 || track >= MAX_TRACKS) return 0;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 0;
+  return pd->stepFlags[pattern][track][step];
+}
+
+void Sequencer::setPatternBulk(int pattern, const bool stepsData[MAX_TRACKS][STEPS_PER_PATTERN], const uint8_t velsData[MAX_TRACKS][STEPS_PER_PATTERN]) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  
+  for (int t = 0; t < MAX_TRACKS; t++) {
+    for (int s = 0; s < STEPS_PER_PATTERN; s++) {
+      pd->steps[pattern][t][s] = stepsData[t][s];
+      pd->velocities[pattern][t][s] = velsData[t][s];
+      pd->probabilities[pattern][t][s] = 100;
+      pd->ratchets[pattern][t][s] = 1;
+      pd->stepVolumeLockEnabled[pattern][t][s] = false;
+      pd->stepVolumeLockValue[pattern][t][s] = 100;
+      pd->stepCutoffLockEnabled[pattern][t][s] = false;
+      pd->stepCutoffLockHz[pattern][t][s] = 1000;
+      pd->stepReverbSendLockEnabled[pattern][t][s] = false;
+      pd->stepReverbSendLockValue[pattern][t][s] = 0;
+    }
+  }
+}
+
+void Sequencer::selectPattern(int pattern) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  
+  currentPattern = pattern;
+}
+
+void Sequencer::muteTrack(int track, bool muted) {
+  if (track >= 0 && track < MAX_TRACKS) {
+    trackMuted[track] = muted;
+  }
+}
+
+bool Sequencer::isTrackMuted(int track) {
+  if (track >= 0 && track < MAX_TRACKS) {
+    return trackMuted[track];
+  }
+  return false;
+}
+
+void Sequencer::setTrackVolume(int track, uint8_t volume) {
+  if (track >= 0 && track < MAX_TRACKS) {
+    trackVolume[track] = constrain(volume, 0, 150);
+  }
+}
+
+uint8_t Sequencer::getTrackVolume(int track) {
+  if (track >= 0 && track < MAX_TRACKS) {
+    return trackVolume[track];
+  }
+  return 100; // Default volume
+}
+
+int Sequencer::getCurrentPattern() {
+  return currentPattern;
+}
+
+void Sequencer::copyPattern(int src, int dst) {
+  if (src < 0 || src >= MAX_PATTERNS) return;
+  if (dst < 0 || dst >= MAX_PATTERNS) return;
+  
+  for (int t = 0; t < MAX_TRACKS; t++) {
+    for (int s = 0; s < STEPS_PER_PATTERN; s++) {
+      pd->steps[dst][t][s] = pd->steps[src][t][s];
+      pd->velocities[dst][t][s] = pd->velocities[src][t][s];
+      pd->noteLenDivs[dst][t][s] = pd->noteLenDivs[src][t][s];
+      pd->probabilities[dst][t][s] = pd->probabilities[src][t][s];
+      pd->ratchets[dst][t][s] = pd->ratchets[src][t][s];
+      pd->stepVolumeLockEnabled[dst][t][s] = pd->stepVolumeLockEnabled[src][t][s];
+      pd->stepVolumeLockValue[dst][t][s] = pd->stepVolumeLockValue[src][t][s];
+      pd->stepCutoffLockEnabled[dst][t][s] = pd->stepCutoffLockEnabled[src][t][s];
+      pd->stepCutoffLockHz[dst][t][s] = pd->stepCutoffLockHz[src][t][s];
+      pd->stepReverbSendLockEnabled[dst][t][s] = pd->stepReverbSendLockEnabled[src][t][s];
+      pd->stepReverbSendLockValue[dst][t][s] = pd->stepReverbSendLockValue[src][t][s];
+    }
+  }
+  
+}
+
+int Sequencer::getCurrentStep() {
+  return currentStep;
+}
+
+void Sequencer::setStepVolumeLock(int track, int step, bool enabled, uint8_t volume) {
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  pd->stepVolumeLockEnabled[currentPattern][track][step] = enabled;
+  pd->stepVolumeLockValue[currentPattern][track][step] = constrain(volume, 0, 150);
+}
+
+void Sequencer::setStepVolumeLock(int pattern, int track, int step, bool enabled, uint8_t volume) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  pd->stepVolumeLockEnabled[pattern][track][step] = enabled;
+  pd->stepVolumeLockValue[pattern][track][step] = constrain(volume, 0, 150);
+}
+
+bool Sequencer::hasStepVolumeLock(int track, int step) {
+  if (track < 0 || track >= MAX_TRACKS) return false;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return false;
+  return pd->stepVolumeLockEnabled[currentPattern][track][step];
+}
+
+bool Sequencer::hasStepVolumeLock(int pattern, int track, int step) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return false;
+  if (track < 0 || track >= MAX_TRACKS) return false;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return false;
+  return pd->stepVolumeLockEnabled[pattern][track][step];
+}
+
+uint8_t Sequencer::getStepVolumeLock(int track, int step) {
+  if (!hasStepVolumeLock(track, step)) return 0;
+  return pd->stepVolumeLockValue[currentPattern][track][step];
+}
+
+uint8_t Sequencer::getStepVolumeLock(int pattern, int track, int step) {
+  if (!hasStepVolumeLock(pattern, track, step)) return 0;
+  return pd->stepVolumeLockValue[pattern][track][step];
+}
+
+void Sequencer::setStepCutoffLock(int track, int step, bool enabled, uint16_t cutoffHz) {
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  cutoffHz = constrain(cutoffHz, 20, 20000);
+  pd->stepCutoffLockEnabled[currentPattern][track][step] = enabled;
+  pd->stepCutoffLockHz[currentPattern][track][step] = cutoffHz;
+}
+
+void Sequencer::setStepCutoffLock(int pattern, int track, int step, bool enabled, uint16_t cutoffHz) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  cutoffHz = constrain(cutoffHz, 20, 20000);
+  pd->stepCutoffLockEnabled[pattern][track][step] = enabled;
+  pd->stepCutoffLockHz[pattern][track][step] = cutoffHz;
+}
+
+bool Sequencer::hasStepCutoffLock(int track, int step) {
+  if (track < 0 || track >= MAX_TRACKS) return false;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return false;
+  return pd->stepCutoffLockEnabled[currentPattern][track][step];
+}
+
+uint16_t Sequencer::getStepCutoffLock(int track, int step) {
+  if (track < 0 || track >= MAX_TRACKS) return 1000;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 1000;
+  return pd->stepCutoffLockHz[currentPattern][track][step];
+}
+
+uint16_t Sequencer::getStepCutoffLock(int pattern, int track, int step) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return 1000;
+  if (track < 0 || track >= MAX_TRACKS) return 1000;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 1000;
+  return pd->stepCutoffLockHz[pattern][track][step];
+}
+
+void Sequencer::setStepReverbSendLock(int track, int step, bool enabled, uint8_t sendLevel) {
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  sendLevel = constrain(sendLevel, 0, 100);
+  pd->stepReverbSendLockEnabled[currentPattern][track][step] = enabled;
+  pd->stepReverbSendLockValue[currentPattern][track][step] = sendLevel;
+}
+
+void Sequencer::setStepReverbSendLock(int pattern, int track, int step, bool enabled, uint8_t sendLevel) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  sendLevel = constrain(sendLevel, 0, 100);
+  pd->stepReverbSendLockEnabled[pattern][track][step] = enabled;
+  pd->stepReverbSendLockValue[pattern][track][step] = sendLevel;
+}
+
+bool Sequencer::hasStepReverbSendLock(int track, int step) {
+  if (track < 0 || track >= MAX_TRACKS) return false;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return false;
+  return pd->stepReverbSendLockEnabled[currentPattern][track][step];
+}
+
+uint8_t Sequencer::getStepReverbSendLock(int track, int step) {
+  if (track < 0 || track >= MAX_TRACKS) return 0;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 0;
+  return pd->stepReverbSendLockValue[currentPattern][track][step];
+}
+
+uint8_t Sequencer::getStepReverbSendLock(int pattern, int track, int step) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return 0;
+  if (track < 0 || track >= MAX_TRACKS) return 0;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 0;
+  return pd->stepReverbSendLockValue[pattern][track][step];
+}
+
+void Sequencer::setStepProbability(int track, int step, uint8_t probability) {
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  pd->probabilities[currentPattern][track][step] = constrain(probability, 0, 100);
+}
+
+void Sequencer::setStepProbability(int pattern, int track, int step, uint8_t probability) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  pd->probabilities[pattern][track][step] = constrain(probability, 0, 100);
+}
+
+uint8_t Sequencer::getStepProbability(int track, int step) {
+  if (track < 0 || track >= MAX_TRACKS) return 100;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 100;
+  return pd->probabilities[currentPattern][track][step];
+}
+
+uint8_t Sequencer::getStepProbability(int pattern, int track, int step) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return 100;
+  if (track < 0 || track >= MAX_TRACKS) return 100;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 100;
+  return pd->probabilities[pattern][track][step];
+}
+
+void Sequencer::setStepRatchet(int track, int step, uint8_t ratchet) {
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  pd->ratchets[currentPattern][track][step] = constrain(ratchet, 1, 4);
+}
+
+void Sequencer::setStepRatchet(int pattern, int track, int step, uint8_t ratchet) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+  if (track < 0 || track >= MAX_TRACKS) return;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return;
+  pd->ratchets[pattern][track][step] = constrain(ratchet, 1, 4);
+}
+
+uint8_t Sequencer::getStepRatchet(int track, int step) {
+  if (track < 0 || track >= MAX_TRACKS) return 1;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 1;
+  return pd->ratchets[currentPattern][track][step];
+}
+
+uint8_t Sequencer::getStepRatchet(int pattern, int track, int step) {
+  if (pattern < 0 || pattern >= MAX_PATTERNS) return 1;
+  if (track < 0 || track >= MAX_TRACKS) return 1;
+  if (step < 0 || step >= STEPS_PER_PATTERN) return 1;
+  return pd->ratchets[pattern][track][step];
+}
+
+void Sequencer::setHumanize(uint8_t timingMs, uint8_t velocityAmount) {
+  humanizeTimingMs = constrain(timingMs, 0, 40);
+  humanizeVelocityAmount = constrain(velocityAmount, 0, 60);
+}
+
+uint8_t Sequencer::getHumanizeTimingMs() {
+  return humanizeTimingMs;
+}
+
+uint8_t Sequencer::getHumanizeVelocityAmount() {
+  return humanizeVelocityAmount;
+}
+
+void Sequencer::setStepCallback(StepCallback callback) {
+  stepCallback = callback;
+}
+
+void Sequencer::setStepAutomationCallback(StepAutomationCallback callback) {
+  stepAutomationCallback = callback;
+}
+
+void Sequencer::setStepChangeCallback(StepChangeCallback callback) {
+  stepChangeCallback = callback;
+}
+
+void Sequencer::setPatternChangeCallback(PatternChangeCallback callback) {
+  patternChangeCallback = callback;
+}
+
+// ============= PATTERN LENGTH =============
+
+void Sequencer::setPatternLength(int len) {
+  if (len != 16 && len != 32 && len != 64) return;
+  patternLength = len;
+  if (currentStep >= patternLength) {
+    currentStep = 0;
+  }
+}
+
+int Sequencer::getPatternLength() {
+  return patternLength;
+}
+
+// ============= SONG MODE =============
+
+void Sequencer::setSongMode(bool enabled) {
+  songMode = enabled;
+  if (songMode) {
+    // When entering song mode, start from pattern 0
+    currentPattern = 0;
+  } else {
+  }
+}
+
+bool Sequencer::isSongMode() {
+  return songMode;
+}
+
+void Sequencer::setSongLength(int length) {
+  if (length < 1) length = 1;
+  if (length > MAX_PATTERNS) length = MAX_PATTERNS;
+  songLength = length;
+}
+
+int Sequencer::getSongLength() {
+  return songLength;
+}
+
+// ============= LOOP SYSTEM =============
+
+void Sequencer::toggleLoop(int track) {
+  if (track >= 0 && track < MAX_TRACKS) {
+    loopActive[track] = !loopActive[track];
+    loopPaused[track] = false; // Reset pause state
+    loopStepCounter[track] = 0; // Reset counter
+  }
+}
+
+void Sequencer::setLoopType(int track, LoopType type) {
+  if (track >= 0 && track < MAX_TRACKS) {
+    loopType[track] = type;
+    loopStepCounter[track] = 0;
+  }
+}
+
+LoopType Sequencer::getLoopType(int track) {
+  if (track >= 0 && track < MAX_TRACKS) {
+    return loopType[track];
+  }
+  return LOOP_EVERY_STEP;
+}
+
+void Sequencer::pauseLoop(int track) {
+  if (track >= 0 && track < MAX_TRACKS) {
+    if (loopActive[track]) {
+      loopPaused[track] = !loopPaused[track];
+    }
+  }
+}
+
+bool Sequencer::isLooping(int track) {
+  if (track >= 0 && track < MAX_TRACKS) {
+    return loopActive[track];
+  }
+  return false;
+}
+
+bool Sequencer::isLoopPaused(int track) {
+  if (track >= 0 && track < MAX_TRACKS) {
+    return loopPaused[track];
+  }
+  return false;
+}
+
+void Sequencer::processLoops() {
+  // Process looped tracks every step
+  for (int track = 0; track < MAX_TRACKS; track++) {
+    if (loopActive[track] && !loopPaused[track] && !trackMuted[track]) {
+      bool shouldTrigger = false;
+      
+      switch (loopType[track]) {
+        case LOOP_EVERY_STEP:
+          // Trigger on every step (16th note)
+          shouldTrigger = true;
+          break;
+        case LOOP_EVERY_BEAT:
+          // Trigger every 4 steps (quarter note)
+          shouldTrigger = (loopStepCounter[track] % 4 == 0);
+          break;
+        case LOOP_HALF_BEAT:
+          // Trigger every 2 steps (8th note)
+          shouldTrigger = (loopStepCounter[track] % 2 == 0);
+          break;
+        case LOOP_ARRHYTHMIC:
+          // Random trigger ~40% chance per step
+          shouldTrigger = (random(100) < 40);
+          break;
+      }
+      
+      if (shouldTrigger && stepCallback != nullptr) {
+        stepCallback(track, 100, trackVolume[track], 0);  // 0 = full note for loops
+      }
+      
+      loopStepCounter[track] = (loopStepCounter[track] + 1) % patternLength;
+    }
+  }
+}
+
+// ============= SONG CHAIN MODE =============
+
+void Sequencer::songChainUpload(const SongChainEntry* entries, uint8_t count) {
+  if (!entries || count == 0) { songChainCount = 0; return; }
+  if (count > SONG_CHAIN_MAX) count = SONG_CHAIN_MAX;
+  memcpy(songChain, entries, count * sizeof(SongChainEntry));
+  songChainCount = count;
+  songChainIdx = 0;
+  songChainRepeatCnt = 0;
+}
+
+void Sequencer::songChainPlay() {
+  if (songChainCount == 0) return;
+  songChainActive = true;
+  songChainIdx = 0;
+  songChainRepeatCnt = 0;
+  currentPattern = songChain[0].pattern % MAX_PATTERNS;
+  currentStep = 0;
+  if (!playing) start();
+  if (patternChangeCallback) {
+    patternChangeCallback(currentPattern, songChainCount);
+  }
+}
+
+void Sequencer::songChainStop() {
+  songChainActive = false;
+}
+
+void Sequencer::songChainReset() {
+  songChainIdx = 0;
+  songChainRepeatCnt = 0;
+  if (songChainCount > 0) {
+    currentPattern = songChain[0].pattern % MAX_PATTERNS;
+  }
+}
+
