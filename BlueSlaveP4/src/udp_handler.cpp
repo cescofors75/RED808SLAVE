@@ -755,7 +755,8 @@ void udp_send_melody_assign_pad(uint8_t pad, uint8_t engine, uint8_t octave) {
 }
 
 void udp_send_melody_assign(uint8_t pad, uint8_t engine, uint8_t octave,
-                            const bool grid[16][12]) {
+                            const bool grid[16][12],
+                            const uint8_t notes[16][12]) {
     // Mirror the JSON shape produced by S3's ui_screens.cpp mel_assign_cb:
     //   {"cmd":"melodyAssign","pad":N,"engine":E,"octave":O,
     //    "steps":[[midi,midi,...], ... 16 columns]}
@@ -773,8 +774,11 @@ void udp_send_melody_assign(uint8_t pad, uint8_t engine, uint8_t octave,
         bool first = true;
         for (int r = 0; r < 12; r++) {
             if (!grid[c][r]) continue;
-            int pc = 11 - r;
-            int midi = ((int)octave + 1) * 12 + pc;
+            int midi = notes ? notes[c][r] : 0;
+            if (midi <= 0) {
+                int pc = 11 - r;
+                midi = ((int)octave + 1) * 12 + pc;
+            }
             if (midi < 0) midi = 0;
             if (midi > 127) midi = 127;
             int w = snprintf(buf + n, sizeof(buf) - n,

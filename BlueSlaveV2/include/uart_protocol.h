@@ -126,9 +126,9 @@
 #define TCMD_SD_LOAD       0x0A // P4→S3: load selected file to pad N
 #define TCMD_SYNC_PADS     0x0B  // Bidirectional: toggle pad LED sync mode
 #define TCMD_SD_LOAD_MIDI  0x0C  // P4→S3: load selected MIDI file into pattern slot N (value=slot 6-15)
-#define TCMD_MPC_PRESET    0x0D  // P4→S3: apply fixed MPC punch preset (swing+velocity+drive)
-#define TCMD_SWING_UP      0x0E  // P4→S3: increase swing
-#define TCMD_SWING_DOWN    0x0F  // P4→S3: decrease swing
+#define TCMD_RESERVED_0D   0x0D
+#define TCMD_RESERVED_0E   0x0E
+#define TCMD_RESERVED_0F   0x0F
 #define TCMD_DRIVE_UP      0x10  // P4→S3: increase master drive
 #define TCMD_DRIVE_DOWN    0x11  // P4→S3: decrease master drive
 // v2.9 — Melody sync over UART (bidirectional S3↔P4)

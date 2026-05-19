@@ -156,6 +156,43 @@
 			}
 		},
 		{
+			"label": "PlatformIO: Erase Flash S3",
+			"type": "shell",
+			"command": "${userHome}/.platformio/penv/Scripts/python.exe",
+			"args": [
+				"-m", "esptool",
+				"--chip", "esp32s3",
+				"--port", "COM11",
+				"--baud", "115200",
+				"erase-flash"
+			],
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true,
+				"focus": true
+			},
+			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Monitor Master S3",
+			"type": "shell",
+			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe",
+			"args": [
+				"device", "monitor",
+				"--project-dir", "${workspaceFolder}/RedMaster_ESP32S3",
+				"--environment", "redmaster-s3-r8n16"
+			],
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true,
+				"focus": true
+			}
+		},
+		{
 			"label": "PlatformIO: Build SlavePico",
 			"type": "shell",
 			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe run --project-dir ${workspaceFolder}/SlavePico --environment slavepico-p4",

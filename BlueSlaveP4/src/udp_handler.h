@@ -78,7 +78,8 @@ void udp_send_melody_rec_note(uint8_t engine, uint8_t note);
 // pad: 0..15, engine: 3..6, octave: 1..7,
 // grid[col][row]: row 0 = B (highest), row 11 = C (lowest)
 void udp_send_melody_assign(uint8_t pad, uint8_t engine, uint8_t octave,
-                            const bool grid[16][12]);
+                            const bool grid[16][12],
+                            const uint8_t notes[16][12] = nullptr);
 
 // v2.9 — master-authoritative melody state commands
 void udp_send_melody_rec_toggle(bool active, uint8_t engine, uint8_t octave);

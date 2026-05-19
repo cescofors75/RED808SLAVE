@@ -3625,7 +3625,7 @@ static lv_obj_t*  seq_hdr_play_btn      = NULL;
 static lv_obj_t*  seq_hdr_play_lbl      = NULL;
 static lv_obj_t*  seq_hdr_pat_lbl       = NULL;
 static lv_obj_t*  seq_ctrl_lbl          = NULL;
-static int        seq_ctrl_swing        = 50;
+static int        seq_ctrl_swing        = 0;
 static int        seq_ctrl_drive        = 0;
 static lv_obj_t*  seq_pattern_modal     = NULL;
 static lv_obj_t*  seq_pattern_modal_lbl = NULL;
@@ -3912,88 +3912,22 @@ static void seq_update_mpc_ctrl_label(void) {
     lv_label_set_text_fmt(seq_ctrl_lbl, "SW%02d DR%02d", seq_ctrl_swing, seq_ctrl_drive);
 }
 
-static int seq_groove_velocity_for(int track, int step) {
-    int vel = (track == 0 || track == 1) ? 112 : 94;
-    if ((step % 4) == 0) vel += 15;
-    else if ((step % 4) == 2) vel += 6;
-
-    int swing_amt = seq_ctrl_swing - 50;
-    if (step & 1) vel -= swing_amt * 2;
-    else if ((step % 4) != 0) vel += swing_amt;
-
-    vel += seq_ctrl_drive / 3;
-    if (track == 2 || track == 9) vel += 8;
-    if (vel < 24) vel = 24;
-    if (vel > 127) vel = 127;
-    return vel;
-}
-
-static void seq_apply_master_groove(void) {
-    if (!udp_wifi_connected()) return;
-    for (int track = 0; track < 16; track++) {
-        for (int step = 0; step < 16; step++) {
-            if (p4.steps[track][step]) {
-                udp_send_set_step_velocity(track, step, seq_groove_velocity_for(track, step));
-            }
-        }
-    }
-}
-
-static void seq_capture_groove_base_if_needed(void) {
-    if (seq_groove_base_valid) return;
-    for (int track = 0; track < 16; track++)
-        for (int step = 0; step < 16; step++)
-            seq_groove_base[track][step] = p4.steps[track][step];
-    seq_groove_base_valid = true;
-}
-
-static void seq_apply_audible_swing_grid(void) {
-    seq_capture_groove_base_if_needed();
-
-    bool swung[16][16] = {};
-    int amt = seq_ctrl_swing - 50;
-    for (int track = 0; track < 16; track++) {
-        for (int step = 0; step < 16; step++) {
-            if (!seq_groove_base[track][step]) continue;
-            int dst = step;
-            if (amt >= 6 && (step & 1)) dst = (step + 1) & 0x0F;
-            if (amt >= 14 && (step % 4) == 2) dst = (step + 1) & 0x0F;
-            swung[track][dst] = true;
-        }
-    }
-
-    uart_stage_pattern_push_from_steps((uint8_t)p4.current_pattern, swung);
-    uart_send_pattern_to_s3(p4.current_pattern, swung);
-}
-
 static void seq_mpc_preset_cb(lv_event_t* e) {
     (void)e;
-    uart_send_to_s3(MSG_TOUCH_CMD, TCMD_MPC_PRESET, 0);
-    seq_ctrl_swing = 62;
+    seq_ctrl_swing = 0;
     seq_ctrl_drive = 55;
     p4.distortion_pct = seq_ctrl_drive;
     if (ui_use_udp_transport()) {
         udp_send_set_distortion((float)seq_ctrl_drive / 100.0f);
     }
-    seq_apply_audible_swing_grid();
-    seq_apply_master_groove();
     seq_update_mpc_ctrl_label();
 }
 
 static void seq_swing_delta_cb(lv_event_t* e) {
     int delta = (int)(intptr_t)lv_event_get_user_data(e);
-    if (delta > 0) {
-        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SWING_UP, 0);
-        seq_ctrl_swing++;
-    } else {
-        uart_send_to_s3(MSG_TOUCH_CMD, TCMD_SWING_DOWN, 0);
-        seq_ctrl_swing--;
-    }
-    if (seq_ctrl_swing < 50) seq_ctrl_swing = 50;
-    if (seq_ctrl_swing > 75) seq_ctrl_swing = 75;
-    if (seq_ctrl_swing == 50) seq_groove_base_valid = false;
-    seq_apply_audible_swing_grid();
-    seq_apply_master_groove();
+    seq_ctrl_swing += (delta > 0) ? 1 : -1;
+    if (seq_ctrl_swing < 0) seq_ctrl_swing = 0;
+    if (seq_ctrl_swing > 100) seq_ctrl_swing = 100;
     seq_update_mpc_ctrl_label();
 }
 
@@ -4012,7 +3946,6 @@ static void seq_drive_delta_cb(lv_event_t* e) {
     if (ui_use_udp_transport()) {
         udp_send_set_distortion((float)seq_ctrl_drive / 100.0f);
     }
-    seq_apply_master_groove();
     seq_update_mpc_ctrl_label();
 }
 
@@ -6070,8 +6003,12 @@ static bool s_piano_rec_active = false;      // v2.7 — record to S3 melody scr
 // v2.8 — local mirror of recorded notes so P4 can ASSIGN to a pad without
 // round-tripping through S3. Same shape as S3: 16 steps × 12 pitch-classes.
 static bool s_piano_rec_grid[16][12] = {{false}};
+static uint8_t s_piano_rec_notes[16][12] = {{0}};
 static int  s_piano_rec_step  = 0;
 static int  s_piano_assign_pad = 0;          // 0..15
+static uint8_t s_piano_rec_engine = 3;
+static uint8_t s_piano_rec_octave = 4;
+static bool s_piano_rec_has_notes = false;
 
 static constexpr int PIANO_ENGINE_COUNT = 5;
 static const uint8_t PIANO_ENGINES[PIANO_ENGINE_COUNT]      = {3, 4, 5, 6, 7};
@@ -6441,6 +6378,8 @@ static void piano_send_on(uint8_t midi_note, bool legato) {
             int col = s_piano_rec_step;
             if (col < 0 || col >= 16) col = 0;
             s_piano_rec_grid[col][row] = true;
+            s_piano_rec_notes[col][row] = midi_note;
+            s_piano_rec_has_notes = true;
             piano_grid_refresh_cell(col, row);
             s_piano_rec_step = (col + 1) % 16;
         }
@@ -6673,7 +6612,11 @@ static void piano_rec_btn_cb(lv_event_t* e) {
     if (s_piano_rec_active) {
         // v2.8 — fresh take: clear local mirror and rewind step cursor
         memset(s_piano_rec_grid, 0, sizeof(s_piano_rec_grid));
+        memset(s_piano_rec_notes, 0, sizeof(s_piano_rec_notes));
         s_piano_rec_step = 0;
+        s_piano_rec_engine = PIANO_ENGINES[s_piano_engine_idx];
+        s_piano_rec_octave = (uint8_t)s_piano_octave;
+        s_piano_rec_has_notes = false;
         piano_grid_refresh_all();
     }
     // v2.9 — tell master so all slaves mirror REC state and grid clear
@@ -6729,6 +6672,17 @@ static float     s_piano_bpm           = 120.0f;
 // Row 0 = B (top), Row 11 = C (bottom). Matches existing recording mapping.
 static const uint8_t PIANO_ROW_TO_PC[12] = {11,10,9,8,7,6,5,4,3,2,1,0};
 
+static uint8_t piano_midi_for_grid_cell(int col, int row, uint8_t fallback_octave) {
+    if (col >= 0 && col < 16 && row >= 0 && row < 12 && s_piano_rec_notes[col][row] > 0) {
+        return s_piano_rec_notes[col][row];
+    }
+    int pc = (row >= 0 && row < 12) ? PIANO_ROW_TO_PC[row] : 0;
+    int midi = ((int)fallback_octave + 1) * 12 + pc;
+    if (midi < 0) midi = 0;
+    if (midi > 127) midi = 127;
+    return (uint8_t)midi;
+}
+
 static void piano_grid_refresh_cell(int col, int row) {
     if (col < 0 || col >= 16 || row < 0 || row >= 12) return;
     lv_obj_t* b = s_piano_grid_btns[col][row];
@@ -6761,17 +6715,31 @@ static void piano_grid_cell_cb(lv_event_t* e) {
     int row = packed & 0xFF;
     if (col < 0 || col >= 16 || row < 0 || row >= 12) return;
     s_piano_rec_grid[col][row] = !s_piano_rec_grid[col][row];
+    s_piano_rec_notes[col][row] = s_piano_rec_grid[col][row]
+        ? piano_midi_for_grid_cell(col, row, (uint8_t)s_piano_octave)
+        : 0;
+    if (s_piano_rec_grid[col][row]) {
+        s_piano_rec_engine = PIANO_ENGINES[s_piano_engine_idx];
+        s_piano_rec_octave = (uint8_t)s_piano_octave;
+        s_piano_rec_has_notes = true;
+    }
     piano_grid_refresh_cell(col, row);
 }
 
 static void piano_grid_clear(void) {
     memset(s_piano_rec_grid, 0, sizeof(s_piano_rec_grid));
+    memset(s_piano_rec_notes, 0, sizeof(s_piano_rec_notes));
     s_piano_rec_step = 0;
+    s_piano_rec_has_notes = false;
     piano_grid_refresh_all();
 }
 
 static void piano_apply_preset(int idx) {
     memset(s_piano_rec_grid, 0, sizeof(s_piano_rec_grid));
+    memset(s_piano_rec_notes, 0, sizeof(s_piano_rec_notes));
+    s_piano_rec_engine = PIANO_ENGINES[s_piano_engine_idx];
+    s_piano_rec_octave = (uint8_t)s_piano_octave;
+    s_piano_rec_has_notes = true;
     // (col, pc) pairs. pc 0=C ... 11=B.
     static const uint8_t PRESET_BASS[][2] = {
         {0,9},{2,9},{4,9},{6,12 % 12},{8,9},{10,7},{12,9},{14,7}
@@ -6796,7 +6764,10 @@ static void piano_apply_preset(int idx) {
         int pc  = p[i][1] % 12;
         for (int r = 0; r < 12; r++) {
             if (PIANO_ROW_TO_PC[r] == (uint8_t)pc) {
-                if (col >= 0 && col < 16) s_piano_rec_grid[col][r] = true;
+                if (col >= 0 && col < 16) {
+                    s_piano_rec_grid[col][r] = true;
+                    s_piano_rec_notes[col][r] = piano_midi_for_grid_cell(col, r, s_piano_rec_octave);
+                }
                 break;
             }
         }
@@ -6894,10 +6865,7 @@ void update_piano_screen(void) {
     // Fire the lowest-row hit cell for this step (mono playback)
     for (int r = 11; r >= 0; r--) {
         if (s_piano_rec_grid[next][r]) {
-            int pc = PIANO_ROW_TO_PC[r];
-            int midi = s_piano_octave * 12 + pc + 12;
-            if (midi < 0)   midi = 0;
-            if (midi > 127) midi = 127;
+            int midi = piano_midi_for_grid_cell(next, r, (uint8_t)s_piano_octave);
             piano_play_step_off();
             if (ui_use_udp_transport()) {
                 udp_send_synth_note_on_ex(PIANO_ENGINES[s_piano_engine_idx],
@@ -6915,10 +6883,13 @@ void update_piano_screen(void) {
 static void piano_assign_btn_cb(lv_event_t* e) {
     LV_UNUSED(e);
     if (!ui_use_udp_transport()) return;
+    uint8_t assign_engine = s_piano_rec_has_notes ? s_piano_rec_engine : PIANO_ENGINES[s_piano_engine_idx];
+    uint8_t assign_octave = s_piano_rec_has_notes ? s_piano_rec_octave : (uint8_t)s_piano_octave;
     udp_send_melody_assign((uint8_t)s_piano_assign_pad,
-                           PIANO_ENGINES[s_piano_engine_idx],
-                           (uint8_t)s_piano_octave,
-                           s_piano_rec_grid);
+                           assign_engine,
+                           assign_octave,
+                           s_piano_rec_grid,
+                           s_piano_rec_notes);
     if (s_piano_status_lbl) {
         lv_label_set_text_fmt(s_piano_status_lbl, "→ PAD %d", s_piano_assign_pad + 1);
     }

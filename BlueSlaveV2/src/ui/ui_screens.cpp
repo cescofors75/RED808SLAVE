@@ -21,7 +21,6 @@ extern void updateByteButtonLeds();
 extern uint8_t dfFxParamMode[];
 extern int dfFxParamValue[];
 extern bool analogFxMuted[];
-extern int get_sequencer_swing_percent();
 extern int get_master_drive_percent();
 extern void apply_mpc_preset(bool saveToNvs);
 
@@ -2048,7 +2047,7 @@ void ui_create_sequencer_screen() {
     lv_obj_set_style_text_color(circle_lbl, lv_color_hex(0x60AADF), 0);
     lv_obj_center(circle_lbl);
 
-    // MPC preset button: applies and stores fixed punch profile.
+        // MPC button: drive only, no timing or velocity groove side effects.
     seq_mpc_btn = lv_btn_create(scr_sequencer);
 #if PORTRAIT_MODE
     lv_obj_set_size(seq_mpc_btn, 136, 26);
@@ -2066,16 +2065,12 @@ void ui_create_sequencer_screen() {
     lv_obj_add_event_cb(seq_mpc_btn, [](lv_event_t*) {
         apply_mpc_preset(true);
         if (seq_mpc_lbl) {
-            lv_label_set_text_fmt(seq_mpc_lbl, "MPC S%d D%d",
-                                  get_sequencer_swing_percent(),
-                                  get_master_drive_percent());
+            lv_label_set_text_fmt(seq_mpc_lbl, "DRIVE %d", get_master_drive_percent());
         }
     }, LV_EVENT_PRESSED, NULL);
 
     seq_mpc_lbl = lv_label_create(seq_mpc_btn);
-    lv_label_set_text_fmt(seq_mpc_lbl, "MPC S%d D%d",
-                          get_sequencer_swing_percent(),
-                          get_master_drive_percent());
+    lv_label_set_text_fmt(seq_mpc_lbl, "DRIVE %d", get_master_drive_percent());
     lv_obj_set_style_text_font(seq_mpc_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(seq_mpc_lbl, lv_color_hex(0xFF9A54), 0);
     lv_obj_center(seq_mpc_lbl);
@@ -2100,7 +2095,6 @@ void ui_update_sequencer() {
     static int prev_selected_track = -1;
     static bool prev_playing = false;
     static int prev_bpm10 = -1;
-    static int prev_swing = -1;
     static int prev_drive = -1;
     static uint32_t prev_pattern_revision = 0;
     static uint8_t prev_grid_state[Config::MAX_TRACKS][Config::STEPS_PER_BANK];
@@ -2152,12 +2146,10 @@ void ui_update_sequencer() {
     }
 
     if (seq_mpc_lbl) {
-        int swing = get_sequencer_swing_percent();
         int drive = get_master_drive_percent();
-        if (swing != prev_swing || drive != prev_drive) {
-            prev_swing = swing;
+        if (drive != prev_drive) {
             prev_drive = drive;
-            lv_label_set_text_fmt(seq_mpc_lbl, "MPC S%d D%d", swing, drive);
+            lv_label_set_text_fmt(seq_mpc_lbl, "DRIVE %d", drive);
         }
     }
 

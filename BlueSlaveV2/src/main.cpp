@@ -75,8 +75,6 @@ volatile bool isPlaying = false;
 int currentBPM = Config::DEFAULT_BPM;
 float currentBPMPrecise = (float)Config::DEFAULT_BPM;
 int currentKit = 0;
-int sequencerSwingPercent = 50;   // 50 = straight, >50 delays off-beat (odd steps)
-int sequencerVelocityBoost = 0;   // extra punch added to sequencer hits
 
 // Volume
 int masterVolume = Config::DEFAULT_VOLUME;
@@ -337,7 +335,6 @@ void selectPatternOnMaster(int patternIndex);
 void sendFullPatternToMaster(int pat);
 void sendLivePadTrigger(int pad, int velocity);
 void sendFilterUDP(int track, int fxType);
-int get_sequencer_swing_percent();
 int get_master_drive_percent();
 void apply_mpc_preset(bool saveToNvs);
 void scanI2CHub();
@@ -548,17 +545,6 @@ void handleP4TouchCommand(uint8_t cmdId, uint8_t value) {
         case TCMD_SYNC_PADS:
             ui_live_set_sync(value != 0);
             break;
-        case TCMD_MPC_PRESET:
-            apply_mpc_preset(true);
-            break;
-        case TCMD_SWING_UP:
-            sequencerSwingPercent = constrain(sequencerSwingPercent + 1, 50, 75);
-            nvs_mark_dirty();
-            break;
-        case TCMD_SWING_DOWN:
-            sequencerSwingPercent = constrain(sequencerSwingPercent - 1, 50, 75);
-            nvs_mark_dirty();
-            break;
         case TCMD_DRIVE_UP:
             set_master_drive_percent(fxDistortionPercent + 2, true);
             break;
@@ -674,10 +660,6 @@ static void set_master_drive_percent(int percent, bool sendToMaster) {
     uart_bridge_send_pot(POT_DRIVE, driveMidi);
 }
 
-int get_sequencer_swing_percent() {
-    return sequencerSwingPercent;
-}
-
 int get_master_drive_percent() {
     return fxDistortionPercent;
 }
@@ -730,12 +712,6 @@ static void nvs_load_settings() {
         currentBPMPrecise = constrain((float)val32 / 10.0f, (float)Config::MIN_BPM, (float)Config::MAX_BPM);
         currentBPM = (int)lroundf(currentBPMPrecise);
     }
-    if (nvs_get_i32(h, "swingPct", &val32) == ESP_OK) {
-        sequencerSwingPercent = constrain((int)val32, 50, 75);
-    }
-    if (nvs_get_i32(h, "seqBoost", &val32) == ESP_OK) {
-        sequencerVelocityBoost = constrain((int)val32, 0, 32);
-    }
     if (nvs_get_i32(h, "drvPct", &val32) == ESP_OK) {
         fxDistortionPercent = constrain((int)val32, 0, 100);
     }
@@ -768,8 +744,6 @@ void nvs_save_settings() {
     nvs_set_i32(h, "liveVol", livePadsVolume);
     nvs_set_i32(h, "bpm", currentBPM);
     nvs_set_i32(h, "bpm10", (int32_t)lroundf(currentBPMPrecise * 10.0f));
-    nvs_set_i32(h, "swingPct", sequencerSwingPercent);
-    nvs_set_i32(h, "seqBoost", sequencerVelocityBoost);
     nvs_set_i32(h, "drvPct", fxDistortionPercent);
     nvs_set_u8(h, "volMode", 0);
 
@@ -1187,28 +1161,19 @@ static int sequencer_groove_velocity(int track, int step, int baseVel) {
     // Tiny deterministic movement to avoid machine-gun flatness.
     v += ((step * 37 + track * 13) % 5) - 2; // [-2..+2]
 
-    // Global punch control used by MPC preset.
-    v += sequencerVelocityBoost;
-
     return constrain(v, 16, 127);
 }
 
 static uint32_t sequencer_step_interval_us(int step, float bpmPrecise) {
+    (void)step;
     float bpm = constrain(bpmPrecise, (float)Config::MIN_BPM, (float)Config::MAX_BPM);
     float base16 = 60000000.0f / bpm / 4.0f;
-
-    int swing = constrain(sequencerSwingPercent, 50, 75);
-    float amt = (float)(swing - 50) / 50.0f;  // 0.0..0.5
-    float factor = ((step & 1) == 0) ? (1.0f + amt) : (1.0f - amt);
-    uint32_t us = (uint32_t)lroundf(base16 * factor);
+    uint32_t us = (uint32_t)lroundf(base16);
     if (us < 20000U) us = 20000U;
     return us;
 }
 
 void apply_mpc_preset(bool saveToNvs) {
-    // Fixed preset: aggressive but still musical for drum-machine feel.
-    sequencerSwingPercent = 58;
-    sequencerVelocityBoost = 18;
     set_master_drive_percent(18, true);
 
     if (saveToNvs) {
@@ -1217,8 +1182,7 @@ void apply_mpc_preset(bool saveToNvs) {
         nvs_dirty = true;
     }
 
-    RED808_LOG_PRINTF("[MPC] preset applied: swing=%d velBoost=%d drive=%d%%\n",
-                      sequencerSwingPercent, sequencerVelocityBoost, fxDistortionPercent);
+    RED808_LOG_PRINTF("[MPC] drive applied: drive=%d%%\n", fxDistortionPercent);
 }
 
 void sendLivePadTrigger(int pad, int velocity) {
