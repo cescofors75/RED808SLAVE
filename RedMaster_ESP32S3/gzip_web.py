@@ -1,10 +1,12 @@
 import gzip, os
 
 web_dir = 'data/web'
+out_dir = 'data_gz/web'
+os.makedirs(out_dir, exist_ok=True)
 for f in os.listdir(web_dir):
     if f.endswith(('.js', '.css', '.html')) and not f.endswith('.gz'):
         src = os.path.join(web_dir, f)
-        dst = src + '.gz'
+        dst = os.path.join(out_dir, f + '.gz')
         with open(src, 'rb') as fin:
             data = fin.read()
         with open(dst, 'wb') as fout:
