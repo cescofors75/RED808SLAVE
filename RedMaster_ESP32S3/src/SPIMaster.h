@@ -320,10 +320,10 @@ public:
     // ══════════════════════════════════════════════════
     bool setSampleBuffer(int padIndex, int16_t* buffer, uint32_t length);
     bool transferSample(int padIndex, int16_t* buffer, uint32_t numSamples);
-    bool beginSampleStream(int padIndex, uint32_t numSamples);
+    bool beginSampleStream(int padIndex, uint32_t numSamples, uint32_t srcSampleRate = SAMPLE_RATE);
     bool writeSampleStreamData(int padIndex, const int16_t* samples, uint16_t numSamples, uint32_t startSample);
     bool endSampleStream(int padIndex, bool ok, uint32_t totalSamples);
-    bool beginCleanTrackStream(int trackIndex, uint32_t numSamples);
+    bool beginCleanTrackStream(int trackIndex, uint32_t numSamples, uint32_t srcSampleRate = SAMPLE_RATE);
     bool writeCleanTrackStreamData(int trackIndex, const int16_t* samples, uint16_t numSamples, uint32_t startSample);
     bool endCleanTrackStream(int trackIndex, bool ok, uint32_t totalSamples);
     bool setCleanTrackActive(int trackIndex, bool active);

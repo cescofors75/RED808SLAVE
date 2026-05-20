@@ -1180,13 +1180,15 @@ bool SPIMaster::transferSample(int padIndex, int16_t* buffer, uint32_t numSample
     return true;
 }
 
-bool SPIMaster::beginSampleStream(int padIndex, uint32_t numSamples) {
+bool SPIMaster::beginSampleStream(int padIndex, uint32_t numSamples, uint32_t srcSampleRate) {
     if (padIndex < 0 || padIndex >= MAX_PADS || numSamples == 0) return false;
 
     SampleBeginPayload beginP = {};
     beginP.padIndex = (uint8_t)padIndex;
     beginP.bitsPerSample = 16;
-    beginP.sampleRate = SAMPLE_RATE;
+    // Carry the WAV's native rate so Daisy can replay at correct pitch. The
+    // field is uint16; rates above its range fall back to no-resample.
+    beginP.sampleRate = (uint16_t)((srcSampleRate >= 8000 && srcSampleRate <= 65535) ? srcSampleRate : SAMPLE_RATE);
     beginP.totalBytes = numSamples * sizeof(int16_t);
     beginP.totalSamples = numSamples;
     return sendCommand(CMD_SAMPLE_BEGIN, &beginP, sizeof(beginP));
@@ -1672,13 +1674,14 @@ bool SPIMaster::requestStatus() {
     return false;
 }
 
-bool SPIMaster::beginCleanTrackStream(int trackIndex, uint32_t numSamples) {
+bool SPIMaster::beginCleanTrackStream(int trackIndex, uint32_t numSamples, uint32_t srcSampleRate) {
     uint8_t slot = 0;
     if (!cleanTrackToSampleSlot(trackIndex, slot) || !stm32Connected) return false;
     SampleBeginPayload payload = {};
     payload.padIndex = slot;
     payload.bitsPerSample = 16;
-    payload.sampleRate = 48000;
+    // Native WAV rate (uint16); out-of-range falls back to engine rate.
+    payload.sampleRate = (uint16_t)((srcSampleRate >= 8000 && srcSampleRate <= 65535) ? srcSampleRate : SAMPLE_RATE);
     payload.totalBytes = numSamples * sizeof(int16_t);
     payload.totalSamples = numSamples;
     return sendCommand(CMD_SAMPLE_BEGIN, &payload, sizeof(payload));
