@@ -142,6 +142,11 @@ private:
   volatile int  _pendingLoadPad  = -1;  // pad index to load, -1 = none
   uint8_t*      _uploadBuf       = nullptr;  // PSRAM buffer con WAV raw (válido hasta after deferred load)
   size_t        _uploadBufLen    = 0;
+
+  // Boot persistence: pads con WAV guardado en LittleFS que hay que resubir a Daisy
+  int8_t  _bootReloadQueue[16]   = {};
+  uint8_t _bootReloadCount       = 0;
+  uint8_t _bootReloadHead        = 0;
 };
 
 #endif

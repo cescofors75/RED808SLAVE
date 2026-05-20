@@ -148,6 +148,27 @@ extern SPIMaster spiMaster;
 extern Sequencer sequencer;
 extern WebInterface webInterface;
 
+struct DaisyUploadStreamState {
+  int pad = -1;
+  bool active = false;
+  bool begun = false;
+  bool error = false;
+  char errorMsg[96] = "";
+  uint8_t header[4096] = {};
+  size_t headerLen = 0;
+  uint32_t dataPos = 0;
+  uint32_t dataSize = 0;
+  uint16_t channels = 0;
+  uint16_t bits = 0;
+  size_t fileOffset = 0;
+  uint8_t carry[8] = {};
+  size_t carryLen = 0;
+  uint32_t samplesSent = 0;
+  char filename[64] = "";
+};
+
+static DaisyUploadStreamState s_daisyUpload;
+
 static void pumpDaisyUpload();
 static void pumpCleanTrackStream();
 static bool queueCleanTrackStreamSlot(int slot);
@@ -959,6 +980,17 @@ bool WebInterface::begin(const char* apSsid, const char* apPassword,
   _staConnected = false;
   loadCleanTracksStateFromFs();
   loadPersistedCleanTracksToDaisy();
+
+  // Encolar recarga de samples persistidos (WAV guardados en LittleFS por subidas previas)
+  _bootReloadCount = 0;
+  _bootReloadHead  = 0;
+  for (int i = 0; i < 16; i++) {
+    char path[28];
+    snprintf(path, sizeof(path), "/samples/pad%d.wav", i);
+    if (LittleFS.exists(path)) {
+      _bootReloadQueue[_bootReloadCount++] = (int8_t)i;
+    }
+  }
 
   WiFi.setSleep(false);
   WiFi.persistent(false);          // no guarda credenciales en NVS (evita flash corrupto)
@@ -2907,6 +2939,14 @@ void WebInterface::update() {
     bool loaded = false;
     if (_uploadBuf && _uploadBufLen > 0) {
       loaded = sampleManager.loadSampleFromBuffer(_uploadBuf, _uploadBufLen, pendPad);
+      if (loaded && pendPad >= 0 && pendPad < 16) {
+        // Persistir WAV en LittleFS para recarga automática tras reboot de Daisy
+        if (!LittleFS.exists("/samples")) LittleFS.mkdir("/samples");
+        char fsPath[28];
+        snprintf(fsPath, sizeof(fsPath), "/samples/pad%d.wav", pendPad);
+        File wf = LittleFS.open(fsPath, "w");
+        if (wf) { wf.write(_uploadBuf, _uploadBufLen); wf.close(); }
+      }
     }
     // Liberar buffer raw tras la carga (ya decodificado en PSRAM del sampleBuffer)
     if (_uploadBuf) { free(_uploadBuf); _uploadBuf = nullptr; _uploadBufLen = 0; }
@@ -2924,6 +2964,25 @@ void WebInterface::update() {
       String errDetail = String(sampleManager.getLastParseError());
       String errMsg = errDetail.length() ? "Failed to load: " + errDetail : "Failed to load sample";
       broadcastUploadComplete(pendPad, false, errMsg);
+    }
+  }
+
+  // ── Boot persistence reload: un pad por tick para no bloquear el event loop ──
+  if (_bootReloadCount > 0 && _pendingLoadPad < 0 && !s_daisyUpload.active) {
+    int8_t pad = _bootReloadQueue[_bootReloadHead];
+    _bootReloadHead  = (uint8_t)((_bootReloadHead + 1) % 16);
+    _bootReloadCount--;
+    char path[28];
+    snprintf(path, sizeof(path), "/samples/pad%d.wav", pad);
+    if (LittleFS.exists(path)) {
+      esp_task_wdt_reset();
+      bool ok = sampleManager.loadSample(path, (int)pad);
+      if (ok) {
+        setTrackSynthEngine((int)pad, -1);
+        spiMaster.dsqSetTrackEngine((uint8_t)pad, -1);
+        spiMaster.dsqSetMute((uint8_t)pad, false);
+      }
+      esp_task_wdt_reset();
     }
   }
 
@@ -6080,27 +6139,6 @@ void WebInterface::handleUpload(AsyncWebServerRequest *request, String filename,
     uploadLastPercent = -1;
   }
 }
-
-struct DaisyUploadStreamState {
-  int pad = -1;
-  bool active = false;
-  bool begun = false;
-  bool error = false;
-  char errorMsg[96] = "";
-  uint8_t header[4096] = {};
-  size_t headerLen = 0;
-  uint32_t dataPos = 0;
-  uint32_t dataSize = 0;
-  uint16_t channels = 0;
-  uint16_t bits = 0;
-  size_t fileOffset = 0;
-  uint8_t carry[8] = {};
-  size_t carryLen = 0;
-  uint32_t samplesSent = 0;
-  char filename[64] = "";
-};
-
-static DaisyUploadStreamState s_daisyUpload;
 
 static portMUX_TYPE s_daisyUploadMux = portMUX_INITIALIZER_UNLOCKED;
 static constexpr size_t kDaisyUploadQueueBlocks = 64;

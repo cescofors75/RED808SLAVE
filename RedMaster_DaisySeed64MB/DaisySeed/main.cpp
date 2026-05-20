@@ -4791,7 +4791,8 @@ static void BuildResponse(uint8_t cmd, uint16_t seq,
 static bool LoadWavToPad(const char* filepath, uint8_t padIdx);
 static int  GuessPadFromFilename(const char* fname);
 static bool isWavFile(const char* fname);
-static uint8_t FillMissingCanonicalPadsFromFamilies(uint8_t startPad, uint8_t maxPads);
+static uint8_t FillMissingCanonicalPadsFromFamilies(uint8_t startPad, uint8_t maxPads,
+                                                     const char* kitPath = nullptr);
 
 /* ═══════════════════════════════════════════════════════════════════
  *  23. PROCESS COMMAND  (ALL RED808 commands)
@@ -5944,7 +5945,7 @@ static void ProcessCommand()
                 f_closedir(&dir);
 
                 if(canonicalLiveRange){
-                    FillMissingCanonicalPadsFromFamilies(0, 16);
+                    FillMissingCanonicalPadsFromFamilies(0, 16, path);
                     padIdx = 16;
                 }
 
@@ -7566,7 +7567,8 @@ static bool LoadFirstWavFromFolderToPad(const char* folderPath, uint8_t padIdx)
     return LoadWavToPad(fpath, padIdx);
 }
 
-static uint8_t FillMissingCanonicalPadsFromFamilies(uint8_t startPad, uint8_t maxPads)
+static uint8_t FillMissingCanonicalPadsFromFamilies(uint8_t startPad, uint8_t maxPads,
+                                                     const char* kitPath)
 {
     uint8_t endPad = startPad + maxPads;
     if(endPad > 16) endPad = 16;
@@ -7575,11 +7577,20 @@ static uint8_t FillMissingCanonicalPadsFromFamilies(uint8_t startPad, uint8_t ma
     for(uint8_t pad = startPad; pad < endPad; pad++){
         if(sampleLoaded[pad]) continue;
 
-        char famPath[96];
-        if(!JoinPath(famPath, sizeof(famPath), SD_DATA_ROOT, PAD_FAMILY_NAMES[pad]))
-            continue;
-        if(LoadFirstWavFromFolderToPad(famPath, pad))
-            filled++;
+        /* Try 1: kitPath/familyName/ (e.g. /RED 808 KARZ/BD/) */
+        bool ok = false;
+        if(kitPath && kitPath[0]){
+            char famPath[96];
+            if(JoinPath(famPath, sizeof(famPath), kitPath, PAD_FAMILY_NAMES[pad]))
+                ok = LoadFirstWavFromFolderToPad(famPath, pad);
+        }
+        /* Try 2: SD_DATA_ROOT/familyName/ */
+        if(!ok){
+            char famPath[96];
+            if(JoinPath(famPath, sizeof(famPath), SD_DATA_ROOT, PAD_FAMILY_NAMES[pad]))
+                ok = LoadFirstWavFromFolderToPad(famPath, pad);
+        }
+        if(ok) filled++;
     }
 
     return filled;
