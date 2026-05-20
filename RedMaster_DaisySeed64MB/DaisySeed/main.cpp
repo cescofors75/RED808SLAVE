@@ -213,7 +213,12 @@ static inline void DspProfBlockDone() {}
 #define CLEAN_TRACK_COUNT  4
 #define TOTAL_SAMPLE_SLOTS (MAX_PADS + CLEAN_TRACK_COUNT)
 #define MAX_VOICES         32
-#define MAX_SAMPLE_BYTES   (8 * 1024 * 1024)   /* 8 MB per sampler */
+#define MAX_SAMPLE_BYTES   (8 * 1024 * 1024)   /* 8 MB per pad sampler */
+/* Clean tracks (stems) son canciones completas, no one-shots: cap mayor.
+ * 12 MB ≈ 130 s mono @44.1k, que cubre el WAV mono más grande que cabe en
+ * la partición LittleFS del ESP (11 MB). Sigue dentro del pool de 48 MB y
+ * el allocador best-fit ya rechaza con gracia si el pool se llena. */
+#define MAX_CLEAN_TRACK_BYTES (12 * 1024 * 1024)
 #define SAMPLE_POOL_BYTES  (48 * 1024 * 1024)  /* global SDRAM pool for all samplers */
 #define MAX_DELAY_SAMPLES  96000         /* 2 s @ 48000             */
 #define TRACK_ECHO_SIZE    9600          /* 200 ms per track        */
@@ -631,10 +636,11 @@ static void FreeCleanTrackStorage(uint8_t track)
 
 static bool AllocAnySampleStorage(uint8_t slot, uint32_t neededSamples)
 {
-    if(neededSamples == 0 || neededSamples > (MAX_SAMPLE_BYTES / 2))
+    const bool isClean = slot >= MAX_PADS;
+    const uint32_t maxSamples = (isClean ? MAX_CLEAN_TRACK_BYTES : MAX_SAMPLE_BYTES) / 2;
+    if(neededSamples == 0 || neededSamples > maxSamples)
         return false;
 
-    const bool isClean = slot >= MAX_PADS;
     const uint8_t index = isClean ? (uint8_t)(slot - MAX_PADS) : slot;
     if((isClean && index >= CLEAN_TRACK_COUNT) || (!isClean && index >= MAX_PADS))
         return false;
@@ -5727,8 +5733,9 @@ static void ProcessCommand()
                 uint32_t ts = 0; memcpy(&ts, p + 8, 4);
                 if(ts == 0)
                     break;
-                if(ts > MAX_SAMPLE_BYTES / 2)
-                    ts = MAX_SAMPLE_BYTES / 2;
+                uint32_t maxTs = ((pad >= MAX_PADS) ? MAX_CLEAN_TRACK_BYTES : MAX_SAMPLE_BYTES) / 2;
+                if(ts > maxTs)
+                    ts = maxTs;
                 /* Source sample rate (uint16 @ payload offset 2) → playback ratio.
                  * The ESP streams PCM at the WAV's native rate without resampling,
                  * so a stem recorded at e.g. 44100 must be replayed at
@@ -5823,8 +5830,8 @@ static void ProcessCommand()
             } else if(pad >= MAX_PADS && pad < TOTAL_SAMPLE_SLOTS && cleanTrackLoading[pad - MAX_PADS]) {
                 uint8_t track = (uint8_t)(pad - MAX_PADS);
                 if(status == 0 && cleanTrackTotalSamples[track] > 0){
-                    if(cleanTrackTotalSamples[track] > MAX_SAMPLE_BYTES / 2)
-                        cleanTrackTotalSamples[track] = MAX_SAMPLE_BYTES / 2;
+                    if(cleanTrackTotalSamples[track] > MAX_CLEAN_TRACK_BYTES / 2)
+                        cleanTrackTotalSamples[track] = MAX_CLEAN_TRACK_BYTES / 2;
                     cleanTrackLength[track] = cleanTrackTotalSamples[track];
                     cleanTrackLoaded[track] = true;
                 } else {
