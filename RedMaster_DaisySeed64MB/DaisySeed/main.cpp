@@ -213,12 +213,7 @@ static inline void DspProfBlockDone() {}
 #define CLEAN_TRACK_COUNT  4
 #define TOTAL_SAMPLE_SLOTS (MAX_PADS + CLEAN_TRACK_COUNT)
 #define MAX_VOICES         32
-#define MAX_SAMPLE_BYTES   (8 * 1024 * 1024)   /* 8 MB per pad sampler */
-/* Clean tracks (stems) son canciones completas, no one-shots: cap mayor.
- * 12 MB ≈ 130 s mono @44.1k, que cubre el WAV mono más grande que cabe en
- * la partición LittleFS del ESP (11 MB). Sigue dentro del pool de 48 MB y
- * el allocador best-fit ya rechaza con gracia si el pool se llena. */
-#define MAX_CLEAN_TRACK_BYTES (12 * 1024 * 1024)
+#define MAX_SAMPLE_BYTES   (8 * 1024 * 1024)   /* 8 MB per sampler */
 #define SAMPLE_POOL_BYTES  (48 * 1024 * 1024)  /* global SDRAM pool for all samplers */
 #define MAX_DELAY_SAMPLES  96000         /* 2 s @ 48000             */
 #define TRACK_ECHO_SIZE    9600          /* 200 ms per track        */
@@ -600,8 +595,6 @@ static bool     cleanTrackEnabled[CLEAN_TRACK_COUNT];
 static bool     cleanTrackActive[CLEAN_TRACK_COUNT];
 static volatile bool cleanTrackLoading[CLEAN_TRACK_COUNT];
 static uint32_t cleanTrackPlayhead[CLEAN_TRACK_COUNT];
-static float    cleanTrackPlayFrac[CLEAN_TRACK_COUNT];                       /* sub-sample phase for SR conversion */
-static float    cleanTrackRateRatio[CLEAN_TRACK_COUNT] = {1.0f,1.0f,1.0f,1.0f}; /* sourceSR / engineSR (1.0 = no resample) */
 static volatile bool kitMuteActive = false; /* true → AudioCallback outputs silence */
 
 static inline int16_t* SamplePtr(uint8_t pad)
@@ -636,11 +629,10 @@ static void FreeCleanTrackStorage(uint8_t track)
 
 static bool AllocAnySampleStorage(uint8_t slot, uint32_t neededSamples)
 {
-    const bool isClean = slot >= MAX_PADS;
-    const uint32_t maxSamples = (isClean ? MAX_CLEAN_TRACK_BYTES : MAX_SAMPLE_BYTES) / 2;
-    if(neededSamples == 0 || neededSamples > maxSamples)
+    if(neededSamples == 0 || neededSamples > (MAX_SAMPLE_BYTES / 2))
         return false;
 
+    const bool isClean = slot >= MAX_PADS;
     const uint8_t index = isClean ? (uint8_t)(slot - MAX_PADS) : slot;
     if((isClean && index >= CLEAN_TRACK_COUNT) || (!isClean && index >= MAX_PADS))
         return false;
@@ -1186,7 +1178,6 @@ static inline bool IsEarlyRefEngaged()   { return erRouted && erActive && erMix 
 static bool  padLoop[MAX_PADS];
 static bool  padReverse[MAX_PADS];
 static float padPitch[MAX_PADS];
-static float padRateRatio[MAX_PADS];  /* sourceSR / engineSR for uploaded samples (1.0 = no resample) */
 static int16_t trkPitchCents[MAX_PADS];  // modulación de pitch por track en centésimas (LFO / UI)
 
 /* Pad filter */
@@ -2563,14 +2554,6 @@ static float BitCrush(float s, uint8_t bits){
     return roundf(s * levels) / levels;
 }
 
-/* NOTE: do NOT mask interrupts (__disable_irq/PRIMASK) around voice[] mutations.
- * The SPI1-slave RX FIFO is drained by TIM6 at NVIC priority 1 (above the audio
- * ISR); PRIMASK masks TIM6 too, so any IRQ-off window here stalls the SPI drain
- * and overflows the RX FIFO (~128µs to fill), losing bytes from the ESP. That
- * corrupts incoming commands → desynced sequencer, half-played patterns, failed
- * stem uploads. The voice-mutation race (torn Voice → occasional click) is the
- * lesser evil and is tolerated, as it was before. */
-
 static void StopPadVoices(uint8_t pad)
 {
     for(int voiceIndex = 0; voiceIndex < MAX_VOICES; voiceIndex++)
@@ -3535,7 +3518,7 @@ static void TriggerPad(uint8_t pad, uint8_t velocity,
     voices[slot].active       = true;
     voices[slot].pad          = pad;
     voices[slot].pos          = padReverse[pad] ? (float)(sampleLength[pad] - 1) : 0.0f;
-    voices[slot].speed        = padRateRatio[pad] * padPitch[pad] * powf(2.0f, trkPitchCents[pad] / 1200.0f);
+    voices[slot].speed        = padPitch[pad] * powf(2.0f, trkPitchCents[pad] / 1200.0f);
     voices[slot].baseGain     = gain;  // gain pre-pan — para LFO vol/pan live update
     voices[slot].gainL        = gL;
     voices[slot].gainR        = gR;
@@ -4137,20 +4120,10 @@ void AudioCallback(AudioHandle::InputBuffer  /*in*/,
             if(pos >= cleanTrackLength[ct]){
                 cleanTrackActive[ct] = false;
                 cleanTrackPlayhead[ct] = 0;
-                cleanTrackPlayFrac[ct] = 0.0f;
                 continue;
             }
-            /* Linear interpolation + fractional advance for SR conversion.
-             * rateRatio==1.0 → fpos stays 0 and this matches the old 1:1 path. */
-            float fpos = cleanTrackPlayFrac[ct];
-            float s0 = cleanData[pos] * (1.0f / 32768.0f);
-            float s1 = (pos + 1 < cleanTrackLength[ct])
-                     ? cleanData[pos + 1] * (1.0f / 32768.0f) : s0;
-            float sample = s0 + (s1 - s0) * fpos;
-            float adv = fpos + cleanTrackRateRatio[ct];
-            uint32_t whole = (uint32_t)adv;
-            cleanTrackPlayhead[ct] = pos + whole;
-            cleanTrackPlayFrac[ct] = adv - (float)whole;
+            float sample = cleanData[pos] / 32768.0f;
+            cleanTrackPlayhead[ct] = pos + 1;
             busL += sample;
             busR += sample;
         }
@@ -5722,17 +5695,8 @@ static void ProcessCommand()
                 uint32_t ts = 0; memcpy(&ts, p + 8, 4);
                 if(ts == 0)
                     break;
-                uint32_t maxTs = ((pad >= MAX_PADS) ? MAX_CLEAN_TRACK_BYTES : MAX_SAMPLE_BYTES) / 2;
-                if(ts > maxTs)
-                    ts = maxTs;
-                /* Source sample rate (uint16 @ payload offset 2) → playback ratio.
-                 * The ESP streams PCM at the WAV's native rate without resampling,
-                 * so a stem recorded at e.g. 44100 must be replayed at
-                 * sourceSR/engineSR to keep its original pitch and duration. */
-                uint16_t srcSR = (uint16_t)(p[2] | ((uint16_t)p[3] << 8));
-                float rateRatio = (srcSR >= 8000 && srcSR <= 96000)
-                                ? (float)srcSR / (float)SAMPLE_RATE
-                                : 1.0f;
+                if(ts > MAX_SAMPLE_BYTES / 2)
+                    ts = MAX_SAMPLE_BYTES / 2;
                 if(pad < MAX_PADS){
                     StopPadVoices(pad);
                     sampleLoaded[pad] = false;
@@ -5740,28 +5704,23 @@ static void ProcessCommand()
                     sampleTotalSamples[pad] = 0;
                     if(!AllocSampleStorage(pad, ts)){
                         padLoading[pad] = false;
-                        hw.PrintLine("SAMPLE_BEGIN: SDRAM pool exhausted, pad=%u need=%lu samples", pad, (unsigned long)ts);
                         break;
                     }
                     padLoading[pad] = true;
                     sampleTotalSamples[pad] = ts;
-                    padRateRatio[pad] = rateRatio;
                 } else {
                     uint8_t track = (uint8_t)(pad - MAX_PADS);
                     cleanTrackLoaded[track] = false;
                     cleanTrackLength[track] = 0;
                     cleanTrackTotalSamples[track] = 0;
                     cleanTrackPlayhead[track] = 0;
-                    cleanTrackPlayFrac[track] = 0.0f;
                     cleanTrackActive[track] = false;
                     if(!AllocCleanTrackStorage(track, ts)){
                         cleanTrackLoading[track] = false;
-                        hw.PrintLine("SAMPLE_BEGIN: SDRAM pool exhausted, cleanTrack=%u need=%lu samples", track, (unsigned long)ts);
                         break;
                     }
                     cleanTrackLoading[track] = true;
                     cleanTrackTotalSamples[track] = ts;
-                    cleanTrackRateRatio[track] = rateRatio;
                 }
             }
         }
@@ -5819,8 +5778,8 @@ static void ProcessCommand()
             } else if(pad >= MAX_PADS && pad < TOTAL_SAMPLE_SLOTS && cleanTrackLoading[pad - MAX_PADS]) {
                 uint8_t track = (uint8_t)(pad - MAX_PADS);
                 if(status == 0 && cleanTrackTotalSamples[track] > 0){
-                    if(cleanTrackTotalSamples[track] > MAX_CLEAN_TRACK_BYTES / 2)
-                        cleanTrackTotalSamples[track] = MAX_CLEAN_TRACK_BYTES / 2;
+                    if(cleanTrackTotalSamples[track] > MAX_SAMPLE_BYTES / 2)
+                        cleanTrackTotalSamples[track] = MAX_SAMPLE_BYTES / 2;
                     cleanTrackLength[track] = cleanTrackTotalSamples[track];
                     cleanTrackLoaded[track] = true;
                 } else {
@@ -5841,7 +5800,6 @@ static void ProcessCommand()
             sampleLoaded[pad] = false;
             sampleLength[pad] = 0;
             sampleTotalSamples[pad] = 0;
-            padRateRatio[pad] = 1.0f;
             FreeSampleStorage(pad);
         }
         break;
@@ -5856,7 +5814,6 @@ static void ProcessCommand()
             } else if(cleanTrackLoaded[track]) {
                 if(dseq.playing) {
                     cleanTrackPlayhead[track] = 0;
-                    cleanTrackPlayFrac[track] = 0.0f;
                     cleanTrackActive[track] = true;
                 } else {
                     cleanTrackActive[track] = false;
@@ -5876,7 +5833,6 @@ static void ProcessCommand()
             sampleLoaded[i] = false;
             sampleLength[i] = 0;
             sampleTotalSamples[i] = 0;
-            padRateRatio[i] = 1.0f;
         }
         for(int i = 0; i < CLEAN_TRACK_COUNT; i++){
             cleanTrackLoading[i] = false;
@@ -5884,8 +5840,6 @@ static void ProcessCommand()
             cleanTrackLength[i] = 0;
             cleanTrackTotalSamples[i] = 0;
             cleanTrackPlayhead[i] = 0;
-            cleanTrackPlayFrac[i] = 0.0f;
-            cleanTrackRateRatio[i] = 1.0f;
             cleanTrackActive[i] = false;
             cleanTrackEnabled[i] = true;
             cleanTrackMuted[i] = false;
@@ -6881,7 +6835,6 @@ static void ProcessCommand()
                 dseq.playing        = true;
                 for(int i = 0; i < CLEAN_TRACK_COUNT; i++){
                     cleanTrackPlayhead[i] = 0;
-                    cleanTrackPlayFrac[i] = 0.0f;
                     cleanTrackActive[i] = cleanTrackEnabled[i] && cleanTrackLoaded[i];
                 }
             } else if(p[0] == 0){
@@ -6889,7 +6842,6 @@ static void ProcessCommand()
                 for(int i = 0; i < CLEAN_TRACK_COUNT; i++){
                     cleanTrackActive[i] = false;
                     cleanTrackPlayhead[i] = 0;
-                    cleanTrackPlayFrac[i] = 0.0f;
                 }
             } else if(p[0] == 2){
                 dseq.playing        = false;
@@ -6898,7 +6850,6 @@ static void ProcessCommand()
                 for(int i = 0; i < CLEAN_TRACK_COUNT; i++){
                     cleanTrackActive[i] = false;
                     cleanTrackPlayhead[i] = 0;
-                    cleanTrackPlayFrac[i] = 0.0f;
                 }
             }
         }
@@ -7099,37 +7050,13 @@ static void ProcessCommand()
                     dseq.currentStep = -1;
                     dseq.samplesElapsed = 0;
                     dseq.playing = true;
-                    /* Arm clean-track stems just like CMD_DSQ_CONTROL play.
-                     * Song mode is driven solely by CMD_SONG_CONTROL (the ESP
-                     * sends no separate CMD_DSQ_CONTROL), so without this the
-                     * render gate (cleanTrackActive) stays false and every
-                     * stem is silent during song playback. */
-                    for(int i = 0; i < CLEAN_TRACK_COUNT; i++){
-                        cleanTrackPlayhead[i] = 0;
-                        cleanTrackPlayFrac[i] = 0.0f;
-                        cleanTrackActive[i] = cleanTrackEnabled[i] && cleanTrackLoaded[i];
-                    }
                 }
             } else if(p[0] == 0){
                 songPlaying = false;
-                dseq.playing = false;
-                for(int i = 0; i < CLEAN_TRACK_COUNT; i++){
-                    cleanTrackActive[i] = false;
-                    cleanTrackPlayhead[i] = 0;
-                    cleanTrackPlayFrac[i] = 0.0f;
-                }
             } else if(p[0] == 2){
                 songPlaying = false;
                 songIdx = 0;
                 songRepeatCnt = 0;
-                dseq.playing = false;
-                dseq.currentStep = -1;
-                dseq.samplesElapsed = 0;
-                for(int i = 0; i < CLEAN_TRACK_COUNT; i++){
-                    cleanTrackActive[i] = false;
-                    cleanTrackPlayhead[i] = 0;
-                    cleanTrackPlayFrac[i] = 0.0f;
-                }
             }
         }
         break;
@@ -7545,9 +7472,6 @@ static bool LoadWavToPad(const char* filepath, uint8_t padIdx)
 
     sampleTotalSamples[padIdx] = sampleLength[padIdx];
     sampleLoaded[padIdx] = (sampleLength[padIdx] > 0);
-    /* Kit samples are authored at the engine rate → no resample. This also
-     * clears any stale ratio left by a previously uploaded stem on this pad. */
-    padRateRatio[padIdx] = 1.0f;
 
     ok = sampleLoaded[padIdx];
 
@@ -7820,7 +7744,6 @@ static void InitArrays()
         padLoop[i]    = false;
         padReverse[i] = false;
         padPitch[i]   = 1.0f;
-        padRateRatio[i] = 1.0f;
         trkPitchCents[i] = 0;
         padFilterType[i] = 0;
         padFilterCut[i]  = 10000.f;
@@ -8196,7 +8119,6 @@ int main()
                 }
                 sampleTotalSamples[padIdx] = sampleLength[padIdx];
                 sampleLoaded[padIdx] = (sampleLength[padIdx] > 0);
-                padRateRatio[padIdx] = 1.0f;  /* QSPI kit samples are at engine rate */
                 if(sampleLoaded[padIdx])
                     Log("  Pad %2d: %lu frames OK", padIdx, sampleLength[padIdx]);
             }

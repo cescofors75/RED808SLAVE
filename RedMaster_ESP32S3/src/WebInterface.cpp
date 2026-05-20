@@ -254,7 +254,7 @@ static int findFirstFreeCleanTrackSlot() {
   return -1;
 }
 
-static bool parseWavFileHeader(File& file, uint16_t& channels, uint16_t& bits, uint32_t& dataOffset, uint32_t& dataSize, char* err, size_t errLen, uint32_t* sampleRateOut = nullptr) {
+static bool parseWavFileHeader(File& file, uint16_t& channels, uint16_t& bits, uint32_t& dataOffset, uint32_t& dataSize, char* err, size_t errLen) {
   uint8_t header[4096] = {};
   size_t headerLen = file.read(header, sizeof(header));
   if (headerLen < 44) {
@@ -280,7 +280,6 @@ static bool parseWavFileHeader(File& file, uint16_t& channels, uint16_t& bits, u
       uint16_t audioFormat = le16(fmt);
       channels = le16(fmt + 2);
       bits = le16(fmt + 14);
-      if (sampleRateOut) *sampleRateOut = le32(fmt + 4);
       if (audioFormat != 1 && audioFormat != 0xFFFE) {
         strlcpy(err, "Unsupported WAV format", errLen);
         return false;
@@ -6094,7 +6093,6 @@ struct DaisyUploadStreamState {
   uint32_t dataSize = 0;
   uint16_t channels = 0;
   uint16_t bits = 0;
-  uint32_t sampleRate = 48000;
   size_t fileOffset = 0;
   uint8_t carry[8] = {};
   size_t carryLen = 0;
@@ -6202,7 +6200,6 @@ static bool parseDaisyUploadHeader() {
       uint16_t audioFormat = le16(fmt);
       st.channels = le16(fmt + 2);
       st.bits = le16(fmt + 14);
-      st.sampleRate = le32(fmt + 4);
       if (audioFormat != 1 && audioFormat != 0xFFFE) {
         daisyUploadError("Unsupported WAV format");
         return false;
@@ -6229,7 +6226,7 @@ static bool parseDaisyUploadHeader() {
     daisyUploadError("Empty WAV data");
     return false;
   }
-  st.begun = spiMaster.beginSampleStream(st.pad, totalSamples, st.sampleRate);
+  st.begun = spiMaster.beginSampleStream(st.pad, totalSamples);
   if (!st.begun) daisyUploadError("Daisy stream begin failed");
   return st.begun;
 }
@@ -6373,15 +6370,15 @@ static void pumpCleanTrackStream() {
     } else {
       char herr[96] = {};
       uint16_t ch = 0, bits = 0;
-      uint32_t dataOff = 0, dataSz = 0, srcRate = 0;
-      if (!parseWavFileHeader(f, ch, bits, dataOff, dataSz, herr, sizeof(herr), &srcRate) || dataSz == 0) {
+      uint32_t dataOff = 0, dataSz = 0;
+      if (!parseWavFileHeader(f, ch, bits, dataOff, dataSz, herr, sizeof(herr)) || dataSz == 0) {
         strlcpy(s_cleanTrackStream.errorMsg, herr[0] ? herr : "bad-header", sizeof(s_cleanTrackStream.errorMsg));
         s_cleanTrackStream.error = true;
         f.close();
       } else {
         const uint32_t frameBytes  = (bits / 8) * ch;
         const uint32_t totSamples  = dataSz / frameBytes;
-        if (!spiMaster.beginCleanTrackStream(s_cleanTrackStream.slot, totSamples, srcRate)) {
+        if (!spiMaster.beginCleanTrackStream(s_cleanTrackStream.slot, totSamples)) {
           strlcpy(s_cleanTrackStream.errorMsg, "daisy-begin-failed", sizeof(s_cleanTrackStream.errorMsg));
           s_cleanTrackStream.error = true;
           f.close();
