@@ -42,7 +42,7 @@ struct SpiQueuedCmd {
 #define DAISY_SPI_SCK              4
 #define DAISY_SPI_MOSI             5
 #define DAISY_SPI_MISO             6
-#define DAISY_SPI_CLOCK_HZ    4000000UL   /* 4MHz — primer salto conservador para acelerar upload */
+#define DAISY_SPI_CLOCK_HZ    1000000UL   /* 1MHz — la Daisy drena su RXFIFO (16B) por polling cada ~100us (TIM6 10kHz + inline en audio); el maximo sostenible es ~1.28MHz. A mas velocidad (p.ej. 4MHz) los paquetes >16B (upload de patron/sample) desbordan el FIFO y se pierden bytes: secuenciador corrupto y stems que no suben. NO subir sin acelerar tambien el drenado en la Daisy. */
 #define DAISY_SPI_RESPONSE_GAP_US  2000   /* 2ms — gap entre TX y RX en sendAndReceive; suficiente para Daisy main loop */
 
 // Audio constants (mirrored from old AudioEngine for compatibility)
