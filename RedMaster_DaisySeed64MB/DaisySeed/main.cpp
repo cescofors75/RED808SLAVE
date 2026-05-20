@@ -2563,23 +2563,16 @@ static float BitCrush(float s, uint8_t bits){
     return roundf(s * levels) / levels;
 }
 
-/* Brief critical section. The audio DMA ISR (priority 0) can preempt the main
- * loop at any instruction, and both contexts mutate voices[] (the ISR via
- * DsqFireStep->TriggerPad; the main loop via ProcessCommand->TriggerPad /
- * StopPadVoices). Masking interrupts around voice mutations on the main-loop
- * side prevents the ISR render/trigger path from observing a half-written
- * Voice (torn active/pos/gain), which manifested as clicks, stuck or silent
- * voices. PRIMASK is saved/restored so the guard nests safely and is a
- * near-no-op when entered from inside the ISR. */
-struct ScopedIrqLock {
-    uint32_t primask_;
-    ScopedIrqLock()  { primask_ = __get_PRIMASK(); __disable_irq(); }
-    ~ScopedIrqLock() { __set_PRIMASK(primask_); }
-};
+/* NOTE: do NOT mask interrupts (__disable_irq/PRIMASK) around voice[] mutations.
+ * The SPI1-slave RX FIFO is drained by TIM6 at NVIC priority 1 (above the audio
+ * ISR); PRIMASK masks TIM6 too, so any IRQ-off window here stalls the SPI drain
+ * and overflows the RX FIFO (~128µs to fill), losing bytes from the ESP. That
+ * corrupts incoming commands → desynced sequencer, half-played patterns, failed
+ * stem uploads. The voice-mutation race (torn Voice → occasional click) is the
+ * lesser evil and is tolerated, as it was before. */
 
 static void StopPadVoices(uint8_t pad)
 {
-    ScopedIrqLock _lk;
     for(int voiceIndex = 0; voiceIndex < MAX_VOICES; voiceIndex++)
         if(voices[voiceIndex].active && voices[voiceIndex].pad == pad)
             voices[voiceIndex].active = false;
@@ -3476,10 +3469,6 @@ static void TriggerPad(uint8_t pad, uint8_t velocity,
                        float sourceVolume)
 {
     if(pad >= MAX_PADS || !sampleLoaded[pad] || padLoading[pad]) return;
-
-    /* Guard the whole voice mutation against the audio ISR (see ScopedIrqLock).
-     * When TriggerPad runs inside the ISR this is a cheap near-no-op. */
-    ScopedIrqLock _lk;
 
     /* ── Choke group: silence any other pad in the same group ── */
     uint8_t grp = chokeGroup[pad];
