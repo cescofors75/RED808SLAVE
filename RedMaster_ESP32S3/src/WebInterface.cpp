@@ -1628,8 +1628,13 @@ refresh();if(auto_)startAuto();
       if (target == "cleanTrack") {
         handleCleanTrackUpload(request, filename, index, data, len, final);
       } else {
-        // Mantener la URL legacy de la UI, pero streamear directo a Daisy.
-        handleDaisyUpload(request, filename, index, data, len, final);
+        // Pad WAV import: use the robust buffered path — buffer the whole file
+        // in PSRAM, then load it via loadSampleFromBuffer()/transferSample() on
+        // systemTask (Core0), exactly like the xtra pads that work, and persist
+        // it to LittleFS. The previous live-streaming path (handleDaisyUpload)
+        // failed to ACK sample data chunks ("Daisy data chunk failed") and could
+        // reset the S3, because chunks were sent interleaved with WiFi RX.
+        handleUpload(request, filename, index, data, len, final);
       }
     }
   );
