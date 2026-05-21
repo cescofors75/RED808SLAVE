@@ -1113,10 +1113,27 @@ bool SPIMaster::setSampleBuffer(int padIndex, int16_t* buffer, uint32_t length) 
 
 bool SPIMaster::transferSample(int padIndex, int16_t* buffer, uint32_t numSamples) {
     if (!buffer || numSamples == 0) return false;
-    
+
     uint32_t totalBytes = numSamples * sizeof(int16_t);
-    
-    
+
+    // Reliable, self-pacing enqueue. sendCommand() from Core0 DROPS the command
+    // when the SPI queue is full, and at 1MHz the link is the bottleneck for a
+    // bulk sample transfer — so the queue fills and chunks get dropped silently.
+    // A dropped CMD_SAMPLE_DATA leaves stale SDRAM in the Daisy buffer (noise at
+    // that position); many drops on a big sample corrupt it and the unpaced
+    // flood can wedge the transfer. Retry until the command is actually queued,
+    // yielding so Core1 drains the queue and watchdog/other tasks stay fed.
+    // Abort cleanly if the link is genuinely stalled for several seconds.
+    auto enqueue = [&](uint8_t c, const void* pl, uint16_t plen) -> bool {
+        uint32_t tries = 0;
+        while (!sendCommand(c, pl, plen)) {
+            if (++tries > 1500) return false;   // queue stuck ~3s → link dead
+            vTaskDelay(pdMS_TO_TICKS(2));
+            esp_task_wdt_reset();
+        }
+        return true;
+    };
+
     // 1. BEGIN
     SampleBeginPayload beginP = {};
     beginP.padIndex = (uint8_t)padIndex;
@@ -1124,52 +1141,54 @@ bool SPIMaster::transferSample(int padIndex, int16_t* buffer, uint32_t numSample
     beginP.sampleRate = SAMPLE_RATE;
     beginP.totalBytes = totalBytes;
     beginP.totalSamples = numSamples;
-    
-    sendCommand(CMD_SAMPLE_BEGIN, &beginP, sizeof(beginP));
+
+    if (!enqueue(CMD_SAMPLE_BEGIN, &beginP, sizeof(beginP))) return false;
     delayMicroseconds(200);  // Give STM32 time to allocate
-    
+
     // 2. DATA chunks (max 512 bytes = 256 samples per chunk)
     const uint16_t CHUNK_BYTES = 512;
     uint32_t offset = 0;
     uint32_t chunkCount = 0;
-    
+
     // Build data packet: SampleDataHeader + raw audio data
     uint8_t dataPkt[8 + CHUNK_BYTES];
-    
+
     while (offset < totalBytes) {
         uint16_t chunkSize = (uint16_t)min((uint32_t)CHUNK_BYTES, totalBytes - offset);
-        
+
         SampleDataHeader* hdr = (SampleDataHeader*)dataPkt;
         hdr->padIndex = (uint8_t)padIndex;
         hdr->reserved = 0;
         hdr->chunkSize = chunkSize;
         hdr->offset = offset;
-        
+
         memcpy(dataPkt + sizeof(SampleDataHeader), ((uint8_t*)buffer) + offset, chunkSize);
-        
-        sendCommand(CMD_SAMPLE_DATA, dataPkt, sizeof(SampleDataHeader) + chunkSize);
+
+        // Never drop a data chunk — that is what produced noise tails and
+        // corruption/resets on larger samples.
+        if (!enqueue(CMD_SAMPLE_DATA, dataPkt, sizeof(SampleDataHeader) + chunkSize)) {
+            // Link stalled mid-transfer: tell the Daisy to discard the partial
+            // load (best effort) so the slot doesn't stay stuck "loading".
+            SampleEndPayload abortP = {};
+            abortP.padIndex = (uint8_t)padIndex;
+            abortP.status = 1;
+            sendCommand(CMD_SAMPLE_END, &abortP, sizeof(abortP));
+            return false;
+        }
 
         offset += chunkSize;
         chunkCount++;
 
-        // Throttle ligeramente para no saturar la STM32
-        if (chunkCount % 16 == 0) {
-            delayMicroseconds(100);
-        }
-
-        // Resetear TWDT cada 64 chunks (~512ms @ 1MHz) — evita WDT en samples grandes
-        if (chunkCount % 64 == 0) {
-            esp_task_wdt_reset();
-        }
+        if (chunkCount % 64 == 0) esp_task_wdt_reset();
     }
-    
+
     // 3. END
     SampleEndPayload endP = {};
     endP.padIndex = (uint8_t)padIndex;
     endP.status = 0;
     endP.checksum = crc16((uint8_t*)buffer, totalBytes > 65535 ? 65535 : (uint16_t)totalBytes);
-    
-    sendCommand(CMD_SAMPLE_END, &endP, sizeof(endP));
+
+    enqueue(CMD_SAMPLE_END, &endP, sizeof(endP));
 
     // Da tiempo a la Daisy para finalizar el buffer tras CMD_SAMPLE_END.
     // Sin este delay, samples grandes (>32KB) producen ruido al disparar
