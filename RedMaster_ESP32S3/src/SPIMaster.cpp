@@ -1693,7 +1693,12 @@ bool SPIMaster::requestStatus() {
 
 bool SPIMaster::beginCleanTrackStream(int trackIndex, uint32_t numSamples) {
     uint8_t slot = 0;
-    if (!cleanTrackToSampleSlot(trackIndex, slot) || !stm32Connected) return false;
+    // Do NOT gate on stm32Connected: it only turns true when the Daisy answers a
+    // ping/peaks (its SPI *response* path). Sample/clean-track loads are one-way
+    // commands that work even if responses are flaky — the pad loader
+    // (transferSample) never checks it and loads fine. Gating here is exactly why
+    // stems failed with "daisy-begin-failed" while pads loaded OK.
+    if (!cleanTrackToSampleSlot(trackIndex, slot)) return false;
     SampleBeginPayload payload = {};
     payload.padIndex = slot;
     payload.bitsPerSample = 16;
@@ -1705,7 +1710,7 @@ bool SPIMaster::beginCleanTrackStream(int trackIndex, uint32_t numSamples) {
 
 bool SPIMaster::writeCleanTrackStreamData(int trackIndex, const int16_t* samples, uint16_t numSamples, uint32_t startSample) {
     uint8_t slot = 0;
-    if (!cleanTrackToSampleSlot(trackIndex, slot) || !stm32Connected || !samples || numSamples == 0) return false;
+    if (!cleanTrackToSampleSlot(trackIndex, slot) || !samples || numSamples == 0) return false;
     if (numSamples > 256) numSamples = 256;
     const uint16_t chunkSize = (uint16_t)(numSamples * sizeof(int16_t));
     const uint16_t totalSize = (uint16_t)(sizeof(SampleDataHeader) + chunkSize);
@@ -1721,7 +1726,7 @@ bool SPIMaster::writeCleanTrackStreamData(int trackIndex, const int16_t* samples
 
 bool SPIMaster::endCleanTrackStream(int trackIndex, bool ok, uint32_t totalSamples) {
     uint8_t slot = 0;
-    if (!cleanTrackToSampleSlot(trackIndex, slot) || !stm32Connected) return false;
+    if (!cleanTrackToSampleSlot(trackIndex, slot)) return false;
     SampleEndPayload payload = {};
     payload.padIndex = slot;
     payload.status = ok ? 0 : 1;
@@ -1730,13 +1735,13 @@ bool SPIMaster::endCleanTrackStream(int trackIndex, bool ok, uint32_t totalSampl
 }
 
 bool SPIMaster::setCleanTrackActive(int trackIndex, bool active) {
-    if (trackIndex < 0 || trackIndex >= CLEAN_TRACK_COUNT || !stm32Connected) return false;
+    if (trackIndex < 0 || trackIndex >= CLEAN_TRACK_COUNT) return false;
     CleanTrackControlPayload payload = { (uint8_t)trackIndex, (uint8_t)(active ? 1 : 0) };
     return sendCommand(CMD_CLEAN_TRACK_ACTIVE, &payload, sizeof(payload));
 }
 
 bool SPIMaster::setCleanTrackMute(int trackIndex, bool muted) {
-    if (trackIndex < 0 || trackIndex >= CLEAN_TRACK_COUNT || !stm32Connected) return false;
+    if (trackIndex < 0 || trackIndex >= CLEAN_TRACK_COUNT) return false;
     CleanTrackControlPayload payload = { (uint8_t)trackIndex, (uint8_t)(muted ? 1 : 0) };
     return sendCommand(CMD_CLEAN_TRACK_MUTE, &payload, sizeof(payload));
 }
