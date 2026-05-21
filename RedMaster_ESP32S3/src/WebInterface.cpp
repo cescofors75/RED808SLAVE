@@ -148,13 +148,25 @@ extern SPIMaster spiMaster;
 extern Sequencer sequencer;
 extern WebInterface webInterface;
 
+// WAV upload header scratch in PSRAM (8MB available). Large enough to skip past
+// JUNK/bext/LIST/cue chunks some DAWs place before the `data` chunk; the
+// streaming path only needs to locate the `data` header to begin PCM, after
+// which it uses fileOffset to place bytes. The old 4096-byte inline buffer
+// rejected such WAVs ("WAV header too large") while the xtra/file path (which
+// seeks the whole file on LittleFS) accepted them.
+static constexpr size_t kDaisyHeaderCap = 256 * 1024;
+static uint8_t* daisyUploadHeaderBuf() {
+  static uint8_t* buf = (uint8_t*)ps_malloc(kDaisyHeaderCap);
+  return buf;
+}
+
 struct DaisyUploadStreamState {
   int pad = -1;
   bool active = false;
   bool begun = false;
   bool error = false;
   char errorMsg[96] = "";
-  uint8_t header[4096] = {};
+  uint8_t* header = nullptr;   // -> daisyUploadHeaderBuf() (PSRAM, kDaisyHeaderCap)
   size_t headerLen = 0;
   uint32_t dataPos = 0;
   uint32_t dataSize = 0;
@@ -6329,6 +6341,8 @@ void WebInterface::handleDaisyUpload(AsyncWebServerRequest *request, String file
     s_daisyUpload = DaisyUploadStreamState();
     resetDaisyUploadQueue();
     s_daisyUpload.active = true;
+    s_daisyUpload.header = daisyUploadHeaderBuf();
+    if (!s_daisyUpload.header) daisyUploadError("No PSRAM for WAV header buffer");
     if (request->hasParam("pad")) {
       s_daisyUpload.pad = request->getParam("pad")->value().toInt();
     } else if (request->hasParam("pad", false)) {
@@ -6349,10 +6363,10 @@ void WebInterface::handleDaisyUpload(AsyncWebServerRequest *request, String file
     st.fileOffset += len;
 
     if (!st.begun) {
-      size_t copy = min(len, sizeof(st.header) - st.headerLen);
+      size_t copy = min(len, kDaisyHeaderCap - st.headerLen);
       memcpy(st.header + st.headerLen, data, copy);
       st.headerLen += copy;
-      if (!parseDaisyUploadHeader() && !st.error && st.headerLen >= sizeof(st.header)) {
+      if (!parseDaisyUploadHeader() && !st.error && st.headerLen >= kDaisyHeaderCap) {
         daisyUploadError("WAV header too large");
       }
     }
