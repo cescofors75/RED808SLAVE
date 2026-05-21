@@ -173,9 +173,13 @@ uint16_t SPIMaster::crc16(const uint8_t* data, uint16_t len) {
 void SPIMaster::drainCmdQueue() {
     if (!spiCmdQueue) return;
     SpiQueuedCmd env;
-    // Cap por tick para evitar starvation del watchdog (sequencer.update, etc.)
+    // Cap per tick. Each sendCommandDirect blocks ~4ms at 1MHz, so a big cap (32)
+    // means a ~128ms burst that hogs Core1 for the whole duration of a bulk
+    // sample transfer (~16s) and starves the idle/other tasks → reset. Keep the
+    // burst short so Core1 yields (process() does vTaskDelay(1) after) and the
+    // watchdog stays fed. Normal control traffic rarely queues >8 at once.
     int processed = 0;
-    while (processed < 32 && xQueueReceive(spiCmdQueue, &env, 0) == pdTRUE) {
+    while (processed < 8 && xQueueReceive(spiCmdQueue, &env, 0) == pdTRUE) {
         sendCommandDirect(env.cmd, env.payload, env.payloadLen);
         processed++;
     }
@@ -1179,7 +1183,13 @@ bool SPIMaster::transferSample(int padIndex, int16_t* buffer, uint32_t numSample
         offset += chunkSize;
         chunkCount++;
 
-        if (chunkCount % 64 == 0) esp_task_wdt_reset();
+        // Yield periodically: keeps the cmd queue small (so Core1's drain bursts
+        // stay short) and gives this task + the watchdog room during the long
+        // transfer of a large sample at 1MHz. ~1s added over a 2MB sample.
+        if ((chunkCount & 7) == 0) {
+            esp_task_wdt_reset();
+            vTaskDelay(1);
+        }
     }
 
     // 3. END
