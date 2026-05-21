@@ -4051,6 +4051,18 @@ void AudioCallback(AudioHandle::InputBuffer  /*in*/,
             if(dseq.samplesElapsed == 0){
                 dseq.currentStep = (dseq.currentStep + 1) % (int16_t)dseq.patternLength;
                 DsqFireStep();
+                /* ── Stems: re-trigger enabled clean tracks from the top at each
+                 *    pattern restart so a one-shot stem stays locked to the bar
+                 *    (plays in sync with the looping sequencer). Muted tracks are
+                 *    armed but stay silent in the mixer until unmuted. ── */
+                if(dseq.currentStep == 0){
+                    for(int ct = 0; ct < CLEAN_TRACK_COUNT; ct++){
+                        if(cleanTrackEnabled[ct] && cleanTrackLoaded[ct]){
+                            cleanTrackPlayhead[ct] = 0;
+                            cleanTrackActive[ct] = true;
+                        }
+                    }
+                }
                 /* ── Song mode: advance chain when pattern cycle restarts ── */
                 if(songPlaying && dseq.currentStep == 0 && songLength > 0){
                     songRepeatCnt++;
