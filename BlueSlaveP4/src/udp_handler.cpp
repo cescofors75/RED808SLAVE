@@ -1770,12 +1770,15 @@ void udp_handler_process(void) {
                 udp_send_select_pattern(pendingPatternRequest);
             }
             udp_send_get_pattern(pendingPatternRequest);
-        } else if (pendingPatternRetries >= 12) {
-            P4_LOG_PRINTF("[UDP][PAT] timeout waiting pattern_sync idx=%d\n",
+        } else if (pendingPatternRetries >= 12 &&
+                   now - pendingPatternLastTxMs >= 5000) {
+            // Master is alive but hasn't answered this pattern after 12 tries.
+            // Don't abandon the request (the grid would stay stale until the
+            // user changes pattern); back off, then re-arm a fresh burst so it
+            // still resolves once the master starts answering again.
+            P4_LOG_PRINTF("[UDP][PAT] re-arming pattern request idx=%d\n",
                           pendingPatternRequest);
-            pendingPatternRequest = -1;
             pendingPatternRetries = 0;
-            pendingPatternLastTxMs = 0;
         }
     }
 

@@ -67,8 +67,17 @@ static inline uint8_t channel_to_track(uint8_t ch) {
 // ---------------------------------------------------------------------------
 // File-scope reader state (single-threaded, user-triggered only)
 // ---------------------------------------------------------------------------
-static File          s_f;
+// The SMF is loaded fully into a PSRAM buffer and parsed from memory; the
+// byte-at-a-time SPIFFS reads were the bottleneck on the load path.
+static uint8_t*      s_buf = nullptr;
+static uint32_t      s_buf_cap = 0;   // allocated capacity (bytes)
+static uint32_t      s_len = 0;       // valid bytes in buffer
+static uint32_t      s_pos = 0;       // read cursor
 static bool          s_err = false;
+
+static inline uint32_t m_pos()            { return s_pos; }
+static inline uint32_t m_size()           { return s_len; }
+static inline void     m_seek(uint32_t p) { s_pos = (p > s_len) ? s_len : p; }
 static unsigned long s_parse_start_ms = 0;
 static constexpr unsigned long MIDI_PARSE_TIMEOUT_MS = 5000;
 
@@ -76,7 +85,7 @@ static inline bool parse_timed_out() {
     return (millis() - s_parse_start_ms) > MIDI_PARSE_TIMEOUT_MS;
 }
 
-static uint8_t  readU8()  { uint8_t b = 0; if (s_f.read(&b, 1) != 1) s_err = true; return b; }
+static uint8_t  readU8()  { if (s_pos >= s_len) { s_err = true; return 0; } return s_buf[s_pos++]; }
 static uint16_t readU16() { uint8_t a = readU8(), b2 = readU8(); return (uint16_t)((a << 8) | b2); }
 static uint32_t readU32() { uint16_t a = readU16(), b2 = readU16(); return ((uint32_t)a << 16) | b2; }
 
@@ -93,11 +102,9 @@ static uint32_t readVLQ() {
 
 static void skipN(uint32_t n) {
     if (n == 0) return;
-    uint32_t pos = (uint32_t)s_f.position();
-    uint32_t sz  = (uint32_t)s_f.size();
-    // A corrupt file-declared length must never seek past EOF.
-    if (n > sz - pos) { s_err = true; s_f.seek(sz); return; }
-    s_f.seek(pos + n);
+    // A corrupt file-declared length must never seek past the buffer end.
+    if (n > s_len - s_pos) { s_err = true; s_pos = s_len; return; }
+    s_pos += n;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,13 +127,12 @@ static bool ensure_evbuf() {
 // Parse one MTrk chunk — identical logic to the S3 parser.
 static void parseTrack(uint32_t len, int tpq, uint32_t* tempo_us_out, int midi_channel) {
     (void)tpq;
-    uint32_t end = (uint32_t)s_f.position() + len;
-    uint32_t sz  = (uint32_t)s_f.size();
-    if (end > sz) end = sz;   // clamp a bogus MTrk length to the real file end
+    uint32_t end = m_pos() + len;
+    if (end > m_size()) end = m_size();   // clamp a bogus MTrk length to real end
     uint32_t tick = 0;
     uint8_t  status = 0;
 
-    while (!s_err && (uint32_t)s_f.position() < end) {
+    while (!s_err && m_pos() < end) {
         if (parse_timed_out()) { s_err = true; break; }
         tick += readVLQ();
         if (s_err) break;
@@ -182,7 +188,7 @@ static void parseTrack(uint32_t len, int tpq, uint32_t* tempo_us_out, int midi_c
         // 0xC0, 0xD0: single data byte already consumed in d1
     }
 
-    s_f.seek(end);
+    m_seek(end);
 }
 
 // Fold collected events onto a 16×16 grid. Returns the raw length (16/32/48/64)
@@ -264,20 +270,39 @@ static int expandEventsTo64(int tpq, bool raw[16][64]) {
 }
 
 // ---------------------------------------------------------------------------
-// parseFile — open the SMF and feed all tracks through parseTrack.
+// Load the whole SMF into the PSRAM buffer (one bulk read). The buffer is
+// grown on demand and reused across calls.
+static bool load_file_to_buf(fs::FS& storage, const char* path) {
+    File f = storage.open(path, "r");
+    if (!f) return false;
+    uint32_t sz = (uint32_t)f.size();
+    if (sz < 14 || sz > (4u * 1024 * 1024)) { f.close(); return false; }  // sane SMF bounds
+    if (sz > s_buf_cap) {
+        if (s_buf) { free(s_buf); s_buf = nullptr; s_buf_cap = 0; }
+        s_buf = (uint8_t*)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_buf) s_buf = (uint8_t*)malloc(sz);
+        if (!s_buf) { f.close(); return false; }
+        s_buf_cap = sz;
+    }
+    uint32_t got = f.read(s_buf, sz);
+    f.close();
+    if (got != sz) return false;
+    s_len = sz;
+    s_pos = 0;
+    return true;
+}
+
+// parseFile — load the SMF into memory and feed all tracks through parseTrack.
 // Returns tpq (>0) on success, 0 on error. Fills tempo_us if found.
 // ---------------------------------------------------------------------------
 static uint16_t parseFile(fs::FS& storage, const char* path, int midi_channel, uint32_t* tempo_us_out) {
-    s_f = storage.open(path, "r");
     s_err = false;
     s_parse_start_ms = millis();
-    if (!s_f) return 0;
+    if (!load_file_to_buf(storage, path)) { s_err = true; return 0; }
 
     uint16_t result_tpq = 0;
-    char magic[4];
-    bool ok = (s_f.read((uint8_t*)magic, 4) == 4) && (strncmp(magic, "MThd", 4) == 0);
-
-    if (ok) {
+    if (s_len >= 4 && memcmp(s_buf, "MThd", 4) == 0) {
+        s_pos = 4;
         uint32_t hdr_len = readU32();
         uint16_t fmt     = readU16(); (void)fmt;
         uint16_t ntracks = readU16();
@@ -288,9 +313,10 @@ static uint16_t parseFile(fs::FS& storage, const char* path, int midi_channel, u
 
             for (int t = 0; t < ntracks && !s_err; t++) {
                 if (parse_timed_out()) { s_err = true; break; }
-                char tmagic[4];
-                if (s_f.read((uint8_t*)tmagic, 4) != 4) break;
-                if (strncmp(tmagic, "MTrk", 4) != 0) break;
+                if (m_pos() + 4 > m_size()) break;
+                bool is_mtrk = (memcmp(s_buf + m_pos(), "MTrk", 4) == 0);
+                s_pos += 4;
+                if (!is_mtrk) break;
                 uint32_t tlen = readU32();
                 if (s_err) break;
                 parseTrack(tlen, (int)tpq, tempo_us_out, midi_channel);
@@ -299,7 +325,6 @@ static uint16_t parseFile(fs::FS& storage, const char* path, int midi_channel, u
         }
     }
 
-    if (s_f) s_f.close();
     return s_err ? 0 : result_tpq;
 }
 

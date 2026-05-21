@@ -1322,90 +1322,6 @@ void ui_pad_sound_sync_track_engines(const int8_t engines[16]) {
 static lv_obj_t* grid_sync_btn = NULL;
 static bool sync_pads_active = false;  // OFF by default (synced with S3)
 
-// Ripple effect — pool of expanding ring objects
-static constexpr int RIPPLE_POOL = 4;
-static constexpr int RIPPLE_FRAMES = 12;      // animation steps at ~60Hz = 200ms
-static constexpr int RIPPLE_MAX_R = 80;        // max radius in pixels
-struct RippleState {
-    lv_obj_t* obj = nullptr;
-    int frame = 0;         // 0 = inactive
-    lv_color_t color;
-    lv_coord_t cx, cy;     // center position (absolute on scr_live)
-};
-static RippleState ripples[RIPPLE_POOL];
-
-static void ripple_spawn(int pad) {
-    // DISABLED — ripple overlay forced LVGL to invalidate a large expanding
-    // area every frame for 200ms per tap. On the live screen this stacks up
-    // when tapping fast and drowns the render task. The pad border already
-    // flashes on press, which is enough feedback.
-    (void)pad;
-    return;
-    if (pad < 0 || pad >= 16 || !live_pad_btns[pad] || !scr_live) return;
-    // Calculate pad center in screen coordinates
-    lv_coord_t px = lv_obj_get_x(live_pad_btns[pad]);
-    lv_coord_t py = lv_obj_get_y(live_pad_btns[pad]);
-    lv_coord_t pw = lv_obj_get_width(live_pad_btns[pad]);
-    lv_coord_t ph = lv_obj_get_height(live_pad_btns[pad]);
-    lv_coord_t cx = px + pw / 2;
-    lv_coord_t cy = py + ph / 2;
-    lv_color_t tc = lv_color_hex(theme_presets[currentTheme].track_colors[pad]);
-
-    // Find free or oldest ripple slot
-    int slot = 0;
-    for (int i = 0; i < RIPPLE_POOL; i++) {
-        if (ripples[i].frame == 0) { slot = i; break; }
-        if (ripples[i].frame > ripples[slot].frame) slot = i;
-    }
-
-    RippleState& r = ripples[slot];
-    r.frame = 1;
-    r.color = tc;
-    r.cx = cx;
-    r.cy = cy;
-
-    if (!r.obj) {
-        r.obj = lv_obj_create(scr_live);
-        lv_obj_clear_flag(r.obj, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_clear_flag(r.obj, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_bg_opa(r.obj, LV_OPA_0, 0);
-        lv_obj_set_style_shadow_width(r.obj, 0, 0);
-    }
-    // Reset visual
-    lv_obj_set_size(r.obj, 10, 10);
-    lv_obj_set_pos(r.obj, cx - 5, cy - 5);
-    lv_obj_set_style_radius(r.obj, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(r.obj, 3, 0);
-    lv_obj_set_style_border_color(r.obj, tc, 0);
-    lv_obj_set_style_border_opa(r.obj, LV_OPA_COVER, 0);
-    lv_obj_clear_flag(r.obj, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(r.obj);
-}
-
-// Called each frame from update_live_screen to animate active ripples
-static void ripple_update(void) {
-    for (int i = 0; i < RIPPLE_POOL; i++) {
-        RippleState& r = ripples[i];
-        if (r.frame == 0 || !r.obj) continue;
-
-        r.frame++;
-        if (r.frame > RIPPLE_FRAMES) {
-            // Animation done — hide and recycle
-            r.frame = 0;
-            lv_obj_add_flag(r.obj, LV_OBJ_FLAG_HIDDEN);
-            continue;
-        }
-
-        float t = (float)(r.frame - 1) / (float)RIPPLE_FRAMES;  // 0..1
-        int sz = 10 + (int)(t * RIPPLE_MAX_R * 2);
-        lv_obj_set_size(r.obj, sz, sz);
-        lv_obj_set_pos(r.obj, r.cx - sz / 2, r.cy - sz / 2);
-        lv_obj_set_style_border_opa(r.obj, (lv_opa_t)(255 * (1.0f - t)), 0);
-        // Border thins as it expands
-        lv_obj_set_style_border_width(r.obj, (lv_coord_t)(3 * (1.0f - t * 0.7f)), 0);
-    }
-}
-
 static void pad_touch_cb(lv_event_t* e) {
     // Safety fallback for the LVGL button event. In practice the GT911 direct
     // path (ui_pad_frame_update) already serviced the press at 200Hz; this
@@ -2920,9 +2836,6 @@ static void update_live_screen(void) {
                 h_px > 0 ? LV_OPA_60 : LV_OPA_0, 0);
         }
     }
-
-    // Ripple animation
-    ripple_update();
 }
 
 // =============================================================================
@@ -8423,11 +8336,6 @@ static void ui_reload_themed_screens(void) {
         live_pad_accent_strips[i] = NULL;
         live_spectrum_bars[i] = NULL;
         grid_step_dots[i] = NULL;
-    }
-    // Invalidate ripple pool — objects are children of scr_live (already deleted)
-    for (int i = 0; i < RIPPLE_POOL; i++) {
-        ripples[i].obj = nullptr;
-        ripples[i].frame = 0;
     }
     grid_play_btn = NULL; grid_play_lbl = NULL; grid_bpm_lbl = NULL;
     grid_pat_lbl = NULL; grid_step_lbl = NULL;
