@@ -447,7 +447,13 @@ static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
             }
             break;
 
-        case MSG_FX:
+        case MSG_FX: {
+            // 16-bit FX values (cutoff, sample rate) arrive as two packets
+            // (H then L). Stage both bytes here and commit the full value to
+            // p4.* only on L, so the LVGL task (Core 0) never reads a value
+            // with a fresh high byte and a stale low byte.
+            static int s_cutoff_staging = 20000;
+            static int s_sr_staging     = 32000;
             switch (id) {
                 case FX_ENC0_MUTE:
                     p4.enc_muted[0] = (val != 0);
@@ -480,37 +486,27 @@ static void process_basic(const UartBasicPacket* pkt, bool from_usb) {
 #endif
                     break;
                 case FX_FILTER_TYPE:  p4.filter_type = val;                break;
-                // 16-bit values arrive as two packets (H then L). Accumulate
-                // into a staging variable and commit to p4.* only when the
-                // low byte arrives so UI never reads a half-updated value.
-                case FX_CUTOFF_H: {
-                    static int s_cutoff_staging = 20000;
+                case FX_CUTOFF_H:
                     s_cutoff_staging = (s_cutoff_staging & 0x00FF) | (val << 8);
-                    // Expose staging until L arrives — keeps high byte visible.
-                    p4.cutoff_hz = s_cutoff_staging;
                     break;
-                }
-                case FX_CUTOFF_L: {
-                    // Commit: take last high byte from current value.
-                    p4.cutoff_hz = (p4.cutoff_hz & 0xFF00) | val;
+                case FX_CUTOFF_L:
+                    s_cutoff_staging = (s_cutoff_staging & 0xFF00) | val;
+                    p4.cutoff_hz = s_cutoff_staging;   // commit full 16-bit in one store
                     break;
-                }
                 case FX_RESONANCE:    p4.resonance_x10 = val;             break;
                 case FX_DISTORTION:   p4.distortion_pct = val;            break;
                 case FX_BITCRUSH:     p4.bitcrush_bits = val;             break;
-                case FX_SAMPLERATE_H: {
-                    static int s_sr_staging = 32000;
+                case FX_SAMPLERATE_H:
                     s_sr_staging = (s_sr_staging & 0x00FF) | (val << 8);
-                    p4.sample_rate_hz = s_sr_staging;
                     break;
-                }
-                case FX_SAMPLERATE_L: {
-                    p4.sample_rate_hz = (p4.sample_rate_hz & 0xFF00) | val;
+                case FX_SAMPLERATE_L:
+                    s_sr_staging = (s_sr_staging & 0xFF00) | val;
+                    p4.sample_rate_hz = s_sr_staging;  // commit full 16-bit in one store
                     break;
-                }
                 case FX_RESP_MODE:    p4.fx_resp_mode = val;              break;
             }
             break;
+        }
 
         case MSG_TRACK: {
             uint8_t sub = id & 0xF0;

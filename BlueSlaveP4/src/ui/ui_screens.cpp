@@ -1285,7 +1285,9 @@ static void pad_inst_apply_to_master(uint8_t pad) {
 void ui_pad_sound_sync_track_engines(const int8_t engines[16]) {
     if (!engines) return;
     unsigned long nowMs = millis();
-    bool anyChanged = false;
+    // Runs on Core 1 (UDP/UART). State updates here are lock-free; the LVGL
+    // mutations below must hold the LVGL mutex (render task lives on Core 0).
+    uint16_t changedMask = 0;
     for (int pad = 0; pad < 16; pad++) {
         if (nowMs - s_pad_inst_local_ms[pad] < PAD_INST_OWNERSHIP_MS) {
             continue;
@@ -1300,14 +1302,19 @@ void ui_pad_sound_sync_track_engines(const int8_t engines[16]) {
             // Keep pending in lockstep only when user isn't editing that pad.
             s_pad_inst_pending[pad] = incomingInst;
         }
-        pad_inst_refresh_pad_badge((uint8_t)pad);
-        anyChanged = true;
+        changedMask |= (uint16_t)(1u << pad);
     }
-    if (anyChanged) {
+    if (changedMask && lvgl_port_lock(20)) {
+        for (int pad = 0; pad < 16; pad++) {
+            if (changedMask & (uint16_t)(1u << pad)) {
+                pad_inst_refresh_pad_badge((uint8_t)pad);
+            }
+        }
         pad_inst_refresh_controls();
         if (s_pad_inst_modal) {
             pad_inst_modal_refresh();
         }
+        lvgl_port_unlock();
     }
 }
 
@@ -1468,16 +1475,18 @@ static void grid_16l_cb(lv_event_t* e) {
     }
 }
 
-// Called when S3 sends sync toggle — update UI without re-sending
+// Called when S3 sends sync toggle — update UI without re-sending.
+// Invoked from Core 1 (UART), so the LVGL mutations need the LVGL mutex.
 void ui_live_set_sync_p4(bool on) {
     sync_pads_active = on;
-    if (grid_sync_btn) {
+    if (grid_sync_btn && lvgl_port_lock(20)) {
         lv_obj_set_style_bg_color(grid_sync_btn,
             on ? RED808_SUCCESS : RED808_SURFACE, 0);
         lv_obj_set_style_border_color(grid_sync_btn,
             on ? RED808_CYAN : RED808_BORDER, 0);
         lv_obj_t* lbl = lv_obj_get_child(grid_sync_btn, 0);
         if (lbl) lv_label_set_text(lbl, on ? "SYNC\nON" : "SYNC\nOFF");
+        lvgl_port_unlock();
     }
 }
 

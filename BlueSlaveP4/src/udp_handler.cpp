@@ -1574,7 +1574,8 @@ static void processJson(const char* json, int len) {
     else if (strcmp(cmd, "setSampleRate") == 0) {
         unsigned long nowMs = millis();
         if (!is_fx_owned_recent(FX_OWN_SAMPLE_RATE, nowMs)) {
-            p4.sample_rate_hz = clamp_int(doc["value"] | 44100, 1000, 44100);
+            int sr = doc["value"] | p4.sample_rate_hz;
+            p4.sample_rate_hz = (sr <= 0) ? 0 : clamp_int(sr, 9000, 32000);
             forward_fx_samplerate_to_s3(p4.sample_rate_hz);
         }
     }

@@ -93,7 +93,11 @@ static uint32_t readVLQ() {
 
 static void skipN(uint32_t n) {
     if (n == 0) return;
-    s_f.seek(s_f.position() + n);
+    uint32_t pos = (uint32_t)s_f.position();
+    uint32_t sz  = (uint32_t)s_f.size();
+    // A corrupt file-declared length must never seek past EOF.
+    if (n > sz - pos) { s_err = true; s_f.seek(sz); return; }
+    s_f.seek(pos + n);
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +121,8 @@ static bool ensure_evbuf() {
 static void parseTrack(uint32_t len, int tpq, uint32_t* tempo_us_out, int midi_channel) {
     (void)tpq;
     uint32_t end = (uint32_t)s_f.position() + len;
+    uint32_t sz  = (uint32_t)s_f.size();
+    if (end > sz) end = sz;   // clamp a bogus MTrk length to the real file end
     uint32_t tick = 0;
     uint8_t  status = 0;
 
@@ -360,8 +366,9 @@ bool load_pattern(const char* path,
         for (int s = 0; s < 16; s++)
             if (steps[t][s]) { tracks_used++; break; }
 
-    log_i("[MEM-MIDI] %s: tpq=%u evPrimary=%d evFinal=%d tracksUsed=%d rawLen=%d tempo_us=%u",
-          path, (unsigned)tpq, ev_primary, s_evcount, tracks_used, raw_len, (unsigned)tempo_us);
+    log_i("[MEM-MIDI] %s: tpq=%u evPrimary=%d evFinal=%d tracksUsed=%d rawLen=%d tempo_us=%u%s",
+          path, (unsigned)tpq, ev_primary, s_evcount, tracks_used, raw_len, (unsigned)tempo_us,
+          s_evbuf_overflow ? " [EVBUF OVERFLOW: events truncated]" : "");
 
     return total > 0;
 }
