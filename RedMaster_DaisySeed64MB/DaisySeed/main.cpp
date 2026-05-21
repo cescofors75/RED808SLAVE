@@ -5813,12 +5813,11 @@ static void ProcessCommand()
                 cleanTrackActive[track] = false;
                 cleanTrackPlayhead[track] = 0;
             } else if(cleanTrackLoaded[track]) {
-                if(dseq.playing) {
-                    cleanTrackPlayhead[track] = 0;
-                    cleanTrackActive[track] = true;
-                } else {
-                    cleanTrackActive[track] = false;
-                }
+                // Activate immediately so the stems-screen PLAY button auditions
+                // the stem even when the sequencer transport is stopped. Playback
+                // is one-shot: the mixer clears cleanTrackActive at end of buffer.
+                cleanTrackPlayhead[track] = 0;
+                cleanTrackActive[track] = true;
             }
         }
         break;
