@@ -6822,9 +6822,9 @@ void WebInterface::handleCleanTrackUpload(AsyncWebServerRequest *request, String
       size_t freeB  = (totalB > usedB) ? (totalB - usedB) : 0;
       size_t needB  = (size_t)request->contentLength() + 8192;
       if (freeB < needB) {
-        sendCleanTrackInitError(request, 507, "fs_full",
-            String("Insufficient storage (free ") + String((uint32_t)(freeB/1024)) +
-            "KB, need " + String((uint32_t)(needB/1024)) + "KB)");
+        String fsMsg = String("Insufficient storage (free ") + (uint32_t)(freeB/1024) +
+                       "KB, need " + (uint32_t)(needB/1024) + "KB)";
+        sendCleanTrackInitError(request, 507, "fs_full", fsMsg.c_str());
         s_cleanTrackUpload.active = false;
         return;
       }
