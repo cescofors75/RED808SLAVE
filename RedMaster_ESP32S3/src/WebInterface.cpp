@@ -284,6 +284,16 @@ static int findFirstFreeCleanTrackSlot() {
   for (int i = 0; i < kCleanTrackCount; ++i) {
     if (!s_cleanTracks[i].occupied) return i;
   }
+  // Reclaim a slot left occupied by a FAILED load so failed uploads don't
+  // permanently block new ones (and free its orphaned file on LittleFS, which
+  // otherwise eats the 11MB partition → fs_full). Good (loaded) stems are kept.
+  for (int i = 0; i < kCleanTrackCount; ++i) {
+    if (s_cleanTracks[i].loadFailed) {
+      if (s_cleanTracks[i].filePath[0]) LittleFS.remove(s_cleanTracks[i].filePath);
+      clearCleanTrackSlot(s_cleanTracks[i], i);
+      return i;
+    }
+  }
   return -1;
 }
 
@@ -2985,6 +2995,9 @@ void WebInterface::pumpPadTransfer() {
     int pad = s_padXfer.pad;
     spiMaster.endSampleStream(pad, true, s_padXfer.total);
     s_padXfer.active = false;
+    // The Daisy now holds the sample (64MB SDRAM); free the S3-side copy so
+    // PSRAM doesn't accumulate across uploads (was "No PSRAM for sample").
+    sampleManager.releaseHostSample(pad);
     setTrackSynthEngine(pad, -1);
     spiMaster.dsqSetTrackEngine((uint8_t)pad, -1);
     spiMaster.dsqSetMute((uint8_t)pad, false);

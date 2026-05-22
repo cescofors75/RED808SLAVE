@@ -400,6 +400,15 @@ bool SampleManager::decodeSampleFromBuffer(const uint8_t* data, size_t size, int
   return true;
 }
 
+// Free the S3-side decoded buffer after it has been streamed to the Daisy. The
+// Daisy keeps its own copy (64MB SDRAM), so holding it on the S3 only wastes the
+// 8MB PSRAM and made later uploads fail with "No PSRAM for sample". Does NOT tell
+// the Daisy to unload (that is unloadSample()).
+void SampleManager::releaseHostSample(int padIndex) {
+  if (padIndex < 0 || padIndex >= MAX_SAMPLES) return;
+  freeSampleBuffer(padIndex);
+}
+
 // ─── parseWavFromBuffer ───────────────────────────────────────────────────────
 // Igual que parseWavFile pero opera sobre un bloque de memoria en PSRAM
 bool SampleManager::parseWavFromBuffer(const uint8_t* buf, size_t size, int padIndex, String& errOut) {
