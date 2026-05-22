@@ -382,6 +382,24 @@ bool SampleManager::loadSampleFromBuffer(const uint8_t* data, size_t size, int p
   return true;
 }
 
+// Decode a WAV from a PSRAM buffer into sampleBuffers[padIndex] WITHOUT sending
+// it to the Daisy. The caller streams it non-blocking (a few chunks per tick),
+// reading from getSampleBuffer()/getSampleLength(), so a large sample never
+// blocks the task or resets the S3.
+bool SampleManager::decodeSampleFromBuffer(const uint8_t* data, size_t size, int padIndex) {
+  if (!data || size < 12 || padIndex < 0 || padIndex >= MAX_SAMPLES) return false;
+  if (sampleBuffers[padIndex] != nullptr) unloadSample(padIndex);
+  String parseErr;
+  if (!parseWavFromBuffer(data, size, padIndex, parseErr)) {
+    strncpy(lastParseError, parseErr.c_str(), sizeof(lastParseError) - 1);
+    lastParseError[sizeof(lastParseError) - 1] = '\0';
+    return false;
+  }
+  lastParseError[0] = '\0';
+  snprintf(sampleNames[padIndex], 32, "pad%d", padIndex);
+  return true;
+}
+
 // ─── parseWavFromBuffer ───────────────────────────────────────────────────────
 // Igual que parseWavFile pero opera sobre un bloque de memoria en PSRAM
 bool SampleManager::parseWavFromBuffer(const uint8_t* buf, size_t size, int padIndex, String& errOut) {

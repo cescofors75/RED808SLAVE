@@ -42,6 +42,7 @@ public:
   // Sample loading
   bool loadSample(const char* filename, int padIndex);
   bool loadSampleFromBuffer(const uint8_t* data, size_t size, int padIndex);  // Load WAV from PSRAM buffer
+  bool decodeSampleFromBuffer(const uint8_t* data, size_t size, int padIndex); // Decode only (no SPI transfer)
   bool trimSample(int padIndex, float startNorm, float endNorm);
   bool applyFade(int padIndex, float fadeInSec, float fadeOutSec);  // Apply fade in/out to buffer
   bool unloadSample(int padIndex);

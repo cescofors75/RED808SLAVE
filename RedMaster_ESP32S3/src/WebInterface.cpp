@@ -993,15 +993,16 @@ bool WebInterface::begin(const char* apSsid, const char* apPassword,
   loadCleanTracksStateFromFs();
   loadPersistedCleanTracksToDaisy();
 
-  // Encolar recarga de samples persistidos (WAV guardados en LittleFS por subidas previas)
+  // Pad samples are no longer persisted to LittleFS: persisting 2-4MB WAVs
+  // filled the 11MB partition and blocked stem uploads (fs_full), and a large
+  // persisted sample could reset the S3 on boot. Remove any left over from the
+  // old persistence so the filesystem is free for stems/clean tracks.
   _bootReloadCount = 0;
   _bootReloadHead  = 0;
   for (int i = 0; i < 16; i++) {
     char path[28];
     snprintf(path, sizeof(path), "/samples/pad%d.wav", i);
-    if (LittleFS.exists(path)) {
-      _bootReloadQueue[_bootReloadCount++] = (int8_t)i;
-    }
+    if (LittleFS.exists(path)) LittleFS.remove(path);
   }
 
   WiFi.setSleep(false);
@@ -2938,6 +2939,60 @@ void WebInterface::broadcastSongPattern(int pattern, int songLength) {
   _pendingSongPattern = pattern;   // write pattern LAST so consumer sees both
 }
 
+// ── Non-blocking pad sample transfer to the Daisy ────────────────────────────
+// A large WAV over the 1MHz SPI takes ~20s; doing it in one blocking call reset
+// the S3. Decode once into PSRAM, then push a few chunks per update() tick so the
+// transfer never blocks this task (mirrors how stems stream).
+struct PadXferState {
+  bool     active  = false;
+  int      pad     = -1;
+  int16_t* buf     = nullptr;
+  uint32_t total   = 0;     // samples
+  uint32_t offset  = 0;     // samples already queued
+  bool     begun   = false;
+  uint32_t startMs = 0;
+};
+static PadXferState s_padXfer;
+
+void WebInterface::pumpPadTransfer() {
+  if (!s_padXfer.active) return;
+
+  if (!s_padXfer.begun) {
+    if (spiMaster.beginSampleStream(s_padXfer.pad, s_padXfer.total)) {
+      s_padXfer.begun = true;
+    } else if (millis() - s_padXfer.startMs > 4000) {
+      s_padXfer.active = false;
+      broadcastUploadComplete(s_padXfer.pad, false, "Daisy begin failed");
+    }
+    return;  // resume next tick
+  }
+
+  // Push a few chunks; stop early if the SPI queue is full (resume next tick).
+  const uint32_t CH = 256;  // 256 samples = 512 bytes per chunk
+  int sent = 0;
+  while (s_padXfer.offset < s_padXfer.total && sent < 4) {
+    uint32_t left = s_padXfer.total - s_padXfer.offset;
+    uint32_t n = (left < CH) ? left : CH;
+    if (!spiMaster.writeSampleStreamData(s_padXfer.pad, s_padXfer.buf + s_padXfer.offset,
+                                         (uint16_t)n, s_padXfer.offset)) {
+      break;  // queue full — try again next tick
+    }
+    s_padXfer.offset += n;
+    sent++;
+  }
+
+  if (s_padXfer.offset >= s_padXfer.total) {
+    int pad = s_padXfer.pad;
+    spiMaster.endSampleStream(pad, true, s_padXfer.total);
+    s_padXfer.active = false;
+    setTrackSynthEngine(pad, -1);
+    spiMaster.dsqSetTrackEngine((uint8_t)pad, -1);
+    spiMaster.dsqSetMute((uint8_t)pad, false);
+    broadcastUploadComplete(pad, true, "Sample uploaded and loaded successfully");
+    broadcastSequencerState();
+  }
+}
+
 void WebInterface::update() {
   if (!initialized || !ws || !server) return;
 
@@ -2945,47 +3000,40 @@ void WebInterface::update() {
 
   pumpDaisyUpload();
   pumpCleanTrackStream();
+  pumpPadTransfer();
 
-  // ── Deferred sample load — done here (systemTask, Core0) to avoid blocking AsyncWebServer task ──
-  // Note: loadSample calls transferSample() which feeds esp_task_wdt internally
+  // ── Deferred sample load (systemTask, Core0) ──────────────────────────────
+  // Decode the uploaded WAV into PSRAM, free the raw upload buffer immediately,
+  // then hand off to the non-blocking pad transfer pump. Pad WAVs are NOT
+  // persisted to LittleFS anymore: that filled the 11MB FS and blocked stem
+  // uploads (fs_full), and a large persisted sample could reset the S3 on boot.
   int pendPad = _pendingLoadPad;
-  if (pendPad >= 0) {
+  if (pendPad >= 0 && !s_padXfer.active) {
     _pendingLoadPad = -1;  // clear flag first
-    esp_task_wdt_reset();  // feed before starting long transfer
+    esp_task_wdt_reset();
 
-    bool loaded = false;
+    bool decoded = false;
     if (_uploadBuf && _uploadBufLen > 0) {
-      if (pendPad >= 0 && pendPad < 16) {
-        // Persist the WAV, then FREE the raw upload buffer BEFORE decoding, so we
-        // never hold the whole file (several MB) AND the decoded sample in PSRAM
-        // at the same time — that double allocation is what reset the S3 on large
-        // uploads (>~1MB). Load from the persisted file, which reads incrementally.
-        bool persisted = false;
-        if (!LittleFS.exists("/samples")) LittleFS.mkdir("/samples");
-        char fsPath[28];
-        snprintf(fsPath, sizeof(fsPath), "/samples/pad%d.wav", pendPad);
-        File wf = LittleFS.open(fsPath, "w");
-        if (wf) { persisted = (wf.write(_uploadBuf, _uploadBufLen) == (size_t)_uploadBufLen); wf.close(); }
-        free(_uploadBuf); _uploadBuf = nullptr; _uploadBufLen = 0;
-        esp_task_wdt_reset();
-        if (persisted) loaded = sampleManager.loadSample(fsPath, pendPad);
-      } else {
-        // pad >= 16 (no persistence slot): decode straight from the buffer.
-        loaded = sampleManager.loadSampleFromBuffer(_uploadBuf, _uploadBufLen, pendPad);
-      }
+      decoded = sampleManager.decodeSampleFromBuffer(_uploadBuf, _uploadBufLen, pendPad);
     }
-    // Free the raw buffer if it wasn't already (pad >= 16 path, or error).
+    // Free the raw WAV now — only the decoded sample stays in PSRAM during the
+    // (non-blocking) transfer, halving peak memory.
     if (_uploadBuf) { free(_uploadBuf); _uploadBuf = nullptr; _uploadBufLen = 0; }
+    esp_task_wdt_reset();
 
-    esp_task_wdt_reset();  // feed after (transfer may take several seconds)
-    if (loaded) {
-      if (pendPad >= 0 && pendPad < 16) {
-        setTrackSynthEngine(pendPad, -1);
-        spiMaster.dsqSetTrackEngine((uint8_t)pendPad, -1);
-        spiMaster.dsqSetMute((uint8_t)pendPad, false);
+    if (decoded) {
+      s_padXfer = PadXferState{};
+      s_padXfer.active  = true;
+      s_padXfer.pad     = pendPad;
+      s_padXfer.buf     = sampleManager.getSampleBuffer(pendPad);
+      s_padXfer.total   = sampleManager.getSampleLength(pendPad);
+      s_padXfer.begun   = false;
+      s_padXfer.startMs = now;
+      if (!s_padXfer.buf || s_padXfer.total == 0) {
+        s_padXfer.active = false;
+        broadcastUploadComplete(pendPad, false, "Decoded sample empty");
       }
-      broadcastUploadComplete(pendPad, true, "Sample uploaded and loaded successfully");
-      broadcastSequencerState();
+      // success is broadcast by pumpPadTransfer() when the transfer completes
     } else {
       String errDetail = String(sampleManager.getLastParseError());
       String errMsg = errDetail.length() ? "Failed to load: " + errDetail : "Failed to load sample";
