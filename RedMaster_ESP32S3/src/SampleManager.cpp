@@ -177,7 +177,8 @@ bool SampleManager::parseWavFile(fs::File& file, int padIndex, String& errOut) {
   uint32_t numSamples = dataSize / (bytesPerSample * numChannels);
 
   if (!allocateSampleBuffer(padIndex, numSamples)) {
-    errOut = "No PSRAM for sample";
+    errOut = "No PSRAM for sample (free " + String((uint32_t)(ESP.getFreePsram() / 1024)) +
+             "KB, need " + String((uint32_t)(numSamples * 2 / 1024)) + "KB)";
     return false;
   }
 
@@ -463,7 +464,8 @@ bool SampleManager::parseWavFromBuffer(const uint8_t* buf, size_t size, int padI
   uint32_t numSamples = dataSize / (bytesPerSample * numChannels);
 
   if (!allocateSampleBuffer(padIndex, numSamples)) {
-    errOut = "No PSRAM for sample"; return false;
+    errOut = "No PSRAM for sample (free " + String((uint32_t)(ESP.getFreePsram() / 1024)) +
+             "KB, need " + String((uint32_t)(numSamples * 2 / 1024)) + "KB)"; return false;
   }
 
   const uint8_t* src = buf + dataPos;

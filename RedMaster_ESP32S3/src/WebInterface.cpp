@@ -6844,7 +6844,8 @@ void WebInterface::handleCleanTrackUpload(AsyncWebServerRequest *request, String
       response["success"] = false;
       response["reason"] = "not_initialized";
       response["lastInitError"] = s_cleanTrackLastInitError[0] ? s_cleanTrackLastInitError : "none";
-      response["message"] = "Clean track upload not initialized";
+      response["message"] = String("Clean track not initialized: ") +
+                            (s_cleanTrackLastInitError[0] ? s_cleanTrackLastInitError : "unknown");
       String output;
       serializeJson(response, output);
       request->send(500, "application/json", output);
