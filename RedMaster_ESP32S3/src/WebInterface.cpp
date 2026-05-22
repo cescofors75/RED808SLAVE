@@ -2955,17 +2955,26 @@ void WebInterface::update() {
 
     bool loaded = false;
     if (_uploadBuf && _uploadBufLen > 0) {
-      loaded = sampleManager.loadSampleFromBuffer(_uploadBuf, _uploadBufLen, pendPad);
-      if (loaded && pendPad >= 0 && pendPad < 16) {
-        // Persistir WAV en LittleFS para recarga automática tras reboot de Daisy
+      if (pendPad >= 0 && pendPad < 16) {
+        // Persist the WAV, then FREE the raw upload buffer BEFORE decoding, so we
+        // never hold the whole file (several MB) AND the decoded sample in PSRAM
+        // at the same time — that double allocation is what reset the S3 on large
+        // uploads (>~1MB). Load from the persisted file, which reads incrementally.
+        bool persisted = false;
         if (!LittleFS.exists("/samples")) LittleFS.mkdir("/samples");
         char fsPath[28];
         snprintf(fsPath, sizeof(fsPath), "/samples/pad%d.wav", pendPad);
         File wf = LittleFS.open(fsPath, "w");
-        if (wf) { wf.write(_uploadBuf, _uploadBufLen); wf.close(); }
+        if (wf) { persisted = (wf.write(_uploadBuf, _uploadBufLen) == (size_t)_uploadBufLen); wf.close(); }
+        free(_uploadBuf); _uploadBuf = nullptr; _uploadBufLen = 0;
+        esp_task_wdt_reset();
+        if (persisted) loaded = sampleManager.loadSample(fsPath, pendPad);
+      } else {
+        // pad >= 16 (no persistence slot): decode straight from the buffer.
+        loaded = sampleManager.loadSampleFromBuffer(_uploadBuf, _uploadBufLen, pendPad);
       }
     }
-    // Liberar buffer raw tras la carga (ya decodificado en PSRAM del sampleBuffer)
+    // Free the raw buffer if it wasn't already (pad >= 16 path, or error).
     if (_uploadBuf) { free(_uploadBuf); _uploadBuf = nullptr; _uploadBufLen = 0; }
 
     esp_task_wdt_reset();  // feed after (transfer may take several seconds)
