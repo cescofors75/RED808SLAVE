@@ -284,17 +284,18 @@ static int findFirstFreeCleanTrackSlot() {
   for (int i = 0; i < kCleanTrackCount; ++i) {
     if (!s_cleanTracks[i].occupied) return i;
   }
-  // Reclaim a slot left occupied by a FAILED load so failed uploads don't
-  // permanently block new ones (and free its orphaned file on LittleFS, which
-  // otherwise eats the 11MB partition → fs_full). Good (loaded) stems are kept.
+  // No free slot: reclaim ALL slots left occupied by a FAILED load — delete
+  // their orphaned files (freeing the 11MB FS) and clear them, so failed uploads
+  // never permanently block new ones or eat storage. Good (loaded) stems kept.
+  int reclaimed = -1;
   for (int i = 0; i < kCleanTrackCount; ++i) {
     if (s_cleanTracks[i].loadFailed) {
       if (s_cleanTracks[i].filePath[0]) LittleFS.remove(s_cleanTracks[i].filePath);
       clearCleanTrackSlot(s_cleanTracks[i], i);
-      return i;
+      if (reclaimed < 0) reclaimed = i;
     }
   }
-  return -1;
+  return reclaimed;
 }
 
 static bool parseWavFileHeader(File& file, uint16_t& channels, uint16_t& bits, uint32_t& dataOffset, uint32_t& dataSize, char* err, size_t errLen) {
@@ -1639,13 +1640,13 @@ refresh();if(auto_)startAuto();
       if (target == "cleanTrack") {
         handleCleanTrackUpload(request, filename, index, data, len, final);
       } else {
-        // Pad WAV import: use the robust buffered path — buffer the whole file
-        // in PSRAM, then load it via loadSampleFromBuffer()/transferSample() on
-        // systemTask (Core0), exactly like the xtra pads that work, and persist
-        // it to LittleFS. The previous live-streaming path (handleDaisyUpload)
-        // failed to ACK sample data chunks ("Daisy data chunk failed") and could
-        // reset the S3, because chunks were sent interleaved with WiFi RX.
-        handleUpload(request, filename, index, data, len, final);
+        // Pad/xtra WAV import: stream straight to the Daisy as bytes arrive
+        // (handleDaisyUpload), converting to mono on the fly. We do NOT buffer
+        // the whole WAV in PSRAM — an 8MB S3 can't hold a ~4MB raw file + the
+        // decoded sample at once ("No PSRAM for sample"). The Daisy has 64MB and
+        // stores it. The old "data chunk failed" drops are fixed by backpressure
+        // in processDaisyUploadPcm + the 4MHz sample clock.
+        handleDaisyUpload(request, filename, index, data, len, final);
       }
     }
   );
@@ -6366,9 +6367,16 @@ static void processDaisyUploadPcm(const uint8_t* data, size_t len) {
 
   auto flushPcm = [&]() {
     if (pcmCount == 0) return;
-    if (!pushDaisyUploadBlock(pcm, (uint16_t)pcmCount)) {
-      if (!st.error) daisyUploadError("Daisy upload queue failed");
-      return;
+    // Backpressure instead of dropping: WiFi delivers faster than the SPI link
+    // drains the queue, so wait for room rather than lose audio (which corrupted
+    // the sample / "data chunk failed"). Yields so pumpDaisyUpload (Core0) drains
+    // to the Daisy; TCP naturally slows the sender while we wait.
+    uint32_t tries = 0;
+    while (!pushDaisyUploadBlock(pcm, (uint16_t)pcmCount)) {
+      if (st.error) return;
+      if (++tries > 3000) { daisyUploadError("Daisy upload stalled"); return; }
+      esp_task_wdt_reset();
+      vTaskDelay(pdMS_TO_TICKS(2));
     }
     pcmCount = 0;
   };
@@ -6797,6 +6805,16 @@ void WebInterface::handleCleanTrackUpload(AsyncWebServerRequest *request, String
     // LittleFS y queueNextStoredCleanTrackStream() lo recogera cuando el
     // pump termine la stream en curso.
 
+    // Find the slot FIRST: findFirstFreeCleanTrackSlot() reclaims failed slots
+    // and deletes their orphaned files, which frees FS space. Doing this before
+    // the space check lets a fresh upload reuse the room left by failed ones.
+    int slot = findFirstFreeCleanTrackSlot();
+    if (slot < 0) {
+      sendCleanTrackInitError(request, 409, "no_free_slots", "No free clean track available");
+      s_cleanTrackUpload.active = false;
+      return;
+    }
+
     // Validate free FS space (uploaded file size + small margin for FS metadata).
     {
       size_t totalB = LittleFS.totalBytes();
@@ -6804,17 +6822,12 @@ void WebInterface::handleCleanTrackUpload(AsyncWebServerRequest *request, String
       size_t freeB  = (totalB > usedB) ? (totalB - usedB) : 0;
       size_t needB  = (size_t)request->contentLength() + 8192;
       if (freeB < needB) {
-        sendCleanTrackInitError(request, 507, "fs_full", "Insufficient storage");
+        sendCleanTrackInitError(request, 507, "fs_full",
+            String("Insufficient storage (free ") + String((uint32_t)(freeB/1024)) +
+            "KB, need " + String((uint32_t)(needB/1024)) + "KB)");
         s_cleanTrackUpload.active = false;
         return;
       }
-    }
-
-    int slot = findFirstFreeCleanTrackSlot();
-    if (slot < 0) {
-      sendCleanTrackInitError(request, 409, "no_free_slots", "No free clean track available");
-      s_cleanTrackUpload.active = false;
-      return;
     }
 
     if (!ensureCleanTracksDir()) {
