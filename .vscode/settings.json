@@ -1,3 +1,4 @@
 {
-    "git.ignoreLimitWarning": true
+    "git.ignoreLimitWarning": true,
+    "cmake.sourceDirectory": "C:/Users/cesco/Documents/Arduino/XboxBLE/RedMaster_DaisySeed64MB/DaisySeed/DaisySP"
 }
