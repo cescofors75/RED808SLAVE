@@ -27,15 +27,20 @@ static constexpr uint8_t BYTEBUTTON_LED_RGB888_REG = 0x20;
 static constexpr uint8_t BYTEBUTTON_LED_COUNT = BYTEBUTTON_BUTTONS + 1;
 static constexpr uint8_t BYTEBUTTON_LED_USER_DEFINED = 0;
 static constexpr uint8_t BYTEBUTTON_BRIGHTNESS = 120;
+static constexpr uint8_t M5_REG_BASE_ABS = 0x00;
+static constexpr uint8_t M5_REG_BASE_BUTTON_VALUE = 0x50;
+static constexpr uint8_t M5_COUNTER_BULK_BYTES = ENCODERS_PER_MODULE * 4;
+static constexpr uint8_t M5_BUTTON_BULK_BYTES = ENCODERS_PER_MODULE;
 static constexpr unsigned long I2C_BOOT_GUARD_MS = 2000;
 static constexpr unsigned long I2C_SCAN_SETTLE_MS = 12;
 static constexpr unsigned long I2C_RESCAN_INTERVAL_MS = 8000;
-static constexpr int I2C_SCAN_RETRIES = 4;
+static constexpr int I2C_SCAN_RETRIES = 8;
+static constexpr int I2C_HUB_DETECT_RETRIES = 6;
 static constexpr uint8_t I2C_HUB_ADDR_MIN = 0x70;
 static constexpr uint8_t I2C_HUB_ADDR_MAX = 0x77;
 static constexpr unsigned long WIFI_STATUS_SEND_MS = 3000;
 static constexpr unsigned long UI_REFRESH_MS = 120;
-static constexpr unsigned long INPUT_POLL_MS = 25;
+static constexpr unsigned long INPUT_POLL_MS = 15;
 static constexpr unsigned long UDP_POLL_MS = 10;
 static constexpr unsigned long MASTER_RX_TIMEOUT_MS = 10000;
 
@@ -85,6 +90,59 @@ struct EncoderEvent {
 bool i2c_device_present_raw(uint8_t addr) {
     Wire.beginTransmission(addr);
     return Wire.endTransmission() == 0;
+}
+
+bool m5_read_register_block_raw(uint8_t reg, uint8_t* data, uint8_t length) {
+    if (!data || length == 0) {
+        return false;
+    }
+
+    Wire.beginTransmission(M5_ENCODER_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) {
+        return false;
+    }
+
+    if (Wire.requestFrom((uint8_t)M5_ENCODER_ADDR, length) != length) {
+        return false;
+    }
+
+    for (uint8_t i = 0; i < length; ++i) {
+        if (!Wire.available()) {
+            return false;
+        }
+        data[i] = Wire.read();
+    }
+
+    return true;
+}
+
+bool m5_read_bulk_state_raw(int32_t* counters, bool* pressed) {
+    if (!counters || !pressed) {
+        return false;
+    }
+
+    uint8_t counterBytes[M5_COUNTER_BULK_BYTES] = {};
+    uint8_t buttonBytes[M5_BUTTON_BULK_BYTES] = {};
+    if (!m5_read_register_block_raw(M5_REG_BASE_ABS, counterBytes, sizeof(counterBytes))) {
+        return false;
+    }
+    if (!m5_read_register_block_raw(M5_REG_BASE_BUTTON_VALUE, buttonBytes, sizeof(buttonBytes))) {
+        return false;
+    }
+
+    for (int encoder = 0; encoder < ENCODERS_PER_MODULE; ++encoder) {
+        const int offset = encoder * 4;
+        const uint32_t raw =
+            (uint32_t)counterBytes[offset] |
+            ((uint32_t)counterBytes[offset + 1] << 8) |
+            ((uint32_t)counterBytes[offset + 2] << 16) |
+            ((uint32_t)counterBytes[offset + 3] << 24);
+        counters[encoder] = (int32_t)raw;
+        pressed[encoder] = buttonBytes[encoder] == 0;
+    }
+
+    return true;
 }
 
 void clear_i2c_scan_state() {
@@ -186,10 +244,20 @@ void log_root_i2c_scan() {
 }
 
 uint8_t detect_i2c_hub_addr() {
-    for (uint8_t addr = I2C_HUB_ADDR_MIN; addr <= I2C_HUB_ADDR_MAX; ++addr) {
-        if (i2c_device_present(addr)) {
-            return addr;
+    for (int attempt = 0; attempt < I2C_HUB_DETECT_RETRIES; ++attempt) {
+        if (i2c_lock(120)) {
+            for (uint8_t addr = I2C_HUB_ADDR_MIN; addr <= I2C_HUB_ADDR_MAX; ++addr) {
+                Wire.beginTransmission(addr);
+                Wire.write(0);
+                if (Wire.endTransmission() == 0) {
+                    i2c_unlock();
+                    delay(5);
+                    return addr;
+                }
+            }
+            i2c_unlock();
         }
+        delay(40 + attempt * 20);
     }
     return 0;
 }
@@ -205,15 +273,19 @@ constexpr uint8_t kByteButtonFixedChannels[BYTEBUTTON_COUNT] = {
 };
 
 bool init_encoder_module_on_channel(int moduleIndex, uint8_t channel) {
+    if (g_state.m5Connected[moduleIndex] && g_state.m5Channel[moduleIndex] == channel) {
+        return true;
+    }
+
     i2c_hub_select_raw(channel);
     delay(I2C_SCAN_SETTLE_MS);
 
     const bool encoderPresent = i2c_device_present_raw(M5_ENCODER_ADDR);
-    g_state.hubChannelHasEncoder[channel] = encoderPresent;
     if (!encoderPresent) {
         i2c_hub_deselect_raw();
         return false;
     }
+    g_state.hubChannelHasEncoder[channel] = true;
 
     if (!g_m5[moduleIndex].begin()) {
         i2c_hub_deselect_raw();
@@ -233,15 +305,19 @@ bool init_encoder_module_on_channel(int moduleIndex, uint8_t channel) {
 }
 
 bool init_bytebutton_module_on_channel(int moduleIndex, uint8_t channel) {
+    if (g_state.byteButtonConnected[moduleIndex] && g_state.byteButtonChannel[moduleIndex] == channel) {
+        return true;
+    }
+
     i2c_hub_select_raw(channel);
     delay(I2C_SCAN_SETTLE_MS);
 
     const bool byteButtonPresent = i2c_device_present_raw(BYTEBUTTON_ADDR);
-    g_state.hubChannelHasByteButton[channel] = byteButtonPresent;
     if (!byteButtonPresent) {
         i2c_hub_deselect_raw();
         return false;
     }
+    g_state.hubChannelHasByteButton[channel] = true;
 
     g_state.byteButtonConnected[moduleIndex] = true;
     g_state.byteButtonChannel[moduleIndex] = channel;
@@ -251,14 +327,17 @@ bool init_bytebutton_module_on_channel(int moduleIndex, uint8_t channel) {
 
 void scan_i2c_hub() {
     g_state.lastI2cScanMs = millis();
-    log_root_i2c_scan();
 
     const uint8_t detectedHubAddr = detect_i2c_hub_addr();
     if (detectedHubAddr == 0) {
-        g_state.hubDetected = false;
+        log_root_i2c_scan();
+        if (g_state.hubDetected) {
+            Serial.println("[I2C] Hub no responde en este scan; se conserva el ultimo estado conocido");
+            return;
+        }
+
         g_state.hubAddress = I2C_HUB_ADDR;
         i2c_set_hub_addr(I2C_HUB_ADDR);
-        clear_i2c_scan_state();
         Serial.println("[I2C] Hub no detectado en 0x70-0x77");
         return;
     }
@@ -271,7 +350,6 @@ void scan_i2c_hub() {
     g_state.hubDetected = true;
     g_state.hubAddress = detectedHubAddr;
     i2c_set_hub_addr(detectedHubAddr);
-    clear_i2c_scan_state();
 
     Serial.printf("[I2C] Scan hub 0x%02X (mapa fijo)\n", g_state.hubAddress);
 
@@ -281,8 +359,12 @@ void scan_i2c_hub() {
 
         const bool encoderPresent = i2c_device_present_raw(M5_ENCODER_ADDR);
         const bool byteButtonPresent = i2c_device_present_raw(BYTEBUTTON_ADDR);
-        g_state.hubChannelHasEncoder[ch] = encoderPresent;
-        g_state.hubChannelHasByteButton[ch] = byteButtonPresent;
+        if (encoderPresent) {
+            g_state.hubChannelHasEncoder[ch] = true;
+        }
+        if (byteButtonPresent) {
+            g_state.hubChannelHasByteButton[ch] = true;
+        }
 
         Serial.printf(
             "[I2C] ch%u -> 0x41:%s 0x47:%s\n",
@@ -342,12 +424,15 @@ void scan_i2c_hub() {
 }
 
 void scan_i2c_hub_with_retries() {
+    clear_i2c_scan_state();
+    g_state.hubDetected = false;
+
     for (int attempt = 0; attempt < I2C_SCAN_RETRIES; ++attempt) {
         scan_i2c_hub();
         if (all_i2c_modules_detected()) {
             return;
         }
-        delay(120 + attempt * 80);
+        delay(140 + attempt * 90);
     }
 }
 
@@ -724,27 +809,22 @@ void poll_m5_inputs() {
     for (int moduleIndex = 0; moduleIndex < M5_ENCODER_MODULES; ++moduleIndex) {
         if (!g_state.m5Connected[moduleIndex]) continue;
         EncoderEvent pendingEvents[ENCODERS_PER_MODULE] = {};
+        int32_t counters[ENCODERS_PER_MODULE] = {};
+        bool pressedState[ENCODERS_PER_MODULE] = {};
 
         if (!i2c_lock(15)) continue;
         i2c_hub_select_raw(g_state.m5Channel[moduleIndex]);
-        const uint8_t encoderChangeMask = g_m5[moduleIndex].getEncoderChangeMask();
-        const uint8_t buttonChangeMask = g_m5[moduleIndex].getButtonChangeMask();
+        const bool readOk = m5_read_bulk_state_raw(counters, pressedState);
+        i2c_hub_deselect_raw();
+        i2c_unlock();
+
+        if (!readOk) {
+            continue;
+        }
+
         for (int encoder = 0; encoder < ENCODERS_PER_MODULE; ++encoder) {
-            const bool encoderChanged = (encoderChangeMask & (1U << encoder)) != 0;
-            const bool buttonChanged = (buttonChangeMask & (1U << encoder)) != 0;
-            if (!encoderChanged && !buttonChanged) {
-                continue;
-            }
-
-            int32_t value = g_state.encoderValue[moduleIndex][encoder];
-            bool pressed = g_state.encoderPressed[moduleIndex][encoder];
-
-            if (encoderChanged) {
-                value = g_m5[moduleIndex].getAbsCounter(encoder);
-            }
-            if (buttonChanged) {
-                pressed = g_m5[moduleIndex].getKeyPressed(encoder);
-            }
+            const int32_t value = counters[encoder];
+            const bool pressed = pressedState[encoder];
 
             if (value != g_state.encoderValue[moduleIndex][encoder] ||
                 pressed != g_state.encoderPressed[moduleIndex][encoder]) {
@@ -757,8 +837,6 @@ void poll_m5_inputs() {
                 pendingEvents[encoder].pressed = pressed;
             }
         }
-        i2c_hub_deselect_raw();
-        i2c_unlock();
 
         for (const EncoderEvent& event : pendingEvents) {
             if (!event.pending) {
