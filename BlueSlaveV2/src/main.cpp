@@ -39,6 +39,16 @@ static constexpr unsigned long INPUT_POLL_MS = 15;
 static constexpr unsigned long UDP_POLL_MS = 10;
 static constexpr unsigned long MASTER_RX_TIMEOUT_MS = 10000;
 
+static constexpr int TRACK_COUNT = M5_ENCODER_MODULES * ENCODERS_PER_MODULE;   // 16
+static constexpr int VOL_MIN = 0;
+static constexpr int VOL_MAX = 150;
+static constexpr int VOL_STEP = 2;            // track volume change per encoder detent (tunable)
+static constexpr int TEMPO_MIN = 40;
+static constexpr int TEMPO_MAX = 240;
+static constexpr int TEMPO_STEP = 1;
+static constexpr int MASTER_VOL_STEP = 5;
+static constexpr int PATTERN_COUNT = 16;
+
 struct AppState {
     bool hubDetected = false;
     uint8_t hubAddress = I2C_HUB_ADDR;
@@ -52,6 +62,14 @@ struct AppState {
     bool byteButtonConnected[BYTEBUTTON_COUNT] = {false, false};
     int byteButtonChannel[BYTEBUTTON_COUNT] = {-1, -1};
     uint8_t byteButtonMask[BYTEBUTTON_COUNT] = {};
+    // Shadow of master state (kept in sync from state_sync, mutated optimistically).
+    bool playing = false;
+    int currentPattern = 0;
+    int tempoBpm = 120;
+    int masterVolume = 100;
+    int trackVolume[TRACK_COUNT] = {};   // initialised to 100 in setup()
+    bool trackMuted[TRACK_COUNT] = {};
+    char lastAction[40] = "-";
     bool wifiEverConnected = false;
     bool masterSeen = false;
     IPAddress localIp;
@@ -72,14 +90,11 @@ esp_lcd_panel_handle_t g_lcdPanel = nullptr;
 lv_obj_t* g_screen = nullptr;
 lv_obj_t* g_statusLabel = nullptr;
 static char g_statusText[1536];
+static char g_rxBuf[2048];
 
-struct EncoderEvent {
-    bool pending = false;
-    int moduleIndex = 0;
-    int encoderIndex = 0;
-    int32_t value = 0;
-    bool pressed = false;
-};
+int clampi(int v, int lo, int hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
 
 bool i2c_device_present_raw(uint8_t addr) {
     Wire.beginTransmission(addr);
@@ -382,22 +397,130 @@ void send_status_packet() {
     g_state.lastStatusSendMs = millis();
 }
 
-void send_encoder_event(int moduleIndex, int encoderIndex, int32_t value, bool pressed) {
+// ── Master command senders (RED808 JSON contract) ───────────────────────────
+void send_simple_cmd(const char* cmd) {
     JsonDocument doc;
-    doc["type"] = "encoder";
-    doc["module"] = moduleIndex + 1;
-    doc["index"] = encoderIndex + 1;
-    doc["value"] = value;
-    doc["pressed"] = pressed;
+    doc["cmd"] = cmd;
     send_udp_json(doc);
 }
 
-void send_bytebutton_event(int moduleIndex, uint8_t mask) {
+void send_track_volume(int track, int volume) {
     JsonDocument doc;
-    doc["type"] = "bytebutton";
-    doc["module"] = moduleIndex + 1;
-    doc["mask"] = mask;
+    doc["cmd"] = "setTrackVolume";
+    doc["track"] = track;
+    doc["volume"] = volume;
     send_udp_json(doc);
+}
+
+void send_mute(int track, bool value) {
+    JsonDocument doc;
+    doc["cmd"] = "mute";
+    doc["track"] = track;
+    doc["value"] = value;
+    send_udp_json(doc);
+}
+
+void send_select_pattern(int index) {
+    JsonDocument doc;
+    doc["cmd"] = "selectPattern";
+    doc["index"] = index;
+    send_udp_json(doc);
+}
+
+void send_tempo(int bpm) {
+    JsonDocument doc;
+    doc["cmd"] = "tempo";
+    doc["value"] = bpm;
+    send_udp_json(doc);
+}
+
+void send_master_volume(int volume) {
+    JsonDocument doc;
+    doc["cmd"] = "setVolume";
+    doc["value"] = volume;
+    send_udp_json(doc);
+}
+
+// Button layout (16 buttons = 2x ByteButton). Edit this switch to remap.
+//  0 Play/Pause  1 Stop  2 Pattern-  3 Pattern+  4 BPM-  5 BPM+  6 Vol-  7 Vol+
+//  8..15 -> select pattern 1..8 directly
+void do_button_action(int buttonIndex) {
+    switch (buttonIndex) {
+        case 0:
+            g_state.playing = !g_state.playing;
+            send_simple_cmd(g_state.playing ? "start" : "stop");
+            snprintf(g_state.lastAction, sizeof(g_state.lastAction), "%s", g_state.playing ? "PLAY" : "PAUSE");
+            break;
+        case 1:
+            g_state.playing = false;
+            send_simple_cmd("stop");
+            snprintf(g_state.lastAction, sizeof(g_state.lastAction), "STOP");
+            break;
+        case 2:
+            g_state.currentPattern = (g_state.currentPattern + PATTERN_COUNT - 1) % PATTERN_COUNT;
+            send_select_pattern(g_state.currentPattern);
+            snprintf(g_state.lastAction, sizeof(g_state.lastAction), "PAT %d", g_state.currentPattern + 1);
+            break;
+        case 3:
+            g_state.currentPattern = (g_state.currentPattern + 1) % PATTERN_COUNT;
+            send_select_pattern(g_state.currentPattern);
+            snprintf(g_state.lastAction, sizeof(g_state.lastAction), "PAT %d", g_state.currentPattern + 1);
+            break;
+        case 4:
+            g_state.tempoBpm = clampi(g_state.tempoBpm - TEMPO_STEP, TEMPO_MIN, TEMPO_MAX);
+            send_tempo(g_state.tempoBpm);
+            snprintf(g_state.lastAction, sizeof(g_state.lastAction), "BPM %d", g_state.tempoBpm);
+            break;
+        case 5:
+            g_state.tempoBpm = clampi(g_state.tempoBpm + TEMPO_STEP, TEMPO_MIN, TEMPO_MAX);
+            send_tempo(g_state.tempoBpm);
+            snprintf(g_state.lastAction, sizeof(g_state.lastAction), "BPM %d", g_state.tempoBpm);
+            break;
+        case 6:
+            g_state.masterVolume = clampi(g_state.masterVolume - MASTER_VOL_STEP, VOL_MIN, VOL_MAX);
+            send_master_volume(g_state.masterVolume);
+            snprintf(g_state.lastAction, sizeof(g_state.lastAction), "VOL %d", g_state.masterVolume);
+            break;
+        case 7:
+            g_state.masterVolume = clampi(g_state.masterVolume + MASTER_VOL_STEP, VOL_MIN, VOL_MAX);
+            send_master_volume(g_state.masterVolume);
+            snprintf(g_state.lastAction, sizeof(g_state.lastAction), "VOL %d", g_state.masterVolume);
+            break;
+        default: {
+            const int pattern = buttonIndex - 8;
+            if (pattern >= 0 && pattern < PATTERN_COUNT) {
+                g_state.currentPattern = pattern;
+                send_select_pattern(pattern);
+                snprintf(g_state.lastAction, sizeof(g_state.lastAction), "PAT %d", pattern + 1);
+            }
+            break;
+        }
+    }
+}
+
+// Master is authoritative: refresh the shadow from its periodic snapshot.
+void apply_state_sync(const JsonDocument& doc) {
+    if (!doc["playing"].isNull()) g_state.playing = doc["playing"].as<bool>();
+    if (!doc["tempo"].isNull()) g_state.tempoBpm = (int)doc["tempo"].as<float>();
+    if (!doc["masterVolume"].isNull()) g_state.masterVolume = doc["masterVolume"].as<int>();
+    if (!doc["pattern"].isNull()) g_state.currentPattern = doc["pattern"].as<int>();
+
+    JsonArrayConst vols = doc["trackVolumes"].as<JsonArrayConst>();
+    if (!vols.isNull()) {
+        int i = 0;
+        for (JsonVariantConst v : vols) {
+            if (i >= TRACK_COUNT) break;
+            g_state.trackVolume[i++] = clampi(v.as<int>(), VOL_MIN, VOL_MAX);
+        }
+    }
+    JsonArrayConst mutes = doc["mute"].as<JsonArrayConst>();
+    if (!mutes.isNull()) {
+        int i = 0;
+        for (JsonVariantConst m : mutes) {
+            if (i >= TRACK_COUNT) break;
+            g_state.trackMuted[i++] = m.as<bool>();
+        }
+    }
 }
 
 void handle_udp_rx() {
@@ -408,21 +531,22 @@ void handle_udp_rx() {
     int packetSize = g_udp.parsePacket();
     if (packetSize <= 0) return;
 
-    char buffer[96] = {};
-    int len = g_udp.read(buffer, sizeof(buffer) - 1);
+    int len = g_udp.read(g_rxBuf, sizeof(g_rxBuf) - 1);
     if (len < 0) return;
-    buffer[len] = '\0';
-    strncpy(g_state.lastRx, buffer, sizeof(g_state.lastRx) - 1);
+    g_rxBuf[len] = '\0';
+    strncpy(g_state.lastRx, g_rxBuf, sizeof(g_state.lastRx) - 1);
     g_state.lastRx[sizeof(g_state.lastRx) - 1] = '\0';
     g_state.lastRxMs = millis();
     g_state.masterSeen = true;
 
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, buffer);
+    DeserializationError err = deserializeJson(doc, g_rxBuf);
     if (!err) {
         const char* cmd = doc["cmd"] | doc["type"] | "";
         if (strcmp(cmd, "ping") == 0 || strcmp(cmd, "hello") == 0) {
             send_status_packet();
+        } else if (strcmp(cmd, "state_sync") == 0) {
+            apply_state_sync(doc);
         }
     }
 }
@@ -474,46 +598,25 @@ void ensure_wifi() {
     WiFi.begin(WiFiConfig::SSID, WiFiConfig::PASSWORD);
 }
 
-void format_bytebutton_bits(uint8_t mask, char* out, size_t outSize) {
+// Formats 8 tracks "NN:vol" with a red M marker when muted.
+void format_track_vol_row(int startTrack, char* out, size_t outSize) {
     if (!out || outSize == 0) {
         return;
     }
 
     size_t used = 0;
-    for (int i = 0; i < BYTEBUTTON_BUTTONS; ++i) {
-        const bool pressed = (mask & (1U << i)) != 0;
+    for (int i = 0; i < 8; ++i) {
+        const int t = startTrack + i;
+        const bool muted = g_state.trackMuted[t];
         const int written = snprintf(
             out + used,
             outSize - used,
-            "%d:%s%s",
-            i + 1,
-            pressed ? "#4cff88 ON#" : "#ff4d4d off#",
-            (i + 1) < BYTEBUTTON_BUTTONS ? "  " : "");
-        if (written <= 0) {
-            break;
-        }
-        used += (size_t)written;
-        if (used >= outSize) {
-            out[outSize - 1] = '\0';
-            break;
-        }
-    }
-}
-
-void format_encoder_press_row(bool pressed[ENCODERS_PER_MODULE], char* out, size_t outSize) {
-    if (!out || outSize == 0) {
-        return;
-    }
-
-    size_t used = 0;
-    for (int i = 0; i < ENCODERS_PER_MODULE; ++i) {
-        const int written = snprintf(
-            out + used,
-            outSize - used,
-            "%d:%s%s",
-            i + 1,
-            pressed[i] ? "#4cff88 P#" : "#ff4d4d -#",
-            (i + 1) < ENCODERS_PER_MODULE ? "  " : "");
+            "%02d:%s%d%s%s",
+            t + 1,
+            muted ? "#ff4d4d " : "#9fe8ff ",
+            g_state.trackVolume[t],
+            muted ? "M#" : "#",
+            (i < 7) ? "  " : "");
         if (written <= 0) {
             break;
         }
@@ -532,105 +635,51 @@ void build_status_text(char* out, size_t outSize) {
         g_state.masterSeen &&
         g_state.lastRxMs != 0 &&
         (millis() - g_state.lastRxMs) < MASTER_RX_TIMEOUT_MS;
-    const bool m5AllOk = g_state.m5Connected[0] && g_state.m5Connected[1];
-    const bool byteButtonsAllOk = g_state.byteButtonConnected[0] && g_state.byteButtonConnected[1];
 
     const char* wifiState = wifiOk ? "#4cff88 conectado#" : "#ff9f1c buscando#";
     const char* masterState = masterOk ? "#4cff88 ok#" : "#ff4d4d sin respuesta#";
     const char* hubState = hubOk ? "#4cff88 detectado#" : "#ff4d4d no detectado#";
-    const char* m5Summary = m5AllOk ? "#4cff88 OK#" : "#ff9f1c incompleto#";
-    const char* byteButtonSummary = byteButtonsAllOk ? "#4cff88 OK#" : "#ff9f1c incompleto#";
-    char byteButton1Bits[160] = {};
-    char byteButton2Bits[160] = {};
-    char encoderPressM1[128] = {};
-    char encoderPressM2[128] = {};
-    char hubMap[256] = {};
+    const char* transport = g_state.playing ? "#4cff88 PLAY#" : "#ff9f1c STOP#";
 
-    format_bytebutton_bits(g_state.byteButtonMask[0], byteButton1Bits, sizeof(byteButton1Bits));
-    format_bytebutton_bits(g_state.byteButtonMask[1], byteButton2Bits, sizeof(byteButton2Bits));
-    format_encoder_press_row(g_state.encoderPressed[0], encoderPressM1, sizeof(encoderPressM1));
-    format_encoder_press_row(g_state.encoderPressed[1], encoderPressM2, sizeof(encoderPressM2));
+    int encCount = 0, bbCount = 0;
+    for (int i = 0; i < M5_ENCODER_MODULES; ++i) if (g_state.m5Connected[i]) ++encCount;
+    for (int i = 0; i < BYTEBUTTON_COUNT; ++i) if (g_state.byteButtonConnected[i]) ++bbCount;
 
-    size_t used = 0;
-    for (int ch = 0; ch < 8; ++ch) {
-        const int written = snprintf(
-            hubMap + used,
-            sizeof(hubMap) - used,
-            "ch%d[%s%s]%s",
-            ch,
-            g_state.hubChannelHasEncoder[ch] ? "E" : "-",
-            g_state.hubChannelHasByteButton[ch] ? "B" : "-",
-            ch < 7 ? "  " : "");
-        if (written <= 0) {
-            break;
-        }
-        used += (size_t)written;
-        if (used >= sizeof(hubMap)) {
-            hubMap[sizeof(hubMap) - 1] = '\0';
-            break;
-        }
-    }
+    char volRow1[200] = {};
+    char volRow2[200] = {};
+    format_track_vol_row(0, volRow1, sizeof(volRow1));
+    format_track_vol_row(8, volRow2, sizeof(volRow2));
 
     snprintf(
         out,
         outSize,
-        "#4da6ff BlueSlave Console#\n"
+        "#4da6ff RED808 Surface#\n"
         "\n"
         "#4da6ff [RED]#\n"
-        "WiFi      : %s\n"
-        "IP        : %s\n"
+        "WiFi      : %s    IP: %s\n"
         "Master UDP: %s\n"
+        "I2C hub   : %s 0x%02X   Enc %d/2   Btn %d/2\n"
         "\n"
-        "#4da6ff [I2C HUB 0x%02X]#\n"
-        "Hub       : %s\n"
-        "Encoder8  : %s\n"
-        "ByteButton: %s\n"
-        "Mapa      : %s\n"
+        "#4da6ff [TRANSPORTE]#\n"
+        "Estado : %s    Patron: %d/%d    BPM: %d    MasterVol: %d\n"
         "\n"
-        "#4da6ff [ENCODER8 A]#\n"
-        "Canal/FW  : ch%d fw%d\n"
-        "Valores   : %ld %ld %ld %ld %ld %ld %ld %ld\n"
-        "Pulsacion : %s\n"
+        "#4da6ff [VOLUMEN TRACKS]  (M = mute, encoder gira=vol / pulsa=mute)#\n"
+        "%s\n"
+        "%s\n"
         "\n"
-        "#4da6ff [ENCODER8 B]#\n"
-        "Canal/FW  : ch%d fw%d\n"
-        "Valores   : %ld %ld %ld %ld %ld %ld %ld %ld\n"
-        "Pulsacion : %s\n"
-        "\n"
-        "#4da6ff [BYTEBUTTON A]#\n"
-        "Canal     : ch%d\n"
-        "Mascara   : 0x%02X\n"
-        "Botones   : %s\n"
-        "\n"
-        "#4da6ff [BYTEBUTTON B]#\n"
-        "Canal     : ch%d\n"
-        "Mascara   : 0x%02X\n"
-        "Botones   : %s\n"
+        "#4da6ff [BOTONES]  1Play 2Stop 3Pat- 4Pat+ 5BPM- 6BPM+ 7Vol- 8Vol+ 9-16 Patron#\n"
+        "Ultima accion: %s\n"
         "\n"
         "#4da6ff [RX]#\n"
         "%s",
         wifiState,
         wifiOk ? WiFi.localIP().toString().c_str() : "#ff4d4d 0.0.0.0#",
         masterState,
-        g_state.hubAddress,
-        hubState,
-        m5Summary,
-        byteButtonSummary,
-        hubMap,
-        g_state.m5Channel[0], g_state.m5Version[0],
-        (long)g_state.encoderValue[0][0], (long)g_state.encoderValue[0][1],
-        (long)g_state.encoderValue[0][2], (long)g_state.encoderValue[0][3],
-        (long)g_state.encoderValue[0][4], (long)g_state.encoderValue[0][5],
-        (long)g_state.encoderValue[0][6], (long)g_state.encoderValue[0][7],
-        encoderPressM1,
-        g_state.m5Channel[1], g_state.m5Version[1],
-        (long)g_state.encoderValue[1][0], (long)g_state.encoderValue[1][1],
-        (long)g_state.encoderValue[1][2], (long)g_state.encoderValue[1][3],
-        (long)g_state.encoderValue[1][4], (long)g_state.encoderValue[1][5],
-        (long)g_state.encoderValue[1][6], (long)g_state.encoderValue[1][7],
-        encoderPressM2,
-        g_state.byteButtonChannel[0], g_state.byteButtonMask[0], byteButton1Bits,
-        g_state.byteButtonChannel[1], g_state.byteButtonMask[1], byteButton2Bits,
+        hubState, g_state.hubAddress, encCount, bbCount,
+        transport, g_state.currentPattern + 1, PATTERN_COUNT, g_state.tempoBpm, g_state.masterVolume,
+        volRow1,
+        volRow2,
+        g_state.lastAction,
         g_state.lastRx);
 }
 
@@ -674,10 +723,11 @@ void refresh_ui(bool force = false) {
     lvgl_port_unlock();
 }
 
+// Encoder N -> track N volume (turn) and mute toggle (press).
+// Module 0 -> tracks 0..7, module 1 -> tracks 8..15.
 void poll_m5_inputs() {
     for (int moduleIndex = 0; moduleIndex < M5_ENCODER_MODULES; ++moduleIndex) {
         if (!g_state.m5Connected[moduleIndex]) continue;
-        EncoderEvent pendingEvents[ENCODERS_PER_MODULE] = {};
         int32_t counters[ENCODERS_PER_MODULE] = {};
         bool pressedState[ENCODERS_PER_MODULE] = {};
 
@@ -698,26 +748,27 @@ void poll_m5_inputs() {
         }
 
         for (int encoder = 0; encoder < ENCODERS_PER_MODULE; ++encoder) {
-            const int32_t value = counters[encoder];
+            const int track = moduleIndex * ENCODERS_PER_MODULE + encoder;
+
+            const int32_t newAbs = counters[encoder];
+            const int32_t delta = newAbs - g_state.encoderValue[moduleIndex][encoder];
+            if (delta != 0) {
+                g_state.encoderValue[moduleIndex][encoder] = newAbs;
+                const int vol = clampi(g_state.trackVolume[track] + (int)delta * VOL_STEP, VOL_MIN, VOL_MAX);
+                if (vol != g_state.trackVolume[track]) {
+                    g_state.trackVolume[track] = vol;
+                    send_track_volume(track, vol);
+                }
+            }
+
             const bool pressed = pressedState[encoder];
-
-            if (value != g_state.encoderValue[moduleIndex][encoder] ||
-                pressed != g_state.encoderPressed[moduleIndex][encoder]) {
-                g_state.encoderValue[moduleIndex][encoder] = value;
-                g_state.encoderPressed[moduleIndex][encoder] = pressed;
-                pendingEvents[encoder].pending = true;
-                pendingEvents[encoder].moduleIndex = moduleIndex;
-                pendingEvents[encoder].encoderIndex = encoder;
-                pendingEvents[encoder].value = value;
-                pendingEvents[encoder].pressed = pressed;
+            if (pressed && !g_state.encoderPressed[moduleIndex][encoder]) {
+                g_state.trackMuted[track] = !g_state.trackMuted[track];
+                send_mute(track, g_state.trackMuted[track]);
+                snprintf(g_state.lastAction, sizeof(g_state.lastAction),
+                         "T%d %s", track + 1, g_state.trackMuted[track] ? "MUTE" : "on");
             }
-        }
-
-        for (const EncoderEvent& event : pendingEvents) {
-            if (!event.pending) {
-                continue;
-            }
-            send_encoder_event(event.moduleIndex, event.encoderIndex, event.value, event.pressed);
+            g_state.encoderPressed[moduleIndex][encoder] = pressed;
         }
     }
 }
@@ -727,9 +778,15 @@ void poll_bytebuttons() {
         if (!g_state.byteButtonConnected[moduleIndex]) continue;
         uint8_t mask = 0;
         if (!read_bytebutton_status(g_state.byteButtonChannel[moduleIndex], mask)) continue;
-        if (mask != g_state.byteButtonMask[moduleIndex]) {
+        const uint8_t prev = g_state.byteButtonMask[moduleIndex];
+        if (mask != prev) {
+            const uint8_t rising = (uint8_t)(mask & ~prev);  // 0->1 edges only
+            for (int b = 0; b < BYTEBUTTON_BUTTONS; ++b) {
+                if (rising & (1u << b)) {
+                    do_button_action(moduleIndex * BYTEBUTTON_BUTTONS + b);
+                }
+            }
             g_state.byteButtonMask[moduleIndex] = mask;
-            send_bytebutton_event(moduleIndex, mask);
         }
     }
 }
@@ -739,6 +796,10 @@ void poll_bytebuttons() {
 void setup() {
     Serial.begin(115200);
     delay(80);
+
+    for (int t = 0; t < TRACK_COUNT; ++t) {
+        g_state.trackVolume[t] = 100;
+    }
 
     i2c_init();
     io_ext_init();
