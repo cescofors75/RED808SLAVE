@@ -132,16 +132,16 @@
 #define M5_ENCODER_MODULES     2
 #define ENCODERS_PER_MODULE    8
 #define M5_ENCODER_ADDR        0x41  // Both modules, separated by hub
-#define M5_ENCODER1_CHANNEL    0
-#define M5_ENCODER2_CHANNEL    1
+#define M5_ENCODER1_CHANNEL    1
+#define M5_ENCODER2_CHANNEL    2
 
 // M5 Unit ByteButton (up to 2x via hub channels)
 #define BYTEBUTTON_COUNT       2
 #define BYTEBUTTON_ADDR        0x47
 #define BYTEBUTTON_BUTTONS     8
 #define BYTEBUTTON_TOTAL_BUTTONS (BYTEBUTTON_COUNT * BYTEBUTTON_BUTTONS)
-#define BYTEBUTTON1_CHANNEL    2
-#define BYTEBUTTON2_CHANNEL    3
+#define BYTEBUTTON1_CHANNEL    3
+#define BYTEBUTTON2_CHANNEL    4
 
 // =============================================================================
 // WiFi / UDP — S3 connects to Master directly (set to 0 when P4 handles WiFi)
