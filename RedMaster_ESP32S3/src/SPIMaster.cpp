@@ -240,13 +240,13 @@ bool SPIMaster::sendCommandDirect(uint8_t cmd, const void* payload, uint16_t pay
 
     // Per-command SPI clock. Sample/clean-track DATA streams are paced (inter-
     // packet gap + queue), so they run reliably at the higher 4MHz the system
-    // used originally — a 2MB mono stem transfers in ~4s instead of ~16s, which
-    // removes the long transfers that starved/timed-out the xtra and stem
-    // uploads. The sequencer (CMD_DSQ_*) and control stay at the conservative
-    // DAISY_SPI_CLOCK_HZ (1MHz): their rapid back-to-back pattern uploads
-    // overflow the Daisy's polled RXFIFO at 4MHz (the original sequencer bug).
-    uint32_t clockHz = (cmd == CMD_SAMPLE_BEGIN || cmd == CMD_SAMPLE_DATA || cmd == CMD_SAMPLE_END)
-                       ? 4000000UL : DAISY_SPI_CLOCK_HZ;
+    // 1MHz uniforme para todos los comandos: el RXFIFO hardware de la Daisy
+    // (SPI1, 16 bytes) se desborda a 4MHz — TIM6 drena cada 100µs pero el FIFO
+    // se llena en 32µs. Los bytes perdidos corrompen CMD_SAMPLE_BEGIN (campo
+    // totalSamples), el CRC falla, el comando se descarta, padLoading[pad] nunca
+    // se activa y sampleLoaded queda false. NO subir a >1MHz sin acelerar el
+    // drenado TIM6 en la Daisy (ARR < 32µs a 4MHz, actualmente ARR=9999=100µs).
+    uint32_t clockHz = DAISY_SPI_CLOCK_HZ;
     daisySpi.beginTransaction(SPISettings(clockHz, MSBFIRST, SPI_MODE0));
     digitalWrite(DAISY_SPI_CS, LOW);
     daisySpi.transferBytes(txBuffer, rxBuffer, totalLen);

@@ -72,6 +72,7 @@ static inline float Clamp(float v, float lo, float hi) {
 /* tanh(x) Pade 3/3: error < 0.4% en [-4,4]
  * ~3x mas rapido que tanhf() en Cortex-M7 sin FPU tanh nativa */
 static inline float FastTanh(float x) {
+    x = Clamp(x, -3.0f, 3.0f);          // evita distorsion por overflow Pade
     const float x2 = x * x;
     return x * (27.0f + x2) / (27.0f + 9.0f * x2);
 }

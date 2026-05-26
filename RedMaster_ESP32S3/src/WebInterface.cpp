@@ -6738,7 +6738,12 @@ static void pumpDaisyUpload() {
     DaisyUploadPcmBlock block;
     uint8_t drained = 0;
     while (drained < 6 && popDaisyUploadBlock(block)) {
-      if (!spiMaster.writeSampleStreamData(s_daisyUpload.pad, block.samples, block.count, s_daisyUpload.samplesSent)) {
+      bool sent = false;
+      for (int r = 0; r < 3 && !sent; r++) {
+        sent = spiMaster.writeSampleStreamData(s_daisyUpload.pad, block.samples, block.count, s_daisyUpload.samplesSent);
+        if (!sent) vTaskDelay(pdMS_TO_TICKS(5));
+      }
+      if (!sent) {
         daisyUploadError("Daisy data chunk failed");
         break;
       }

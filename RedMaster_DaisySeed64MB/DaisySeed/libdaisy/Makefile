@@ -217,8 +217,8 @@ Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c \
 Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c \
 Middlewares/Third_Party/FatFs/src/diskio.c \
 Middlewares/Third_Party/FatFs/src/ff.c \
-Middlewares/Third_Party/FatFs/src/ff_gen_drv.c  \
-Middlewares/Third_Party/FatFs/src/option/ccsbcs.c \
+Middlewares/Third_Party/FatFs/src/ff_gen_drv.c \
+Middlewares/Third_Party/FatFs/src/option/unicode.c \
 Middlewares/ST/STM32_USB_Host_Library/Class/MSC/Src/usbh_msc_bot.c \
 Middlewares/ST/STM32_USB_Host_Library/Class/MSC/Src/usbh_msc_scsi.c \
 Middlewares/ST/STM32_USB_Host_Library/Class/MSC/Src/usbh_msc.c \

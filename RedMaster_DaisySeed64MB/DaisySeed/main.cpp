@@ -1755,6 +1755,7 @@ static inline void Synth808TriggerByPad(uint8_t padIdx, float velocity)
 }
 
 /* Bitmask: qué engines están activos */
+static constexpr float kDrumBusHeadroom = 0.70f;  // evita clipping al mezclar 808/909/505
 static uint16_t synthActiveMask = 0x01FF;  /* all 9 engines active */
 static uint8_t pianoSelectedEngine = SYNTH_ENGINE_303;
 
@@ -4459,7 +4460,7 @@ void AudioCallback(AudioHandle::InputBuffer  /*in*/,
 
         if ((synthActiveMask & (1 << SYNTH_ENGINE_808)) && synth808.ActiveCount() > 0){
             DSP_PROF_SCOPE(SYNTH_808);
-            float s = sanitizeF(synth808.Process());
+            float s = sanitizeF(synth808.Process()) * kDrumBusHeadroom;
             DSP_PROF_END(SYNTH_808);
             DSP_PROF_SCOPE(SYNTH_ROUTING);
             synthTobus(s, engTrk[SYNTH_ENGINE_808]);
@@ -4467,7 +4468,7 @@ void AudioCallback(AudioHandle::InputBuffer  /*in*/,
         }
         if ((synthActiveMask & (1 << SYNTH_ENGINE_909)) && synth909.ActiveCount() > 0){
             DSP_PROF_SCOPE(SYNTH_909);
-            float s = sanitizeF(synth909.Process());
+            float s = sanitizeF(synth909.Process()) * kDrumBusHeadroom;
             DSP_PROF_END(SYNTH_909);
             DSP_PROF_SCOPE(SYNTH_ROUTING);
             synthTobus(s, engTrk[SYNTH_ENGINE_909]);
@@ -4475,7 +4476,7 @@ void AudioCallback(AudioHandle::InputBuffer  /*in*/,
         }
         if (kEnableSynth505 && (synthActiveMask & (1 << SYNTH_ENGINE_505)) && synth505.ActiveCount() > 0){
             DSP_PROF_SCOPE(SYNTH_505);
-            float s = sanitizeF(synth505.Process());
+            float s = sanitizeF(synth505.Process()) * kDrumBusHeadroom;
             DSP_PROF_END(SYNTH_505);
             DSP_PROF_SCOPE(SYNTH_ROUTING);
             synthTobus(s, engTrk[SYNTH_ENGINE_505]);
@@ -6404,11 +6405,21 @@ static void ProcessCommand()
             float val; memcpy(&val, p + 3, 4);
             /* paramId: 0=decay, 1=pitch, 2=tone, 3=volume, 4=snappy */
             switch(engine){
-                case SYNTH_ENGINE_808:
-                case SYNTH_ENGINE_909:
-                case SYNTH_ENGINE_505:
-                    ApplyDrumSynthParam(engine, instrument, paramId, val);
+                case SYNTH_ENGINE_808: {
+                    uint8_t inst = (instrument < 16) ? padTo808[instrument] : (uint8_t)(instrument % TR808::INST_COUNT);
+                    ApplyDrumSynthParam(SYNTH_ENGINE_808, inst, paramId, val);
                     break;
+                }
+                case SYNTH_ENGINE_909: {
+                    uint8_t inst = (instrument < 16) ? padTo909[instrument] : (uint8_t)(instrument % TR909::INST_COUNT);
+                    ApplyDrumSynthParam(SYNTH_ENGINE_909, inst, paramId, val);
+                    break;
+                }
+                case SYNTH_ENGINE_505: {
+                    uint8_t inst = (instrument < 16) ? padTo505[instrument] : (uint8_t)(instrument % TR505::INST_COUNT);
+                    ApplyDrumSynthParam(SYNTH_ENGINE_505, inst, paramId, val);
+                    break;
+                }
                 case SYNTH_ENGINE_303:
                     switch(paramId){
                         case 0: acid303.SetCutoff(val);    break;
