@@ -310,6 +310,9 @@
 				"device", "monitor",
 				"--baud", "115200"
 			],
+			"options": {
+				"cwd": "${workspaceFolder}/RedMaster_DaisySeed64MB/DaisySeed"
+			},
 			"problemMatcher": [],
 			"presentation": {
 				"reveal": "always",
