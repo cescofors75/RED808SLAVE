@@ -303,6 +303,22 @@
 			}
 		},
 		{
+			"label": "PlatformIO: Monitor Daisy",
+			"type": "shell",
+			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe",
+			"args": [
+				"device", "monitor",
+				"--baud", "115200"
+			],
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true,
+				"focus": true
+			}
+		},
+		{
 			"label": "Inspect MEM MIDIs (Python)",
 			"type": "shell",
 			"command": "python",

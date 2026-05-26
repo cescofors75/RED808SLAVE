@@ -3783,6 +3783,26 @@ static void RunStartupStressReport(uint32_t nowMs)
     }
 }
 
+/* ── Reporte periódico del profiler DSP durante uso normal ──
+ * Solo activo con RED808_DSP_BLOCK_PROFILE=1; coste cero en producción.
+ * Emite por serial cada kDspLiveProfileMs los ciclos/% por engine y FX,
+ * medidos con los patrones reales (a diferencia del stress de arranque,
+ * que usa patrones sintéticos). Util para decidir qué optimizar. */
+#if RED808_DSP_BLOCK_PROFILE
+static constexpr uint32_t kDspLiveProfileMs = 3000;
+static uint32_t liveDspProfileNextMs = 0;
+static void RunLiveDspProfileReport(uint32_t nowMs)
+{
+    if(!kEnableStartLog)          return;
+    if(startupStressReportActive) return;  /* no pisar el stress de arranque */
+    if((int32_t)(nowMs - liveDspProfileNextMs) < 0) return;
+    liveDspProfileNextMs = nowMs + kDspLiveProfileMs;
+    PrintDspProfileReport(nowMs, "live");
+}
+#else
+static inline void RunLiveDspProfileReport(uint32_t) {}
+#endif
+
 static void SilenceVoicesInPadRange(uint8_t startPad, uint8_t endPad)
 {
     if(endPad > MAX_PADS)
@@ -8341,6 +8361,7 @@ int main()
         RunStartup808SelfTest(now);
         RunStartupStressReport(now);
         RunPerformanceStressMode(now);
+        RunLiveDspProfileReport(now);
         if(kStartupToneTest)
             hw.SetLed(((now / 125u) & 1u) != 0u);
         else
