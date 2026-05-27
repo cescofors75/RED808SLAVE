@@ -1,0 +1,1614 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>RED808 Drum Machine</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="theme-vars.css">
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="keyboard-styles.css" media="print" onload="this.media='all'">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <h1 class="logo">RED<span>808</span></h1>
+                <div class="status">
+                    <span id="statusDot" class="status-dot"></span>
+                    <span id="statusText">Conectando...</span>
+                </div>
+            </div>
+            <div class="header-controls">
+                <div class="hdr-transport" title="Transporte y patrones">
+                    <button class="hdr-transport-btn hdr-pattern-btn" id="headerPatternPrevBtn" title="Patrón anterior">PAT -</button>
+                    <button class="hdr-transport-btn hdr-play-btn" id="headerPlayPauseBtn" title="Play/Pause">PLAY</button>
+                    <button class="hdr-transport-btn hdr-pattern-btn" id="headerPatternNextBtn" title="Patrón siguiente">PAT +</button>
+                    <span class="hdr-pattern-readout" id="headerPatternReadout">P01</span>
+                    <span class="hdr-step-readout" id="headerStepIndicator" title="Step activo">S--</span>
+                    <button class="hdr-transport-btn hdr-panic-btn" id="headerPanicBtn" title="Apagar todas las notas colgadas (ESC)">🛑</button>
+                    <button class="hdr-transport-btn hdr-stem-btn" id="headerStemUploadBtn" title="Subir WAV a la primera clean track libre" onclick="showCleanTrackUploadDialog()">SUBIR STEM</button>
+                </div>
+                <!-- BPM -->
+                <div class="hdr-ctrl" id="meter-bpm">
+                    <span class="hdr-ctrl-label">BPM <span class="hdr-ctrl-hint">[ / ]</span></span>
+                    <input type="range" id="tempoSlider" min="60" max="200" value="110" class="hdr-slider">
+                    <span class="hdr-ctrl-value" id="tempoValue">110</span>
+                    <!-- keep hidden meter IDs for JS compat -->
+                    <span id="meterBpmValue" style="display:none">110</span>
+                    <span id="meterBpmBar" style="display:none"></span>
+                </div>
+                <!-- VOL SEQ -->
+                <div class="hdr-ctrl" id="meter-seq-volume">
+                    <span class="hdr-ctrl-label">VOL SEQ <span class="hdr-ctrl-hint">A/S</span></span>
+                    <input type="range" id="sequencerVolumeSlider" min="0" max="150" value="100" class="hdr-slider">
+                    <span class="hdr-ctrl-value" id="sequencerVolumeValue">100</span>
+                    <span id="meterSequencerVolumeValue" style="display:none">100%</span>
+                    <span id="meterSequencerVolumeBar" style="display:none"></span>
+                </div>
+                <!-- VOL PADS -->
+                <div class="hdr-ctrl" id="meter-live-volume">
+                    <span class="hdr-ctrl-label">VOL PADS <span class="hdr-ctrl-hint">-/+</span></span>
+                    <input type="range" id="liveVolumeSlider" min="0" max="150" value="100" class="hdr-slider">
+                    <span class="hdr-ctrl-value" id="liveVolumeValue">100</span>
+                    <span id="meterLiveVolumeValue" style="display:none">100%</span>
+                    <span id="meterLiveVolumeBar" style="display:none"></span>
+                </div>
+                <!-- V / M / S global buttons -->
+                <div class="hdr-vsm-btns">
+                    <select id="hdrTrackSelect" class="hdr-track-select" title="Seleccionar track">
+                        <option value="-1">TRACK</option>
+                        <option value="0">BD</option>
+                        <option value="1">SD</option>
+                        <option value="2">CH</option>
+                        <option value="3">OH</option>
+                        <option value="4">CY</option>
+                        <option value="5">CP</option>
+                        <option value="6">RS</option>
+                        <option value="7">CB</option>
+                        <option value="8">LT</option>
+                        <option value="9">MT</option>
+                        <option value="10">HT</option>
+                        <option value="11">MA</option>
+                        <option value="12">CL</option>
+                        <option value="13">HC</option>
+                        <option value="14">MC</option>
+                        <option value="15">LC</option>
+                    </select>
+                    <button class="hdr-btn hdr-btn-v" id="hdrVolBtn" title="Volumen track seleccionado">V</button>
+                    <button class="hdr-btn hdr-btn-m" id="hdrMuteBtn" title="Mute track seleccionado">M</button>
+                    <button class="hdr-btn hdr-btn-s" id="hdrSoloBtn" title="Solo track seleccionado">S</button>
+                </div>
+                <!-- V popup slider -->
+                <div class="hdr-vol-popup" id="hdrVolPopup" style="display:none">
+                    <span class="hdr-vol-popup-label" id="hdrVolPopupLabel">TRACK VOL</span>
+                    <input type="range" id="hdrVolPopupSlider" min="0" max="150" value="100" class="hdr-slider">
+                    <span class="hdr-ctrl-value" id="hdrVolPopupValue">100</span>
+                </div>
+                <!-- SQNCR status -->
+                <div class="meter meter-sequencer" id="meter-sequencer">
+                    <span class="meter-label">SQNCR</span>
+                    <div class="meter-value" id="meterSequencerStatus">STOP</div>
+                    <div class="meter-bar">
+                        <span id="meterSequencerStatusBar"></span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Tab Navigation Bar -->
+        <nav class="tab-navigation">
+            <button class="tab-btn active" data-tab="performance">🎹 LIVE PADS</button>
+            <button class="tab-btn" data-tab="xtra-pads">🎲 XTRA PADS</button>
+            <button class="tab-btn tab-btn-stems" data-tab="stems">🎼 STEMS</button>
+            <button class="tab-btn" data-tab="sequencer">🎵 SEQUENCER</button>
+            <button class="tab-btn" data-tab="volumes">🎚️ VOLUMENES</button>
+            <button class="tab-btn" data-tab="melody">🎼 MELODY</button>
+            <a href="/patchbay" class="tab-btn" title="Signal Patchbay">⬡ PATCH</a>
+            <a href="/multiview.html" class="tab-btn tab-btn-multiview" title="Ver múltiples secciones a la vez">🖥 MULTIVIEW</a>
+        </nav>
+
+        <!-- TAB: Performance (Live Pads) -->
+        <div id="tab-performance" class="tab-content active">
+            <!-- Live Pads Section -->
+            <section id="section-pads" class="pads-section" data-section="pads" data-title="Live Pads">
+                <div class="pads-header">
+                    <h2>LIVE PADS</h2>
+                    <span class="sync-badge">🔗 SYNCED</span>
+                    <label class="sync-leds-toggle" title="Sync LEDs: los pads se iluminan al ritmo del sequencer">
+                        <input type="checkbox" id="syncLedsToggle">
+                        <span class="sync-leds-slider"></span>
+                        <span class="sync-leds-label">💡 SYNC LEDS</span>
+                    </label>
+                    <div class="pad-layout-selector">
+                        <span class="layout-sel-label">GRID</span>
+                        <button class="pls-btn" data-cols="2">2</button>
+                        <button class="pls-btn" data-cols="4">4</button>
+                        <button class="pls-btn active" data-cols="8">8</button>
+                    </div>
+                    <button id="loadSampleListsBtn" class="btn btn-load-samples" title="Recargar Samplers">
+                        🔄
+                    </button>
+                    <button id="soloPadsBtn" class="btn btn-solo-pads" title="Solo Pads: ocultar controles extra">
+                        👁 SOLO
+                    </button>
+                </div>
+                <div class="pads-grid" id="padsGrid">
+                    <!-- Los pads se generarán dinámicamente -->
+                </div>
+            </section>
+        </div>
+
+        <!-- TAB: XTRA PADS (Independientes / Free) -->
+        <div id="tab-xtra-pads" class="tab-content">
+            <section class="pads-xtra-section" id="section-pads-xtra">
+                <div class="pads-xtra-header">
+                    <h2>XTRA PADS</h2>
+                    <span class="free-badge">🎲 FREE</span>
+                    <p class="xtra-description">Pads independientes del sequencer. Sube tus propios WAV o selecciona de la librería.</p>
+                </div>
+                <div class="pads-xtra-grid" id="padsXtraGrid">
+                    <!-- El primer pad "+" se genera en JS -->
+                </div>
+                
+                <!-- XTRA Pads Filter Section -->
+                <div class="xtra-filters-section">
+                    <h3>🎛️ FILTROS XTRA PADS</h3>
+                    <p class="xtra-filters-desc">Los filtros por pad (F) y efectos (FX) están disponibles directamente en cada XTRA pad.</p>
+                    <div class="xtra-filters-status" id="xtraFiltersStatus">
+                        <span class="no-filters">Añade XTRA pads para aplicar filtros individuales</span>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <div id="tab-stems" class="tab-content">
+            <section id="section-stems" class="stems-section" data-section="stems" data-title="Stems">
+                <div class="stems-header">
+                    <div>
+                        <h2>STEMS</h2>
+                        <p class="stems-description">Aquí subes WAV largos, ves el nombre del clip, el estado real en Daisy y una preview de onda.</p>
+                    </div>
+                    <button class="clean-track-upload-btn clean-track-upload-btn-primary" onclick="showCleanTrackUploadDialog()">SUBIR WAV</button>
+                </div>
+                <div class="clean-tracks-summary" id="cleanTracksSummary"></div>
+                <div class="clean-tracks-grid" id="cleanTracksGrid"></div>
+            </section>
+        </div>
+
+        <!-- TAB: Sequencer -->
+        <div id="tab-sequencer" class="tab-content">
+            <!-- Sequencer Section -->
+            <section id="section-sequencer" class="sequencer-section" data-section="sequencer" data-title="Sequencer">
+                <div class="sequencer-header">
+                    <div class="sequencer-controls">
+                        <button id="playBtn" class="seq-btn seq-btn-play" title="Play/Pause">
+                            <span class="seq-btn-bg"></span>
+                            <span class="seq-btn-icon">▶</span>
+                            <span class="seq-btn-label">PLAY</span>
+                        </button>
+                        <button id="stopBtn" class="seq-btn seq-btn-stop" title="Stop">
+                            <span class="seq-btn-bg"></span>
+                            <span class="seq-btn-icon">⬛</span>
+                            <span class="seq-btn-label">STOP</span>
+                        </button>
+                        <button id="clearBtn" class="seq-btn seq-btn-clear" title="Clear Pattern">
+                            <span class="seq-btn-bg"></span>
+                            <span class="seq-btn-icon">⚡</span>
+                            <span class="seq-btn-label">CLEAR</span>
+                        </button>
+                        <button id="viewModeBtn" class="seq-btn seq-btn-view-mode" title="Cambiar vista: Grid / Circular">
+                            <span class="seq-btn-bg"></span>
+                            <span class="seq-btn-icon">⭘</span>
+                            <span class="seq-btn-label">CIRCULAR</span>
+                        </button>
+                        <button id="midiImportBtn" class="seq-btn seq-btn-midi-import" title="Importar archivo MIDI" onclick="showMidiImportDialog()">
+                            <span class="seq-btn-bg"></span>
+                            <span class="seq-btn-icon">📂</span>
+                            <span class="seq-btn-label">MIDI</span>
+                        </button>
+                        <button id="exportBtn" class="seq-btn seq-btn-export" title="Exportar patrón (MIDI/WAV/JSON)" onclick="showExportDialog()">
+                            <span class="seq-btn-bg"></span>
+                            <span class="seq-btn-icon">💾</span>
+                            <span class="seq-btn-label">EXPORT</span>
+                        </button>
+                        <button id="muteAllBtn" class="seq-btn seq-btn-mute-all" title="Mute/Unmute All Tracks" onclick="toggleAllMuted()">
+                            <span class="seq-btn-bg"></span>
+                            <span class="seq-btn-icon">🔇</span>
+                            <span class="seq-btn-label">MUTE ALL</span>
+                        </button>
+                        <div class="step-count-selector" id="stepCountSelector">
+                            <button class="step-count-btn active" data-steps="16" onclick="setStepCount(16)">16</button>
+                            <button class="step-count-btn" data-steps="32" onclick="setStepCount(32)">32</button>
+                            <button class="step-count-btn" data-steps="64" onclick="setStepCount(64)">64</button>
+                        </div>
+                        <!-- AI Chat disabled
+                        <button id="aiToggleBtn" class="seq-btn seq-btn-ai-toggle" title="Activar/Desactivar AI Chat">
+                            <span class="seq-btn-bg"></span>
+                            <span class="seq-btn-icon">🤖</span>
+                            <span class="seq-btn-label">AI OFF</span>
+                        </button>
+                        -->
+                        <span class="sync-badge">🔗 SYNCED</span>
+                        <div class="pattern-display">
+                            <span class="pattern-label">PATTERN</span>
+                            <span id="currentPatternName" class="pattern-name">HIP HOP</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="sequencer-grid-wrapper" id="sequencerContainer">
+                    <!-- Song Mode Bar Navigator -->
+                    <div class="song-bar-navigator" id="songBarNavigator" style="display:none">
+                        <div class="song-nav-header">
+                            <span class="song-nav-icon">🎵</span>
+                            <span class="song-nav-title">SONG MODE</span>
+                            <span class="song-nav-filename" id="songMidiFilename"></span>
+                            <span class="song-nav-bar" id="songCurrentBar">Bar 1/1</span>
+                            <button class="song-nav-exit" id="songModeExitBtn" title="Desactivar Song Mode">✕</button>
+                        </div>
+                        <div class="song-bar-buttons" id="songBarButtons">
+                            <!-- Bar buttons generated dynamically -->
+                        </div>
+                    </div>
+                    
+                    <div class="sequencer-grid" id="sequencerGrid">
+                        <!-- 8 tracks x 16 steps -->
+                    </div>
+                    
+                    <div class="step-indicator" id="stepIndicator">
+                        <!-- Indicador de step actual -->
+                    </div>
+                </div>
+                
+                <div class="sequencer-circular-wrapper hidden" id="sequencerCircularContainer">
+                    <div class="circular-sequencer" id="circularSequencer">
+                        <canvas id="circularCanvas"></canvas>
+                        <div class="circular-center-display">
+                            <div class="circular-step-number" id="circularStepNumber">1</div>
+                            <div class="circular-pattern-name" id="circularPatternName">HIP HOP</div>
+                        </div>
+                        <div class="circular-track-labels" id="circularTrackLabels">
+                            <!-- Track labels dinámicos -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- AI Chat Panel DISABLED -->
+            <div class="seq-chat-panel ai-disabled" id="seqChatPanel" style="display:none!important">
+                <div class="seq-chat-header" id="seqChatToggle">
+                    <div class="seq-chat-header-left">
+                        <span class="seq-chat-icon">🤖</span>
+                        <span class="seq-chat-title">AI CHAT</span>
+                        <span class="seq-chat-status" id="seqChatStatus">●</span>
+                        <span class="chat-status-badge" id="chatStatusBadge" style="font-size:0.65em;padding:2px 8px">
+                            <span class="chat-status-dot" id="chatStatusDot"></span>
+                            <span id="chatStatusText">Offline</span>
+                        </span>
+                    </div>
+                    <div class="seq-chat-header-right">
+                        <input type="text" id="chatServerUrl" class="seq-chat-server-input" 
+                               placeholder="http://192.168.1.133:3808" 
+                               value="http://192.168.1.133:3808"
+                               onclick="event.stopPropagation()">
+                        <button class="seq-chat-connect-btn" id="chatConnectBtn" onclick="event.stopPropagation();chatConnect()" title="Conectar al servidor AI">CONECTAR</button>
+                        <button class="seq-chat-action-btn" onclick="event.stopPropagation();chatResetSession()" title="Reset sesión">🔄</button>
+                        <span class="seq-chat-badge" id="seqChatBadge" style="display:none">0</span>
+                        <button class="seq-chat-expand-btn" id="seqChatExpandBtn" title="Expandir/colapsar">▼</button>
+                    </div>
+                </div>
+                <div class="seq-chat-body" id="seqChatBody">
+                    <div class="seq-chat-feed" id="seqChatFeed">
+                        <div class="seq-chat-hint">
+                            <div style="font-size:1.8em;margin-bottom:6px">🥁</div>
+                            <div><strong>RED808 AI Agent</strong></div>
+                            <div style="margin:4px 0 10px;opacity:0.6">63 tools · 23 instrumentos · patrón, FX, mixer, song</div>
+                            <div class="seq-chat-suggestions">
+                                <button class="seq-chat-sug" onclick="event.stopPropagation();seqSuggestion(this)">🎵 Beat de trap 140 BPM</button>
+                                <button class="seq-chat-sug" onclick="event.stopPropagation();seqSuggestion(this)">🏠 House minimalista</button>
+                                <button class="seq-chat-sug" onclick="event.stopPropagation();seqSuggestion(this)">🥁 Breakbeat Amen</button>
+                                <button class="seq-chat-sug" onclick="event.stopPropagation();seqSuggestion(this)">👻 Ghost notes al hi-hat</button>
+                                <button class="seq-chat-sug" onclick="event.stopPropagation();seqSuggestion(this)">🤲 Humaniza el patrón</button>
+                                <button class="seq-chat-sug" onclick="event.stopPropagation();seqSuggestion(this)">🎶 Drum & bass 174 BPM</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="seq-chat-input-row">
+                        <textarea id="seqChatInput" class="seq-chat-input" placeholder="Escribe un mensaje para la IA..." rows="1"
+                            onkeydown="seqChatKeydown(event)" oninput="seqChatAutoResize(this)"></textarea>
+                        <button class="seq-chat-send" id="seqChatSendBtn" onclick="seqChatSend()" disabled>➤</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB: Controls (hidden, kept for JS compat) -->
+        <div id="tab-controls" class="tab-content" style="display:none!important">
+            <section id="section-controls" class="controls-section">
+                <button id="colorToggle" class="btn-color-toggle" style="display:none">🎨 COLOR MODE</button>
+            </section>
+        </div>
+
+        <!-- TAB: Volumes -->
+        <div id="tab-volumes" class="tab-content">
+            <!-- Volumes Section -->
+            <section id="section-volumes" class="volumes-section" data-section="volumes" data-title="Controles de Volumen">
+                <!-- Track Volumes -->
+                <div class="track-volumes">
+                    <div class="track-volumes-grid" id="trackVolumesGrid">
+                        <!-- Track 0: BD -->
+                        <div class="track-volume-card" data-track="0">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">BD</span>
+                                <span class="track-volume-value" id="trackVolumeValue0">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator0"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar0" data-track="0" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 1: SD -->
+                        <div class="track-volume-card" data-track="1">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">SD</span>
+                                <span class="track-volume-value" id="trackVolumeValue1">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator1"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar1" data-track="1" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 2: CH -->
+                        <div class="track-volume-card" data-track="2">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">CH</span>
+                                <span class="track-volume-value" id="trackVolumeValue2">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator2"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar2" data-track="2" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 3: OH -->
+                        <div class="track-volume-card" data-track="3">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">OH</span>
+                                <span class="track-volume-value" id="trackVolumeValue3">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator3"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar3" data-track="3" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 4: CY -->
+                        <div class="track-volume-card" data-track="4">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">CY</span>
+                                <span class="track-volume-value" id="trackVolumeValue4">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator4"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar4" data-track="4" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 5: CP -->
+                        <div class="track-volume-card" data-track="5">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">CP</span>
+                                <span class="track-volume-value" id="trackVolumeValue5">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator5"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar5" data-track="5" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 6: RS -->
+                        <div class="track-volume-card" data-track="6">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">RS</span>
+                                <span class="track-volume-value" id="trackVolumeValue6">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator6"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar6" data-track="6" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 7: CB -->
+                        <div class="track-volume-card" data-track="7">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">CB</span>
+                                <span class="track-volume-value" id="trackVolumeValue7">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator7"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar7" data-track="7" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 8: LT -->
+                        <div class="track-volume-card" data-track="8">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">LT</span>
+                                <span class="track-volume-value" id="trackVolumeValue8">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator8"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar8" data-track="8" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 9: MT -->
+                        <div class="track-volume-card" data-track="9">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">MT</span>
+                                <span class="track-volume-value" id="trackVolumeValue9">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator9"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar9" data-track="9" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 10: HT -->
+                        <div class="track-volume-card" data-track="10">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">HT</span>
+                                <span class="track-volume-value" id="trackVolumeValue10">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator10"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar10" data-track="10" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 11: MA -->
+                        <div class="track-volume-card" data-track="11">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">MA</span>
+                                <span class="track-volume-value" id="trackVolumeValue11">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator11"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar11" data-track="11" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 12: CL -->
+                        <div class="track-volume-card" data-track="12">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">CL</span>
+                                <span class="track-volume-value" id="trackVolumeValue12">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator12"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar12" data-track="12" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 13: HC -->
+                        <div class="track-volume-card" data-track="13">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">HC</span>
+                                <span class="track-volume-value" id="trackVolumeValue13">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator13"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar13" data-track="13" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 14: MC -->
+                        <div class="track-volume-card" data-track="14">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">MC</span>
+                                <span class="track-volume-value" id="trackVolumeValue14">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator14"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar14" data-track="14" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                        <!-- Track 15: LC -->
+                        <div class="track-volume-card" data-track="15">
+                            <div class="track-volume-header">
+                                <span class="track-volume-label">LC</span>
+                                <span class="track-volume-value" id="trackVolumeValue15">100%</span>
+                                <span class="track-volume-mute-indicator" id="trackMuteIndicator15"></span>
+                            </div>
+                            <div class="track-volume-bar-container">
+                                <div class="track-volume-bar" id="trackVolumeBar15" data-track="15" style="height: 100%;"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- TAB: FX -->
+        <div id="tab-fx" class="tab-content">
+            <section id="section-fx" class="fx-section" data-section="fx" data-title="Sound FX">
+
+                <!-- Unified Sub-tab Navigation -->
+                <div class="fx-subtabs">
+                    <button class="fx-subtab-btn" data-fxtab="filters">FILTERS</button>
+                    <button class="fx-subtab-btn active" data-fxtab="masterFx">EFFECTS</button>
+                    <button class="fx-subtab-btn" data-fxtab="newFx">ROUTING</button>
+                </div>
+
+                <!-- ═══════════════ TAB 1: FILTERS ═══════════════ -->
+                <div class="fx-subtab-content" id="fxtab-filters">
+                    <div class="ufx-section-head">
+                        <span class="ufx-section-icon">🎚</span>
+                        <span class="ufx-section-title">FILTER LIBRARY</span>
+                        <span class="ufx-section-hint">Selecciona un track, luego elige filtro (F1-F10)</span>
+                    </div>
+                    <div class="ufx-filters-grid">
+                        <div class="ufx-fcard ufx-fcard--off" data-filter="0">
+                            <span class="ufx-fcard-icon">🚫</span>
+                            <span class="ufx-fcard-name">OFF</span>
+                            <span class="ufx-fcard-key">F1</span>
+                        </div>
+                        <div class="ufx-fcard ufx-fcard--warm" data-filter="1">
+                            <span class="ufx-fcard-icon">🔥</span>
+                            <span class="ufx-fcard-name">LOW PASS</span>
+                            <span class="ufx-fcard-key">F2</span>
+                        </div>
+                        <div class="ufx-fcard ufx-fcard--bright" data-filter="2">
+                            <span class="ufx-fcard-icon">✨</span>
+                            <span class="ufx-fcard-name">HIGH PASS</span>
+                            <span class="ufx-fcard-key">F3</span>
+                        </div>
+                        <div class="ufx-fcard ufx-fcard--acid" data-filter="9">
+                            <span class="ufx-fcard-icon">⚡</span>
+                            <span class="ufx-fcard-name">RESONANT</span>
+                            <span class="ufx-fcard-key">F10</span>
+                        </div>
+                        <div class="ufx-fcard ufx-fcard--creative" data-filter="3">
+                            <span class="ufx-fcard-icon">📞</span>
+                            <span class="ufx-fcard-name">BAND PASS</span>
+                            <span class="ufx-fcard-key">F4</span>
+                        </div>
+                        <div class="ufx-fcard ufx-fcard--boost" data-filter="7">
+                            <span class="ufx-fcard-icon">⛰️</span>
+                            <span class="ufx-fcard-name">PEAK BOOST</span>
+                            <span class="ufx-fcard-key">F8</span>
+                        </div>
+                        <div class="ufx-fcard ufx-fcard--cut" data-filter="4">
+                            <span class="ufx-fcard-icon">🕳️</span>
+                            <span class="ufx-fcard-name">NOTCH CUT</span>
+                            <span class="ufx-fcard-key">F5</span>
+                        </div>
+                        <div class="ufx-fcard ufx-fcard--boost" data-filter="5">
+                            <span class="ufx-fcard-icon">🔊</span>
+                            <span class="ufx-fcard-name">BASS BOOST</span>
+                            <span class="ufx-fcard-key">F6</span>
+                        </div>
+                        <div class="ufx-fcard ufx-fcard--bright" data-filter="6">
+                            <span class="ufx-fcard-icon">🌟</span>
+                            <span class="ufx-fcard-name">TREBLE BOOST</span>
+                            <span class="ufx-fcard-key">F7</span>
+                        </div>
+                        <div class="ufx-fcard ufx-fcard--creative" data-filter="8">
+                            <span class="ufx-fcard-icon">🌀</span>
+                            <span class="ufx-fcard-name">PHASE</span>
+                            <span class="ufx-fcard-key">F9</span>
+                        </div>
+                    </div>
+
+                    <!-- Active Filters Display -->
+                    <div class="ufx-active-section">
+                        <div class="ufx-active-group">
+                            <span class="ufx-active-label">TRACKS</span>
+                            <div id="activeTrackFilters" class="ufx-active-list">
+                                <span class="no-filters">Sin filtros</span>
+                            </div>
+                        </div>
+                        <div class="ufx-active-group">
+                            <span class="ufx-active-label">PADS</span>
+                            <div id="activePadFilters" class="ufx-active-list">
+                                <span class="no-filters">Sin filtros</span>
+                            </div>
+                        </div>
+                    </div>
+                </div><!-- end fxtab-filters -->
+
+                <!-- ═══════════════ TAB 2: EFFECTS ═══════════════ -->
+                <div class="fx-subtab-content active" id="fxtab-masterFx">
+
+                    <!-- ── TRACK FX ── -->
+                    <div class="ufx-section-head">
+                        <span class="ufx-section-icon">🎛</span>
+                        <span class="ufx-section-title">TRACK FX</span>
+                        <span class="ufx-section-hint">Per-track: Reverse, Pitch, Stutter</span>
+                    </div>
+
+                    <div class="ufx-track-selector" id="trackFxSelector">
+                        <button class="ufx-tsel active" data-track="0">BD</button>
+                        <button class="ufx-tsel" data-track="1">SD</button>
+                        <button class="ufx-tsel" data-track="2">CH</button>
+                        <button class="ufx-tsel" data-track="3">OH</button>
+                        <button class="ufx-tsel" data-track="4">CY</button>
+                        <button class="ufx-tsel" data-track="5">CP</button>
+                        <button class="ufx-tsel" data-track="6">RS</button>
+                        <button class="ufx-tsel" data-track="7">CB</button>
+                        <button class="ufx-tsel" data-track="8">LT</button>
+                        <button class="ufx-tsel" data-track="9">MT</button>
+                        <button class="ufx-tsel" data-track="10">HT</button>
+                        <button class="ufx-tsel" data-track="11">MA</button>
+                        <button class="ufx-tsel" data-track="12">CL</button>
+                        <button class="ufx-tsel" data-track="13">HC</button>
+                        <button class="ufx-tsel" data-track="14">MC</button>
+                        <button class="ufx-tsel" data-track="15">LC</button>
+                    </div>
+
+                    <div class="ufx-cards-row">
+                        <!-- REVERSE -->
+                        <div class="ufx-card" id="fxCardReverse" data-accent="#e94560">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">⏪</span>
+                                <span class="ufx-card-title">REVERSE</span>
+                                <label class="ufx-toggle"><input type="checkbox" id="fxReverseToggle" onchange="toggleTrackFx('reverse', this.checked)"><span class="ufx-toggle-rail"></span></label>
+                            </div>
+                        </div>
+                        <!-- PITCH SHIFT -->
+                        <div class="ufx-card" id="fxCardPitch" data-accent="#a855f7">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">🎵</span>
+                                <span class="ufx-card-title">PITCH</span>
+                                <label class="ufx-toggle"><input type="checkbox" id="fxPitchToggle" onchange="toggleTrackFx('pitch', this.checked)"><span class="ufx-toggle-rail"></span></label>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-presets">
+                                    <button class="ufx-preset-btn" onclick="setTrackFxPitch(0.5)">½×</button>
+                                    <button class="ufx-preset-btn" onclick="setTrackFxPitch(0.75)">¾×</button>
+                                    <button class="ufx-preset-btn active" onclick="setTrackFxPitch(1.0)">1×</button>
+                                    <button class="ufx-preset-btn" onclick="setTrackFxPitch(1.5)">1.5×</button>
+                                    <button class="ufx-preset-btn" onclick="setTrackFxPitch(2.0)">2×</button>
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Speed <span id="fxPitchValue">1.00</span>×</label>
+                                    <input type="range" id="fxPitchSlider" min="25" max="400" value="100" class="ufx-slider" oninput="setTrackFxPitch(this.value/100)">
+                                </div>
+                            </div>
+                        </div>
+                        <!-- STUTTER -->
+                        <div class="ufx-card" id="fxCardStutter" data-accent="#06b6d4">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">🔁</span>
+                                <span class="ufx-card-title">STUTTER</span>
+                                <label class="ufx-toggle"><input type="checkbox" id="fxStutterToggle" onchange="toggleTrackFx('stutter', this.checked)"><span class="ufx-toggle-rail"></span></label>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-presets">
+                                    <button class="ufx-preset-btn" onclick="setTrackFxStutter(30)">30ms</button>
+                                    <button class="ufx-preset-btn" onclick="setTrackFxStutter(50)">50ms</button>
+                                    <button class="ufx-preset-btn active" onclick="setTrackFxStutter(100)">100ms</button>
+                                    <button class="ufx-preset-btn" onclick="setTrackFxStutter(150)">150ms</button>
+                                    <button class="ufx-preset-btn" onclick="setTrackFxStutter(200)">200ms</button>
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Interval <span id="fxStutterValue">100</span>ms</label>
+                                    <input type="range" id="fxStutterSlider" min="10" max="500" value="100" class="ufx-slider" oninput="setTrackFxStutter(parseInt(this.value))">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="track-fx-status" id="trackFxStatus"></div>
+
+                    <!-- ── MASTER EFFECTS ── -->
+                    <div class="ufx-section-head" style="margin-top:24px">
+                        <span class="ufx-section-icon">🎚</span>
+                        <span class="ufx-section-title">MASTER EFFECTS</span>
+                    </div>
+
+                    <div class="ufx-cards-grid">
+                        <!-- DISTORTION -->
+                        <div class="ufx-card" data-accent="#e94560">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">🎸</span>
+                                <span class="ufx-card-title">DISTORTION</span>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Mode</label>
+                                    <select id="distortionMode" class="ufx-select">
+                                        <option value="0" selected>Soft Clip</option>
+                                        <option value="1">Hard Clip</option>
+                                        <option value="2">Tube</option>
+                                        <option value="3">Fuzz</option>
+                                    </select>
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Drive <span id="distortionValue">0</span>%</label>
+                                    <input type="range" id="distortion" min="0" max="100" value="0" class="ufx-slider">
+                                </div>
+                            </div>
+                        </div>
+                        <!-- DELAY -->
+                        <div class="ufx-card" data-accent="#00d4ff">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">🔊</span>
+                                <span class="ufx-card-title">DELAY / ECHO</span>
+                                <label class="ufx-toggle"><input type="checkbox" id="delayActive"><span class="ufx-toggle-rail"></span></label>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Time <span id="delayTimeValue">250</span>ms</label>
+                                    <input type="range" id="delayTime" min="10" max="750" value="250" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Feedback <span id="delayFeedbackValue">30</span>%</label>
+                                    <input type="range" id="delayFeedback" min="0" max="95" value="30" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Mix <span id="delayMixValue">30</span>%</label>
+                                    <input type="range" id="delayMix" min="0" max="100" value="30" class="ufx-slider">
+                                </div>
+                            </div>
+                        </div>
+                        <!-- AUTO-WAH -->
+                        <div class="ufx-card" data-accent="#f59e0b">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">🎸</span>
+                                <span class="ufx-card-title">AUTO-WAH</span>
+                                <label class="ufx-toggle"><input type="checkbox" id="autoWahActive"><span class="ufx-toggle-rail"></span></label>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Sensitivity <span id="autoWahLevelValue">50</span>%</label>
+                                    <input type="range" id="autoWahLevel" min="0" max="100" value="50" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Mix <span id="autoWahMixValue">50</span>%</label>
+                                    <input type="range" id="autoWahMix" min="0" max="100" value="50" class="ufx-slider">
+                                </div>
+                            </div>
+                        </div>
+                        <!-- PHASER -->
+                        <div class="ufx-card" data-accent="#a855f7">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">🌀</span>
+                                <span class="ufx-card-title">PHASER</span>
+                                <label class="ufx-toggle"><input type="checkbox" id="phaserActive"><span class="ufx-toggle-rail"></span></label>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Rate <span id="phaserRateValue">50</span></label>
+                                    <input type="range" id="phaserRate" min="5" max="500" value="50" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Depth <span id="phaserDepthValue">70</span>%</label>
+                                    <input type="range" id="phaserDepth" min="0" max="100" value="70" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Feedback <span id="phaserFeedbackValue">30</span>%</label>
+                                    <input type="range" id="phaserFeedback" min="-90" max="90" value="30" class="ufx-slider">
+                                </div>
+                            </div>
+                        </div>
+                        <!-- FLANGER -->
+                        <div class="ufx-card" data-accent="#06b6d4">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">🌊</span>
+                                <span class="ufx-card-title">FLANGER</span>
+                                <label class="ufx-toggle"><input type="checkbox" id="flangerActive"><span class="ufx-toggle-rail"></span></label>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Rate <span id="flangerRateValue">30</span></label>
+                                    <input type="range" id="flangerRate" min="5" max="500" value="30" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Depth <span id="flangerDepthValue">50</span>%</label>
+                                    <input type="range" id="flangerDepth" min="0" max="100" value="50" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Feedback <span id="flangerFeedbackValue">40</span>%</label>
+                                    <input type="range" id="flangerFeedback" min="-90" max="90" value="40" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Mix <span id="flangerMixValue">50</span>%</label>
+                                    <input type="range" id="flangerMix" min="0" max="100" value="50" class="ufx-slider">
+                                </div>
+                            </div>
+                        </div>
+                        <!-- CHORUS STEREO -->
+                        <div class="ufx-card" data-accent="#8b5cf6">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">🎵</span>
+                                <span class="ufx-card-title">CHORUS</span>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Mode</label>
+                                    <select id="chorusStereo" class="ufx-select">
+                                        <option value="0">OFF</option>
+                                        <option value="1">Light</option>
+                                        <option value="2">Medium</option>
+                                        <option value="3">Deep</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- DELAY STEREO -->
+                        <div class="ufx-card" data-accent="#0ea5e9">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">🔉</span>
+                                <span class="ufx-card-title">DELAY STEREO</span>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Mode</label>
+                                    <select id="delayStereo" class="ufx-select">
+                                        <option value="0">OFF</option>
+                                        <option value="1">Ping Pong</option>
+                                        <option value="2">Wide</option>
+                                        <option value="3">Cross</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- EARLY REFLECTIONS -->
+                        <div class="ufx-card" data-accent="#0ea5e9">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">🏛️</span>
+                                <span class="ufx-card-title">EARLY REFLECTIONS</span>
+                                <label class="ufx-toggle"><input type="checkbox" id="earlyRefActive"><span class="ufx-toggle-rail"></span></label>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Mix <span id="earlyRefMixValue">30</span>%</label>
+                                    <input type="range" id="earlyRefMix" min="0" max="100" value="30" class="ufx-slider">
+                                </div>
+                            </div>
+                        </div>
+                        <!-- COMPRESSOR -->
+                        <div class="ufx-card" data-accent="#f59e0b">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">📊</span>
+                                <span class="ufx-card-title">COMPRESSOR</span>
+                                <label class="ufx-toggle"><input type="checkbox" id="compressorActive"><span class="ufx-toggle-rail"></span></label>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Threshold <span id="compressorThresholdValue">-12</span>dB</label>
+                                    <input type="range" id="compressorThreshold" min="-60" max="0" value="-12" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Ratio <span id="compressorRatioValue">4</span>:1</label>
+                                    <input type="range" id="compressorRatio" min="1" max="20" value="4" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Attack <span id="compressorAttackValue">10</span>ms</label>
+                                    <input type="range" id="compressorAttack" min="1" max="100" value="10" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Release <span id="compressorReleaseValue">100</span>ms</label>
+                                    <input type="range" id="compressorRelease" min="10" max="1000" value="100" step="10" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Makeup <span id="compressorMakeupValue">0</span>dB</label>
+                                    <input type="range" id="compressorMakeup" min="0" max="24" value="0" class="ufx-slider">
+                                </div>
+                            </div>
+                        </div>
+                        <!-- LO-FI -->
+                        <div class="ufx-card" data-accent="#6b7280">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">📼</span>
+                                <span class="ufx-card-title">LO-FI</span>
+                                <label class="ufx-toggle"><input type="checkbox" id="lofiActive"><span class="ufx-toggle-rail"></span></label>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Bit Crush <span id="bitCrushValue">16</span> bits</label>
+                                    <input type="range" id="bitCrush" min="4" max="16" value="16" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Sample Rate <span id="sampleRateValue">44100</span> Hz</label>
+                                    <input type="range" id="sampleRate" min="8000" max="44100" value="44100" step="100" class="ufx-slider">
+                                </div>
+                            </div>
+                        </div>
+                        <!-- STEREO WIDTH -->
+                        <div class="ufx-card" data-accent="#00d4ff">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">🔊</span>
+                                <span class="ufx-card-title">STEREO WIDTH</span>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Width <span id="stereoWidthValue">100</span>%</label>
+                                    <input type="range" id="stereoWidth" min="0" max="200" value="100" class="ufx-slider">
+                                </div>
+                            </div>
+                        </div>
+                        <!-- TAPE STOP -->
+                        <div class="ufx-card" data-accent="#a855f7">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">📼</span>
+                                <span class="ufx-card-title">TAPE STOP</span>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Speed <span id="tapeStopValue">50</span>%</label>
+                                    <input type="range" id="tapeStop" min="0" max="100" value="50" class="ufx-slider">
+                                </div>
+                            </div>
+                        </div>
+                        <!-- BEAT REPEAT -->
+                        <div class="ufx-card" data-accent="#ef4444">
+                            <div class="ufx-card-head">
+                                <span class="ufx-card-icon">🔁</span>
+                                <span class="ufx-card-title">BEAT REPEAT</span>
+                            </div>
+                            <div class="ufx-card-body">
+                                <div class="ufx-param">
+                                    <label>Division</label>
+                                    <select id="beatRepeat" class="ufx-select">
+                                        <option value="0">OFF</option>
+                                        <option value="1">1/2</option>
+                                        <option value="2">1/4</option>
+                                        <option value="3">1/8</option>
+                                        <option value="4">1/16</option>
+                                        <option value="5">1/32</option>
+                                        <option value="6">1/64</option>
+                                        <option value="7">Triplet</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div><!-- end fxtab-masterFx -->
+
+                <!-- ═══════════════ TAB 3: ROUTING ═══════════════ -->
+                <div class="fx-subtab-content" id="fxtab-newFx">
+
+                    <!-- ── CHOKE GROUPS ── -->
+                    <div class="ufx-section-head">
+                        <span class="ufx-section-icon">✋</span>
+                        <span class="ufx-section-title">CHOKE GROUPS</span>
+                        <span class="ufx-section-hint">Tracks en el mismo grupo se silencian entre sí (ej. CH+OH)</span>
+                    </div>
+                    <div class="ufx-card" data-accent="#ec4899" style="margin-bottom:20px">
+                        <div class="ufx-card-body" id="chokeGroupControls">
+                            <!-- Generated dynamically by app.js -->
+                        </div>
+                    </div>
+
+                    <!-- ── TRACK LFO ── -->
+                    <div class="ufx-section-head">
+                        <span class="ufx-section-icon">〰️</span>
+                        <span class="ufx-section-title">TRACK LFO</span>
+                        <span class="ufx-section-hint">Modula un parámetro automáticamente por track</span>
+                    </div>
+                    <div class="ufx-card" data-accent="#14b8a6" style="margin-bottom:20px">
+                        <div class="ufx-card-body">
+                            <div class="ufx-lfo-grid">
+                                <div class="ufx-param">
+                                    <label>Track</label>
+                                    <select id="lfoTrack" class="ufx-select">
+                                        <option value="0">1-BD</option><option value="1">2-SD</option>
+                                        <option value="2">3-CH</option><option value="3">4-OH</option>
+                                        <option value="4">5-CY</option><option value="5">6-CP</option>
+                                        <option value="6">7-RS</option><option value="7">8-CB</option>
+                                        <option value="8">9-LT</option><option value="9">10-MT</option>
+                                        <option value="10">11-HT</option><option value="11">12-MA</option>
+                                        <option value="12">13-CL</option><option value="13">14-HC</option>
+                                        <option value="14">15-MC</option><option value="15">16-LC</option>
+                                    </select>
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Wave</label>
+                                    <select id="lfoWave" class="ufx-select">
+                                        <option value="0">Sine</option><option value="1">Triangle</option>
+                                        <option value="2">Square</option><option value="3">Saw Up</option>
+                                        <option value="4">Saw Down</option><option value="5">Random</option>
+                                    </select>
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Target</label>
+                                    <select id="lfoTarget" class="ufx-select">
+                                        <option value="0">Gain</option><option value="1">Pan</option>
+                                        <option value="2">Filter Cutoff</option><option value="3">Pitch</option>
+                                        <option value="4">Echo Feedback</option><option value="5">Echo Time</option>
+                                        <option value="6">Dist Drive</option><option value="7">BitCrush</option>
+                                        <option value="8">Reverb Send</option><option value="9">Delay Send</option>
+                                    </select>
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Rate <span id="lfoRateValue">100</span> cHz</label>
+                                    <input type="range" id="lfoRate" min="1" max="2000" value="100" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param">
+                                    <label>Depth <span id="lfoDepthValue">500</span></label>
+                                    <input type="range" id="lfoDepth" min="0" max="1000" value="500" class="ufx-slider">
+                                </div>
+                                <div class="ufx-param" style="display:flex;align-items:flex-end">
+                                    <button class="ufx-action-btn" id="lfoApplyBtn">APPLY LFO</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ── SONG CHAIN ── -->
+                    <div class="ufx-section-head">
+                        <span class="ufx-section-icon">🔗</span>
+                        <span class="ufx-section-title">SONG CHAIN</span>
+                        <span class="ufx-section-hint">Encadena patrones: pattern:repeats</span>
+                    </div>
+                    <div class="ufx-card" data-accent="#f97316">
+                        <div class="ufx-card-body">
+                            <div class="ufx-param" style="margin-bottom:10px">
+                                <label>Chain</label>
+                                <input type="text" id="songChainInput" class="ufx-text-input" placeholder="0:4, 1:2, 2:4, 3:1">
+                            </div>
+                            <div class="ufx-btn-row">
+                                <button class="ufx-action-btn" id="songChainUploadBtn">UPLOAD</button>
+                                <button class="ufx-action-btn ufx-action-btn--play" id="songChainPlayBtn">▶ PLAY</button>
+                                <button class="ufx-action-btn ufx-action-btn--stop" id="songChainStopBtn">■ STOP</button>
+                            </div>
+                        </div>
+                    </div>
+                </div><!-- end fxtab-newFx -->
+            </section>
+        </div>
+
+        <!-- TAB: MIDI -->
+        <div id="tab-midi" class="tab-content">
+            <section id="section-midi" class="midi-section" data-section="midi" data-title="MIDI Control">
+                
+                <!-- MIDI Dashboard Header -->
+                <div class="midi-dashboard-header">
+                    <div class="midi-title-group">
+                        <h2>🎹 MIDI USB DASHBOARD</h2>
+                        <div class="midi-connection-badge" id="midiConnectionBadge">
+                            <span class="badge-dot"></span>
+                            <span class="badge-text">Desconectado</span>
+                        </div>
+                    </div>
+                    <div class="midi-scan-toggle">
+                        <label class="toggle-switch" title="Activar/desactivar escaneo de dispositivos MIDI USB">
+                            <input type="checkbox" id="midiScanToggle" onchange="toggleMidiScan(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="midi-scan-label">USB Scan</span>
+                    </div>
+                </div>
+
+                <!-- Stats Overview -->
+                <div class="midi-stats-row">
+                    <div class="stat-card">
+                        <div class="stat-icon">🎵</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="midiTotalNotes">0</div>
+                            <div class="stat-label">Notas MIDI</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">⚡</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="midiAvgVelocity">—</div>
+                            <div class="stat-label">Velocity Media</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🎛️</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="midiCCMessages">0</div>
+                            <div class="stat-label">CC Messages</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">⏱️</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="midiUptime">00:00</div>
+                            <div class="stat-label">Tiempo Activo</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Main Dashboard Grid -->
+                <div class="midi-dashboard-grid">
+                    
+                    <!-- Left Column: Device Info & Mapping -->
+                    <div class="midi-left-column">
+                        
+                        <!-- Device Info Card -->
+                        <div class="dashboard-card device-info-card" id="midiDeviceCard">
+                            <div class="card-header">
+                                <h3><span class="card-icon">🔌</span> Dispositivo Conectado</h3>
+                                <div class="signal-indicator">
+                                    <span class="signal-bar"></span>
+                                    <span class="signal-bar"></span>
+                                    <span class="signal-bar"></span>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="device-detail">
+                                    <span class="detail-label">Dispositivo:</span>
+                                    <span class="detail-value" id="midiDeviceName">Esperando conexión...</span>
+                                </div>
+                                <div class="device-detail">
+                                    <span class="detail-label">Vendor ID:</span>
+                                    <span class="detail-value" id="midiVendorId">—</span>
+                                </div>
+                                <div class="device-detail">
+                                    <span class="detail-label">Product ID:</span>
+                                    <span class="detail-value" id="midiProductId">—</span>
+                                </div>
+                                <div class="device-detail">
+                                    <span class="detail-label">Puerto USB:</span>
+                                    <span class="detail-value">OTG (GPIO 19/20)</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- MIDI Note Mapping Card -->
+                        <div class="dashboard-card mapping-card">
+                            <div class="card-header">
+                                <h3><span class="card-icon">🗺️</span> Note Mapping</h3>
+                                <div class="mapping-controls">
+                                    <button class="mapping-btn" id="editMappingBtn" onclick="toggleMappingEdit()">✏️ Editar</button>
+                                    <button class="mapping-btn secondary" id="resetMappingBtn" onclick="resetMIDIMapping()" style="display:none;">🔄 Reset GM</button>
+                                    <button class="mapping-btn primary" id="saveMappingBtn" onclick="saveMIDIMapping()" style="display:none;">💾 Guardar</button>
+                                    <button class="mapping-btn" id="cancelMappingBtn" onclick="cancelMappingEdit()" style="display:none;">✖ Cancelar</button>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <!-- Preset selector (visible en modo edición) -->
+                                <div class="mapping-presets" id="mappingPresets" style="display:none;">
+                                    <span class="preset-label">Presets:</span>
+                                    <button class="preset-btn" onclick="applyMappingPreset('gm')">🎼 GM</button>
+                                    <button class="preset-btn" onclick="applyMappingPreset('roland')">🥁 Roland</button>
+                                    <button class="preset-btn" onclick="applyMappingPreset('mpc')">⬛ MPC</button>
+                                    <button class="preset-btn" onclick="applyMappingPreset('custom')">⚙️ Custom</button>
+                                </div>
+                                <!-- Mapping grid 16 pads -->
+                                <div class="mapping-grid" id="mappingGrid">
+                                    <!-- BD → note 36 C1 -->
+                                    <div class="mapping-item" data-pad="0" data-note="36">
+                                        <span class="pad-color-dot" style="background:rgb(255,0,0)"></span>
+                                        <span class="pad-target">BD</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="36" disabled>
+                                            <span class="note-value">36</span>
+                                            <span class="note-name">C1</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- SD → 38 D1 -->
+                                    <div class="mapping-item" data-pad="1" data-note="38">
+                                        <span class="pad-color-dot" style="background:rgb(255,165,0)"></span>
+                                        <span class="pad-target">SD</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="38" disabled>
+                                            <span class="note-value">38</span>
+                                            <span class="note-name">D1</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- CH → 42 F#1 -->
+                                    <div class="mapping-item" data-pad="2" data-note="42">
+                                        <span class="pad-color-dot" style="background:rgb(255,255,0)"></span>
+                                        <span class="pad-target">CH</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="42" disabled>
+                                            <span class="note-value">42</span>
+                                            <span class="note-name">F#1</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- OH → 46 A#1 -->
+                                    <div class="mapping-item" data-pad="3" data-note="46">
+                                        <span class="pad-color-dot" style="background:rgb(0,255,255)"></span>
+                                        <span class="pad-target">OH</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="46" disabled>
+                                            <span class="note-value">46</span>
+                                            <span class="note-name">A#1</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- CY → 49 C#2 -->
+                                    <div class="mapping-item" data-pad="4" data-note="49">
+                                        <span class="pad-color-dot" style="background:rgb(230,25,75)"></span>
+                                        <span class="pad-target">CY</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="49" disabled>
+                                            <span class="note-value">49</span>
+                                            <span class="note-name">C#2</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- CP → 39 D#1 -->
+                                    <div class="mapping-item" data-pad="5" data-note="39">
+                                        <span class="pad-color-dot" style="background:rgb(255,0,255)"></span>
+                                        <span class="pad-target">CP</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="39" disabled>
+                                            <span class="note-value">39</span>
+                                            <span class="note-name">D#1</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- RS → 37 C#1 -->
+                                    <div class="mapping-item" data-pad="6" data-note="37">
+                                        <span class="pad-color-dot" style="background:rgb(0,255,0)"></span>
+                                        <span class="pad-target">RS</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="37" disabled>
+                                            <span class="note-value">37</span>
+                                            <span class="note-name">C#1</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- CB → 56 G#2 -->
+                                    <div class="mapping-item" data-pad="7" data-note="56">
+                                        <span class="pad-color-dot" style="background:rgb(245,130,49)"></span>
+                                        <span class="pad-target">CB</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="56" disabled>
+                                            <span class="note-value">56</span>
+                                            <span class="note-name">G#2</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- LT → 41 F1 -->
+                                    <div class="mapping-item" data-pad="8" data-note="41">
+                                        <span class="pad-color-dot" style="background:rgb(145,30,180)"></span>
+                                        <span class="pad-target">LT</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="41" disabled>
+                                            <span class="note-value">41</span>
+                                            <span class="note-name">F1</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- MT → 47 B1 -->
+                                    <div class="mapping-item" data-pad="9" data-note="47">
+                                        <span class="pad-color-dot" style="background:rgb(70,240,240)"></span>
+                                        <span class="pad-target">MT</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="47" disabled>
+                                            <span class="note-value">47</span>
+                                            <span class="note-name">B1</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- HT → 50 D2 -->
+                                    <div class="mapping-item" data-pad="10" data-note="50">
+                                        <span class="pad-color-dot" style="background:rgb(240,50,230)"></span>
+                                        <span class="pad-target">HT</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="50" disabled>
+                                            <span class="note-value">50</span>
+                                            <span class="note-name">D2</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- MA → 70 A#3 -->
+                                    <div class="mapping-item" data-pad="11" data-note="70">
+                                        <span class="pad-color-dot" style="background:rgb(188,246,12)"></span>
+                                        <span class="pad-target">MA</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="70" disabled>
+                                            <span class="note-value">70</span>
+                                            <span class="note-name">A#3</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- CL → 75 D#4 -->
+                                    <div class="mapping-item" data-pad="12" data-note="75">
+                                        <span class="pad-color-dot" style="background:rgb(56,206,255)"></span>
+                                        <span class="pad-target">CL</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="75" disabled>
+                                            <span class="note-value">75</span>
+                                            <span class="note-name">D#4</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- HC → 62 D3 -->
+                                    <div class="mapping-item" data-pad="13" data-note="62">
+                                        <span class="pad-color-dot" style="background:rgb(250,190,190)"></span>
+                                        <span class="pad-target">HC</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="62" disabled>
+                                            <span class="note-value">62</span>
+                                            <span class="note-name">D3</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- MC → 63 D#3 -->
+                                    <div class="mapping-item" data-pad="14" data-note="63">
+                                        <span class="pad-color-dot" style="background:rgb(0,128,128)"></span>
+                                        <span class="pad-target">MC</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="63" disabled>
+                                            <span class="note-value">63</span>
+                                            <span class="note-name">D#3</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                    <!-- LC → 64 E3 -->
+                                    <div class="mapping-item" data-pad="15" data-note="64">
+                                        <span class="pad-color-dot" style="background:rgb(72,77,255)"></span>
+                                        <span class="pad-target">LC</span>
+                                        <div class="note-input-group">
+                                            <input class="note-input" type="range" min="0" max="127" value="64" disabled>
+                                            <span class="note-value">64</span>
+                                            <span class="note-name">E3</span>
+                                        </div>
+                                        <div class="velocity-bar"><div class="velocity-fill"></div></div>
+                                    </div>
+                                </div>
+                                <!-- GM Reference table (always visible) -->
+                                <details class="gm-reference">
+                                    <summary>📖 Referencia GM Drum Map</summary>
+                                    <div class="gm-table">
+                                        <div class="gm-row header"><span>Nota</span><span>Nombre GM</span><span>Pad</span></div>
+                                        <div class="gm-row"><span>35</span><span>Acoustic Bass Drum</span><span>BD</span></div>
+                                        <div class="gm-row"><span>36</span><span>Bass Drum 1</span><span>BD</span></div>
+                                        <div class="gm-row"><span>37</span><span>Side Stick / Rimshot</span><span>RS</span></div>
+                                        <div class="gm-row"><span>38</span><span>Acoustic Snare</span><span>SD</span></div>
+                                        <div class="gm-row"><span>39</span><span>Hand Clap</span><span>CP</span></div>
+                                        <div class="gm-row"><span>40</span><span>Electric Snare</span><span>SD</span></div>
+                                        <div class="gm-row"><span>41</span><span>Low Floor Tom</span><span>LT</span></div>
+                                        <div class="gm-row"><span>42</span><span>Closed Hi-Hat</span><span>CH</span></div>
+                                        <div class="gm-row"><span>43</span><span>High Floor Tom</span><span>LT</span></div>
+                                        <div class="gm-row"><span>44</span><span>Pedal Hi-Hat</span><span>CH</span></div>
+                                        <div class="gm-row"><span>45</span><span>Low Tom</span><span>MT</span></div>
+                                        <div class="gm-row"><span>46</span><span>Open Hi-Hat</span><span>OH</span></div>
+                                        <div class="gm-row"><span>47</span><span>Low-Mid Tom</span><span>MT</span></div>
+                                        <div class="gm-row"><span>48</span><span>Hi-Mid Tom</span><span>HT</span></div>
+                                        <div class="gm-row"><span>49</span><span>Crash Cymbal 1</span><span>CY</span></div>
+                                        <div class="gm-row"><span>50</span><span>High Tom</span><span>HT</span></div>
+                                        <div class="gm-row"><span>51</span><span>Ride Cymbal 1</span><span>CY</span></div>
+                                        <div class="gm-row"><span>56</span><span>Cowbell</span><span>CB</span></div>
+                                        <div class="gm-row"><span>57</span><span>Crash Cymbal 2</span><span>CY</span></div>
+                                        <div class="gm-row"><span>62</span><span>Mute Hi Conga</span><span>HC</span></div>
+                                        <div class="gm-row"><span>63</span><span>Open Hi Conga</span><span>MC</span></div>
+                                        <div class="gm-row"><span>64</span><span>Low Conga</span><span>LC</span></div>
+                                        <div class="gm-row"><span>70</span><span>Maracas</span><span>MA</span></div>
+                                        <div class="gm-row"><span>75</span><span>Claves</span><span>CL</span></div>
+                                    </div>
+                                </details>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right Column: Live Monitor -->
+                    <div class="midi-right-column">
+                        <div class="dashboard-card monitor-card">
+                            <div class="card-header">
+                                <h3><span class="card-icon">📡</span> Monitor en Tiempo Real</h3>
+                                <div class="monitor-filter-row">
+                                    <select id="midiMonitorFilter" class="monitor-filter-select" onchange="setMidiMonitorFilter(this.value)">
+                                        <option value="all">Todos</option>
+                                        <option value="noteOn">Note On</option>
+                                        <option value="noteOff">Note Off</option>
+                                        <option value="cc">CC</option>
+                                        <option value="pitchBend">Pitch Bend</option>
+                                    </select>
+                                    <button class="clear-monitor-btn" id="clearMidiMonitor">🗑️</button>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="monitor-display" id="midiMonitor">
+                                    <div class="monitor-placeholder">
+                                        <div class="placeholder-icon">🎹</div>
+                                        <div class="placeholder-text">Esperando mensajes MIDI...</div>
+                                        <div class="placeholder-hint">Conecta un dispositivo y toca algunas notas</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </section>
+        </div>
+
+        <!-- Hidden chat elements DISABLED
+        <div id="chatMessages" style="display:none"></div>
+        <textarea id="chatInput" style="display:none"></textarea>
+        <button id="chatSendBtn" style="display:none"></button>
+        <div id="chatProgress" style="display:none"><div id="chatProgressFill"></div><span id="chatProgressText"></span></div>
+        -->
+
+        <!-- TAB: Info (Device + Instruments) -->
+        <div id="tab-info" class="tab-content">
+            <!-- Device Info Section -->
+            <section id="section-device" class="device-info" data-section="device" data-title="Device Info">
+                <div class="info-title">🎛️ DEVICE + LIBRARY</div>
+                <div style="margin-bottom: 10px;">
+                    <button id="reloadCountsBtn" class="btn" style="background: #00aa00; padding: 6px 12px; font-size: 0.9em;">🔄 RECARGAR CONTEOS</button>
+                </div>
+                <div class="device-cards">
+                    <div class="info-card emphasis">
+                        <span class="info-label">Samples Loaded</span>
+                        <span class="info-value" id="samplesCount">0</span>
+                        <span class="info-sub" id="libraryTotals">0 files / 0 families</span>
+                    </div>
+                    <div class="info-card">
+                        <span class="info-label">Memory Used</span>
+                        <span class="info-value" id="memoryUsed">0 MB</span>
+                        <span class="info-sub" id="psramFree">PSRAM free —</span>
+                    </div>
+                    <div class="info-card">
+                        <span class="info-label">Sample Format</span>
+                        <span class="info-value" id="sampleFormat">44.1kHz Mono 16-bit</span>
+                        <span class="info-sub">Renderer locked @ 8 voices</span>
+                    </div>
+                </div>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <span class="info-label">Sampler:</span>
+                        <span class="info-value">ESP32-S3 @ 240MHz (PSRAM)</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Polyphony:</span>
+                        <span class="info-value">8 voices</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Tracks:</span>
+                        <span class="info-value" id="tracksInfo">16 tracks x 16 steps</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Output:</span>
+                        <span class="info-value">SPI → Daisy Seed (STM32H750)</span>
+                    </div>
+                </div>
+            </section>
+
+            <section id="section-clean-tracks" class="device-info" data-section="clean-tracks" data-title="Clean Tracks">
+                <div class="info-title">🎚️ CLEAN TRACKS</div>
+                <div class="clean-tracks-summary" id="cleanTracksSummary">0/4 ocupadas • modelo híbrido en preparación</div>
+                <div class="clean-tracks-grid" id="cleanTracksGrid"></div>
+            </section>
+
+            <!-- Instruments Info Section -->
+        <section id="section-instruments" class="device-info" data-section="instruments" data-title="Instrument Map">
+            <div class="info-title">🥁 SAMPLES LIBRARY</div>
+            <div class="sample-browser">
+                <div class="browser-header">
+                    <div class="browser-title">📚 TODOS LOS SAMPLES</div>
+                    <div class="sample-filters" id="sampleFilters"></div>
+                </div>
+                <div class="sample-filter-row">
+                    <label class="sample-filter-label">ACTIVOS</label>
+                    <label class="sample-toggle">
+                        <input type="checkbox" id="sampleFilterActive">
+                        <span class="sample-toggle-slider"></span>
+                    </label>
+                    <select id="sampleFilterFamily" class="sample-select"></select>
+                    <select id="sampleFilterFormat" class="sample-select"></select>
+                    <select id="sampleFilterRate" class="sample-select"></select>
+                    <select id="sampleFilterChannels" class="sample-select"></select>
+                </div>
+                <div class="sample-browser-list" id="sampleBrowserList"></div>
+            </div>
+        </section>
+        </div>
+
+        <!-- TAB: Daisy SD Card -->
+        <div id="tab-daisy-sd" class="tab-content">
+        <section class="section">
+            <h2 class="section-title">💾 Daisy SD Card</h2>
+            <div class="sd-status-bar" id="sdStatusBar">
+                <span class="sd-indicator" id="sdIndicator">⬤</span>
+                <span id="sdStatusText">Checking SD...</span>
+                <span class="sd-stats" id="sdStats"></span>
+                <button class="btn btn-small btn-secondary" id="sdRefreshBtn" onclick="sdRefreshStatus()">↻ Refresh</button>
+            </div>
+
+            <div class="sd-current-kit" id="sdCurrentKit" style="display:none">
+                <span class="sd-kit-label">LOADED KIT:</span>
+                <span class="sd-kit-name" id="sdKitName">—</span>
+                <span class="sd-kit-pads" id="sdKitPads"></span>
+                <button class="btn btn-small btn-danger" onclick="sdUnloadKit()">✕ Unload</button>
+            </div>
+
+            <div class="sd-panels">
+                <!-- Kit Browser -->
+                <div class="sd-panel">
+                    <h3 class="sd-panel-title">📁 Kits</h3>
+                    <div class="sd-kit-list" id="sdKitList">
+                        <div class="sd-empty">Press Refresh to scan...</div>
+                    </div>
+                </div>
+
+                <!-- Folder / File Browser -->
+                <div class="sd-panel sd-panel-wide">
+                    <h3 class="sd-panel-title">📂 File Browser</h3>
+                    <div class="sd-breadcrumb" id="sdBreadcrumb">
+                        <span class="sd-crumb sd-crumb-root" onclick="sdListFolders()">/ root</span>
+                    </div>
+                    <div class="sd-file-list" id="sdFileList">
+                        <div class="sd-empty">Select a folder or kit</div>
+                    </div>
+                </div>
+
+                <!-- Pad Assignment -->
+                <div class="sd-panel">
+                    <h3 class="sd-panel-title">🎯 Assign to Pad</h3>
+                    <div class="sd-pad-grid" id="sdPadGrid"></div>
+                    <div class="sd-assign-info" id="sdAssignInfo">Select a file, then click a pad</div>
+                </div>
+            </div>
+
+            <div class="sd-log" id="sdLog"></div>
+        </section>
+        </div>
+
+        <!-- Fin de Tabs -->
+
+        <!-- TAB: Melody Editor -->
+        <div id="tab-melody" class="tab-content">
+            <section class="section melody-studio">
+                <div class="melody-studio-header">
+                    <div class="melody-studio-titlebar">
+                        <h2>🎼 MELODY STUDIO</h2>
+                        <span class="melody-studio-tag">PRO · piano + score</span>
+                    </div>
+                    <div class="melody-studio-track-row">
+                        <label>Track</label>
+                        <select id="melodyTrackSelect"></select>
+                        <label>Engine</label>
+                        <select id="melodyEngineSelect" disabled>
+                            <option value="-1">— Engine —</option>
+                            <option value="3">303 Acid</option>
+                            <option value="4">WaveTable</option>
+                            <option value="5">SH-101</option>
+                            <option value="6">FM 2-Op</option>
+                        </select>
+                        <span id="melodyTrackEngine" class="melody-engine-badge">—</span>
+                    </div>
+                    <div id="melodyTabPresets" class="melody-tab-presets"></div>
+                </div>
+
+                <div class="melody-studio-grid">
+                    <!-- LEFT: PARTITURA / PIANO ROLL -->
+                    <div class="melody-studio-pane melody-studio-left">
+                        <div class="melody-studio-section-title">📜 Score · Piano Roll</div>
+                        <div class="melody-studio-controls">
+                            <button id="melodyTabPlay" class="melody-ctrl-btn">▶ Preview</button>
+                            <button id="melodyTabClear" class="melody-ctrl-btn">🗑️ Clear</button>
+                            <span class="melody-hint">click = set · right-click = rest · presets auto-fill</span>
+                        </div>
+                        <div id="melodyTabPianoRoll" class="melody-tab-piano-roll"></div>
+                    </div>
+
+                    <!-- RIGHT: LIVE KEYBOARD -->
+                    <div class="melody-studio-pane melody-studio-right">
+                        <div class="melody-studio-section-title">🎹 Live Keyboard</div>
+                        <div class="melody-live-toolbar">
+                            <button id="melodyLiveRecord" class="melody-ctrl-btn melody-record-btn">● REC</button>
+                            <button id="melodyLiveReset" class="melody-ctrl-btn">↻ Reset</button>
+                            <label class="melody-flag-label"><input type="checkbox" id="melodyTabAccent"> Accent</label>
+                            <label class="melody-flag-label"><input type="checkbox" id="melodyTabSlide"> Slide</label>
+                            <span id="melodyLiveStatus" class="melody-live-status">Note —</span>
+                            <button id="melodyPanicBtn" class="melody-ctrl-btn melody-panic-btn" title="Apagar todas las notas colgadas">🛑 Panic</button>
+                        </div>
+                        <div class="melody-assign-row">
+                            <label>1️⃣ Toca una tecla &nbsp;·&nbsp; 2️⃣ Asignar a pad:</label>
+                            <select id="melodyAssignPadSelect" class="melody-pad-select"></select>
+                            <button id="melodyAssignPad" class="melody-ctrl-btn">→ Asignar</button>
+                            <button id="melodyClearPadAssign" class="melody-ctrl-btn">Quitar</button>
+                        </div>
+                        <div id="melodyVisualPiano" class="melody-visual-piano melody-visual-piano-pro"></div>
+                        <div class="melody-keyboard-hint">
+                            <b>PC keys:</b> Z S X D C V G B H N J M <span class="kh-sep">·</span> Q 2 W 3 E R 5 T 6 Y 7 U I <span class="kh-sep">·</span> ← / → octave
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>RED808 | 16-Track Drum Machine | ESP32-S3 Dual Core | <button onclick="showKeyboardHelp()" style="background:none;border:1px solid #00ff88;color:#00ff88;padding:5px 10px;border-radius:3px;cursor:pointer;">⌨️ Keyboard Shortcuts</button></p>
+        </footer>
+    </div>
+
+    <!-- Feature modules loaded sequentially by app.js to avoid TCP congestion on ESP32 AP -->
+    <script src="sample-editor.js" defer></script>
+    <script src="app.js" defer></script>
+</body>
+</html>

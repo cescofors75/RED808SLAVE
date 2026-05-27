@@ -6,6 +6,7 @@
 
 // Global I2C mutex - shared across all files that use Wire
 SemaphoreHandle_t i2c_bus_mutex = NULL;
+static uint8_t g_i2c_hub_addr = I2C_HUB_ADDR;
 
 bool i2c_lock(int timeout_ms) {
     if (!i2c_bus_mutex) return false;
@@ -51,26 +52,37 @@ bool i2c_write_bytes(uint8_t addr, uint8_t reg, const uint8_t* data, size_t len)
 
 uint8_t i2c_read_byte(uint8_t addr, uint8_t reg) {
     if (!i2c_lock()) return 0;
+
     Wire.beginTransmission(addr);
     Wire.write(reg);
-    Wire.endTransmission(false);
-    Wire.requestFrom(addr, (uint8_t)1);
-    uint8_t val = Wire.available() ? Wire.read() : 0;
+    uint8_t val = 0;
+    if (Wire.endTransmission(false) == 0 && Wire.requestFrom(addr, (uint8_t)1) == 1 && Wire.available()) {
+        val = Wire.read();
+    }
+
     i2c_unlock();
     return val;
 }
 
 bool i2c_read_bytes(uint8_t addr, uint8_t reg, uint8_t* data, size_t len) {
     if (!i2c_lock()) return false;
+
     Wire.beginTransmission(addr);
     Wire.write(reg);
     if (Wire.endTransmission(false) != 0) { i2c_unlock(); return false; }
-    Wire.requestFrom(addr, (uint8_t)len);
-    for (size_t i = 0; i < len && Wire.available(); i++) {
+    if (Wire.requestFrom(addr, (uint8_t)len) != len) {
+        i2c_unlock();
+        return false;
+    }
+
+    size_t readCount = 0;
+    for (; readCount < len && Wire.available(); readCount++) {
+        size_t i = readCount;
         data[i] = Wire.read();
     }
+
     i2c_unlock();
-    return true;
+    return readCount == len;
 }
 
 bool i2c_device_present(uint8_t addr) {
@@ -81,9 +93,17 @@ bool i2c_device_present(uint8_t addr) {
     return ok;
 }
 
+void i2c_set_hub_addr(uint8_t addr) {
+    g_i2c_hub_addr = addr;
+}
+
+uint8_t i2c_get_hub_addr() {
+    return g_i2c_hub_addr;
+}
+
 void i2c_hub_select(uint8_t channel) {
     if (!i2c_lock()) return;
-    Wire.beginTransmission(I2C_HUB_ADDR);
+    Wire.beginTransmission(g_i2c_hub_addr);
     Wire.write(1 << channel);
     Wire.endTransmission();
     i2c_unlock();
@@ -91,7 +111,7 @@ void i2c_hub_select(uint8_t channel) {
 
 void i2c_hub_deselect() {
     if (!i2c_lock()) return;
-    Wire.beginTransmission(I2C_HUB_ADDR);
+    Wire.beginTransmission(g_i2c_hub_addr);
     Wire.write(0);
     Wire.endTransmission();
     i2c_unlock();
@@ -99,13 +119,13 @@ void i2c_hub_deselect() {
 
 // Raw versions - caller MUST already hold i2c_lock
 void i2c_hub_select_raw(uint8_t channel) {
-    Wire.beginTransmission(I2C_HUB_ADDR);
+    Wire.beginTransmission(g_i2c_hub_addr);
     Wire.write(1 << channel);
     Wire.endTransmission();
 }
 
 void i2c_hub_deselect_raw() {
-    Wire.beginTransmission(I2C_HUB_ADDR);
+    Wire.beginTransmission(g_i2c_hub_addr);
     Wire.write(0);
     Wire.endTransmission();
 }

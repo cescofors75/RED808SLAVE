@@ -3,11 +3,8 @@
 // ESP-IDF 5.x — zero-copy double-buffer, dual-semaphore vsync sync (Espressif pattern)
 // =============================================================================
 #include "lvgl_port.h"
-#include "gt911_touch.h"
 #include "rgb_lcd.h"
 #include "../../include/config.h"
-#include "../../include/system_state.h"
-#include "../ui/ui_screens.h"
 #include "esp_lcd_panel_rgb.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -22,7 +19,6 @@ static volatile bool task_started = false;
 static esp_lcd_panel_handle_t lcd_panel = NULL;
 static lv_disp_draw_buf_t draw_buf;
 static lv_disp_drv_t disp_drv;
-static lv_indev_drv_t indev_drv;
 
 // Vsync ISR — Espressif dual-semaphore handshake pattern.
 //
@@ -85,27 +81,6 @@ static void disp_flush_portrait_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv
 }
 #endif
 
-// Touch read
-static void touch_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
-    (void)drv;
-    if (!gt911_is_ready()) {
-        data->state = LV_INDEV_STATE_RELEASED;
-        return;
-    }
-
-    TouchPoint points[1] = {};
-    uint8_t count = gt911_get_points(points, 1);
-    if (count > 0 && points[0].pressed) {
-        data->state = LV_INDEV_STATE_PRESSED;
-        // Pass raw physical coordinates — LVGL's sw_rotate handles
-        // the coordinate transformation automatically via disp_drv.rotated
-        data->point.x = points[0].x;
-        data->point.y = points[0].y;
-    } else {
-        data->state = LV_INDEV_STATE_RELEASED;
-    }
-}
-
 // LVGL FreeRTOS task on core 1
 static void lvgl_task(void* arg) {
     (void)arg;
@@ -113,14 +88,7 @@ static void lvgl_task(void* arg) {
 
     TickType_t last_wake = xTaskGetTickCount();
     while (true) {
-        // Touch polling moved to dedicated touch_task (Core 0, pri 3).
-        // LVGL indev callback reads from gt911 cache — no I2C here.
-
         if (lvgl_port_lock(15)) {
-            // Check if live pads need visual refresh (set by Core 0 loop)
-            if (livePadsVisualDirty.exchange(false) && currentScreen == SCREEN_LIVE) {
-                ui_update_live_pads();
-            }
             lv_timer_handler();
             lvgl_port_unlock();
         }
@@ -203,12 +171,6 @@ void lvgl_port_init(esp_lcd_panel_handle_t lcd_handle) {
     disp_drv.full_refresh = 1;
 #endif
     lv_disp_drv_register(&disp_drv);
-
-    // Touch
-    lv_indev_drv_init(&indev_drv);
-    indev_drv.type    = LV_INDEV_TYPE_POINTER;
-    indev_drv.read_cb = touch_read_cb;
-    lv_indev_drv_register(&indev_drv);
 
     // LVGL task — core 1, priority 3 (higher = less preemption during flush)
     BaseType_t task_ok = xTaskCreatePinnedToCore(lvgl_task, "lvgl", 12288, NULL, 3, NULL, 1);

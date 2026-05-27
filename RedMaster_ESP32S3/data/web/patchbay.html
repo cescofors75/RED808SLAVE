@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>RED808 — Patchbay</title>
+  <link rel="stylesheet" href="theme-vars.css">
+<link rel="stylesheet" href="patchbay.css">
+</head>
+<body>
+<div id="patchbay">
+  <!-- Header -->
+  <header id="pbHeader">
+    <button class="pb-hdr-btn" onclick="goBack()" title="Volver">✕</button>
+    <div id="pbTransport">
+      <button class="pb-transport-btn" id="pbStopBtn" onclick="pbStop()" title="Stop">⏹</button>
+      <button class="pb-transport-btn pb-play" id="pbPlayBtn" onclick="pbTogglePlay()" title="Play/Pause">▶</button>
+      <span class="pb-transport-bpm" id="pbBpmDisplay">120</span>
+    </div>
+    <h1>RED808 <span>PATCHBAY</span></h1>
+    <button class="pb-hdr-btn" id="pbMenuBtn" onclick="togglePBMenu()" title="Workspace">☰</button>
+    <div id="pbMenu" class="pb-menu hidden">
+      <div class="pb-menu-title">Workspace</div>
+      <button onclick="pbClearAll()">🗑 Borrar todo</button>
+      <button onclick="pbResetLayout()">📐 Reset layout</button>
+      <button onclick="pbAutoRoute()">⚡ Auto-route</button>
+      <button onclick="pbBuildChain()">🧬 Encadenar FX</button>
+      <button onclick="pbOrganizeNodes()">🧭 Organizar nodos</button>
+      <button onclick="pbToggleSignalDemo()">🎬 Demo señal</button>
+
+      <div class="pb-menu-title">Live</div>
+      <button id="pbHeatToggleBtn" onclick="pbToggleHeatMode()">🌡 Heat ON</button>
+      <button id="pbQuantizeBtn" onclick="pbToggleSceneQuantize()">⏱ Quantize ON</button>
+
+      <div class="pb-menu-title">Snapshots</div>
+      <button onclick="pbSaveSnapshot('A')">📸 Guardar Snap A</button>
+      <button onclick="pbLoadSnapshot('A')">🎯 Cargar Snap A</button>
+      <button onclick="pbSaveSnapshot('B')">📸 Guardar Snap B</button>
+      <button onclick="pbLoadSnapshot('B')">🎯 Cargar Snap B</button>
+
+      <div class="pb-menu-title">Debug</div>
+      <button onclick="pbOpenFxTester()">🔬 FX Tester</button>
+    </div>
+  </header>
+  <div id="pbMenuBackdrop" class="hidden" onclick="togglePBMenu()"></div>
+
+  <!-- Embed: compact toolbar toggle (only visible in embed/multiview mode) -->
+  <button id="pbEmbedToolbarToggle" onclick="pbToggleEmbedToolbar()" title="Mostrar/ocultar controles FX">⊕ FX TOOLS</button>
+
+  <!-- Toolbar -->
+  <div id="pbToolbar">
+    <div class="pb-brand">
+      <span class="pb-logo"><b>R</b><b>E</b><b>D</b><em>8</em><em>0</em><em>8</em></span>
+      <span class="pb-subtitle">SIGNAL PATCH</span>
+    </div>
+    <div class="pb-fx-buttons" aria-label="Biblioteca de FX">
+      <div class="pb-source-bar" aria-label="Fuentes de sampler">
+        <span class="pb-source-title">SOURCES <b id="pbSourceCount">0/16</b></span>
+        <select id="pbSourcePicker" class="pb-source-picker" aria-label="Seleccionar sampler"></select>
+        <button id="pbAddSourceBtn" class="pb-source-btn" onclick="pbAddSelectedSource()">+ SOURCE</button>
+        <select id="pbActiveSourcePicker" class="pb-source-picker" aria-label="Seleccionar fuente activa"></select>
+        <button id="pbRemoveSourceBtn" class="pb-source-btn pb-source-btn-remove" onclick="pbRemoveSelectedSource()">- SOURCE</button>
+        <button id="pbAddAllSourcesBtn" class="pb-source-btn" onclick="pbAddAllSources()">+ ALL</button>
+      </div>
+      <div class="pb-fx-group">
+        <div class="pb-fx-group-head">
+          <span class="pb-fx-group-title">FILTERS</span>
+          <span class="pb-fx-group-subtitle">Track tone shaping</span>
+        </div>
+        <div class="pb-fx-group-btns">
+          <button class="pb-add-btn" data-fx="lowpass"   onclick="pbAddEffect('lowpass')">LP</button>
+          <button class="pb-add-btn" data-fx="highpass"  onclick="pbAddEffect('highpass')">HP</button>
+          <button class="pb-add-btn" data-fx="bandpass"  onclick="pbAddEffect('bandpass')">BP</button>
+          <button class="pb-add-btn" data-fx="notch"     onclick="pbAddEffect('notch')">NOTCH</button>
+          <button class="pb-add-btn" data-fx="allpass"   onclick="pbAddEffect('allpass')">ALLP</button>
+          <button class="pb-add-btn" data-fx="peaking"   onclick="pbAddEffect('peaking')">PEAK</button>
+          <button class="pb-add-btn" data-fx="lowshelf"  onclick="pbAddEffect('lowshelf')">LOSHELF</button>
+          <button class="pb-add-btn" data-fx="highshelf" onclick="pbAddEffect('highshelf')">HISHELF</button>
+          <button class="pb-add-btn" data-fx="resonant"  onclick="pbAddEffect('resonant')">RESO</button>
+        </div>
+      </div>
+      <div class="pb-fx-group">
+        <div class="pb-fx-group-head">
+          <span class="pb-fx-group-title">FX</span>
+          <span class="pb-fx-group-subtitle">Dynamics & ambience</span>
+        </div>
+        <div class="pb-fx-group-btns">
+          <button class="pb-add-btn" data-fx="echo"        onclick="pbAddEffect('echo')">REVERB</button>
+          <button class="pb-add-btn" data-fx="delay"       onclick="pbAddEffect('delay')">DELAY</button>
+          <button class="pb-add-btn" data-fx="bitcrusher"  onclick="pbAddEffect('bitcrusher')">BITCRUSH</button>
+          <button class="pb-add-btn" data-fx="distortion"  onclick="pbAddEffect('distortion')">DIST</button>
+          <button class="pb-add-btn" data-fx="compressor"  onclick="pbAddEffect('compressor')">COMP</button>
+          <button class="pb-add-btn" data-fx="flanger"     onclick="pbAddEffect('flanger')">FLANGER</button>
+          <button class="pb-add-btn" data-fx="phaser"      onclick="pbAddEffect('phaser')">PHASER</button>
+        </div>
+      </div>
+    </div>
+    <div id="pbMacroPanel">
+      <div class="pb-macro-head">
+        <span>MACROS</span>
+        <div class="pb-macro-scenes">
+          <button id="pbMacroSceneA" onclick="pbSelectMacroScene('A')">A</button>
+          <button id="pbMacroSceneB" onclick="pbSelectMacroScene('B')">B</button>
+          <button id="pbMacroSceneC" onclick="pbSelectMacroScene('C')">C</button>
+          <button id="pbMacroSceneD" onclick="pbSelectMacroScene('D')">D</button>
+        </div>
+      </div>
+      <div class="pb-macro-grid">
+        <label>M1 TONE <input id="pbMacro1" type="range" min="0" max="100" value="45"></label>
+        <label>M2 SPACE <input id="pbMacro2" type="range" min="0" max="100" value="35"></label>
+        <label>M3 GLUE <input id="pbMacro3" type="range" min="0" max="100" value="55"></label>
+        <label>M4 PUMP <input id="pbMacro4" type="range" min="0" max="100" value="40"></label>
+      </div>
+      <div class="pb-macro-actions">
+        <button onclick="pbSaveMacroScene()">Guardar escena</button>
+        <button onclick="pbLoadMacroScene()">Cargar escena</button>
+        <button id="pbMacroToggleBtn" onclick="pbToggleMacros()" style="background:rgba(105,240,174,0.2);border-color:rgba(105,240,174,0.5);color:#69f0ae;font-weight:800">\ud83d\udd0a MACROS ON</button>
+      </div>
+    </div>
+    <div class="pb-help">DRAG <span class="dot out"></span> TO CONNECT · CLICK WIRE TO SELECT · SUPR/BACKSPACE TO REMOVE · DRAG NODE TO MOVE</div>
+  </div>
+
+  <!-- Tabs PRE / POST -->
+  <div id="pbTabBar">
+    <button class="pb-tab active" data-tab="pre" onclick="pbSwitchTab('pre')">🔌 PRE <small>Insert FX</small></button>
+    <button class="pb-tab" data-tab="post" onclick="pbSwitchTab('post')">🔊 POST <small>Master FX</small></button>
+  </div>
+
+  <!-- Canvas area (PRE tab) -->
+  <div id="pbCanvas">
+    <div id="pbViewControls">
+      <button id="pbToolHandBtn" onclick="pbToggleHandTool()" title="Mover grid (mano)">✋</button>
+      <button id="pbToolSelectBtn" onclick="pbToggleSelectTool()" title="Selección múltiple">▭</button>
+      <button onclick="pbZoomOut()" title="Zoom -">−</button>
+      <span id="pbZoomValue">100%</span>
+      <button onclick="pbZoomIn()" title="Zoom +">+</button>
+      <button onclick="pbZoomReset()" title="Reset zoom">1:1</button>
+      <button id="pbGridToggleBtn" onclick="pbToggleGrid()" title="Mostrar/Ocultar cuadrícula">GRID</button>
+    </div>
+    <div id="pbSelectionBox" aria-hidden="true"></div>
+    <div id="pbWorld">
+      <svg id="pbSVG">
+        <defs>
+          <filter id="cableGlow">
+            <feGaussianBlur stdDeviation="3" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+          <filter id="nodeGlow">
+            <feGaussianBlur stdDeviation="6" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+      </svg>
+      <div id="pbNodes"></div>
+    </div>
+  </div>
+
+  <!-- POST Master FX Panel -->
+  <div id="pbPostPanel" class="hidden">
+    <div class="post-header">
+      <h2>MASTER FX CHAIN</h2>
+      <span class="post-subtitle">Signal path: Mix → Filter → Distortion → Bitcrush → Phaser → Flanger → Delay → Compressor → Out</span>
+    </div>
+    <div class="post-rack">
+
+      <!-- FILTER -->
+      <div class="post-module" data-mod="filter">
+        <div class="post-mod-head">
+          <button class="post-toggle" id="postFilterToggle" onclick="postToggle('filter')">OFF</button>
+          <span class="post-mod-title">FILTER</span>
+          <span class="post-mod-icon">🎛</span>
+        </div>
+        <div class="post-mod-body">
+          <div class="post-knob-row">
+            <label>TYPE<select id="postFilterType" onchange="postSendFilter()">
+              <option value="0">NONE</option><option value="1">LOWPASS</option><option value="2">HIGHPASS</option>
+              <option value="3">BANDPASS</option><option value="4">NOTCH</option><option value="9">RESONANT</option>
+            </select></label>
+          </div>
+          <div class="post-knob-row">
+            <label>CUTOFF<input id="postFilterCutoff" type="range" min="20" max="18000" value="4000" oninput="postSendFilter()"><span id="postFilterCutoffVal">4000</span></label>
+            <label>RESO<input id="postFilterReso" type="range" min="10" max="2000" value="100" oninput="postSendFilter()"><span id="postFilterResoVal">1.0</span></label>
+          </div>
+        </div>
+      </div>
+
+      <!-- DISTORTION -->
+      <div class="post-module" data-mod="distortion">
+        <div class="post-mod-head">
+          <button class="post-toggle" id="postDistToggle" onclick="postToggle('distortion')">OFF</button>
+          <span class="post-mod-title">DISTORTION</span>
+          <span class="post-mod-icon">🔥</span>
+        </div>
+        <div class="post-mod-body">
+          <div class="post-knob-row">
+            <label>AMOUNT<input id="postDistAmount" type="range" min="0" max="100" value="0" oninput="postSendDist()"><span id="postDistAmountVal">0</span></label>
+            <label>MODE<select id="postDistMode" onchange="postSendDist()">
+              <option value="0">SOFT</option><option value="1">HARD</option><option value="2">TUBE</option><option value="3">FUZZ</option>
+            </select></label>
+          </div>
+        </div>
+      </div>
+
+      <!-- BITCRUSHER -->
+      <div class="post-module" data-mod="bitcrusher">
+        <div class="post-mod-head">
+          <button class="post-toggle" id="postBitToggle" onclick="postToggle('bitcrusher')">OFF</button>
+          <span class="post-mod-title">BITCRUSHER</span>
+          <span class="post-mod-icon">📟</span>
+        </div>
+        <div class="post-mod-body">
+          <div class="post-knob-row">
+            <label>BITS<input id="postBitBits" type="range" min="2" max="16" value="16" oninput="postSendBit()"><span id="postBitBitsVal">16</span></label>
+            <label>RATE<input id="postBitRate" type="range" min="1000" max="44100" value="44100" oninput="postSendBit()"><span id="postBitRateVal">44100</span></label>
+          </div>
+        </div>
+      </div>
+
+      <!-- PHASER -->
+      <div class="post-module" data-mod="phaser">
+        <div class="post-mod-head">
+          <button class="post-toggle" id="postPhaserToggle" onclick="postToggle('phaser')">OFF</button>
+          <span class="post-mod-title">PHASER</span>
+          <span class="post-mod-icon">🌀</span>
+        </div>
+        <div class="post-mod-body">
+          <div class="post-knob-row">
+            <label>RATE<input id="postPhaserRate" type="range" min="1" max="100" value="30" oninput="postSendPhaser()"><span id="postPhaserRateVal">30</span></label>
+            <label>DEPTH<input id="postPhaserDepth" type="range" min="0" max="100" value="60" oninput="postSendPhaser()"><span id="postPhaserDepthVal">60</span></label>
+            <label>FB<input id="postPhaserFb" type="range" min="0" max="90" value="40" oninput="postSendPhaser()"><span id="postPhaserFbVal">40</span></label>
+          </div>
+        </div>
+      </div>
+
+      <!-- FLANGER -->
+      <div class="post-module" data-mod="flanger">
+        <div class="post-mod-head">
+          <button class="post-toggle" id="postFlangerToggle" onclick="postToggle('flanger')">OFF</button>
+          <span class="post-mod-title">FLANGER</span>
+          <span class="post-mod-icon">🌊</span>
+        </div>
+        <div class="post-mod-body">
+          <div class="post-knob-row">
+            <label>RATE<input id="postFlangerRate" type="range" min="1" max="100" value="25" oninput="postSendFlanger()"><span id="postFlangerRateVal">25</span></label>
+            <label>DEPTH<input id="postFlangerDepth" type="range" min="0" max="100" value="70" oninput="postSendFlanger()"><span id="postFlangerDepthVal">70</span></label>
+            <label>FB<input id="postFlangerFb" type="range" min="0" max="90" value="50" oninput="postSendFlanger()"><span id="postFlangerFbVal">50</span></label>
+            <label>MIX<input id="postFlangerMix" type="range" min="0" max="100" value="50" oninput="postSendFlanger()"><span id="postFlangerMixVal">50</span></label>
+          </div>
+        </div>
+      </div>
+
+      <!-- DELAY -->
+      <div class="post-module" data-mod="delay">
+        <div class="post-mod-head">
+          <button class="post-toggle" id="postDelayToggle" onclick="postToggle('delay')">OFF</button>
+          <span class="post-mod-title">DELAY</span>
+          <span class="post-mod-icon">🔁</span>
+        </div>
+        <div class="post-mod-body">
+          <div class="post-knob-row">
+            <label>TIME<input id="postDelayTime" type="range" min="10" max="750" value="250" oninput="postSendDelay()"><span id="postDelayTimeVal">250ms</span></label>
+            <label>FB<input id="postDelayFb" type="range" min="0" max="95" value="40" oninput="postSendDelay()"><span id="postDelayFbVal">40</span></label>
+            <label>MIX<input id="postDelayMix" type="range" min="0" max="100" value="35" oninput="postSendDelay()"><span id="postDelayMixVal">35</span></label>
+          </div>
+        </div>
+      </div>
+
+      <!-- COMPRESSOR -->
+      <div class="post-module" data-mod="compressor">
+        <div class="post-mod-head">
+          <button class="post-toggle" id="postCompToggle" onclick="postToggle('compressor')">OFF</button>
+          <span class="post-mod-title">COMPRESSOR</span>
+          <span class="post-mod-icon">📊</span>
+        </div>
+        <div class="post-mod-body">
+          <div class="post-knob-row">
+            <label>THRESH<input id="postCompThresh" type="range" min="-60" max="0" value="-20" oninput="postSendComp()"><span id="postCompThreshVal">-20dB</span></label>
+            <label>RATIO<input id="postCompRatio" type="range" min="10" max="200" value="40" oninput="postSendComp()"><span id="postCompRatioVal">4.0</span></label>
+            <label>ATK<input id="postCompAtk" type="range" min="1" max="100" value="5" oninput="postSendComp()"><span id="postCompAtkVal">5ms</span></label>
+            <label>REL<input id="postCompRel" type="range" min="10" max="500" value="100" oninput="postSendComp()"><span id="postCompRelVal">100ms</span></label>
+            <label>GAIN<input id="postCompGain" type="range" min="0" max="24" value="3" oninput="postSendComp()"><span id="postCompGainVal">3dB</span></label>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="post-actions">
+      <button class="post-clear-btn" onclick="postClearAll()">💣 CLEAR ALL MASTER FX</button>
+    </div>
+  </div>
+
+  <!-- Parameter Editor Popup -->
+  <div id="pbParamEditor" class="hidden">
+    <div class="pb-param-header">
+      <span id="pbParamTitle">EFFECT</span>
+      <button onclick="closeParamEditor()">✕</button>
+    </div>
+    <div id="pbParamBody"></div>
+  </div>
+
+  <div id="pbPresetPanel" class="hidden">
+    <div class="pb-preset-head">
+      <span>PRESETS PATCHBAY</span>
+      <button onclick="pbClosePresetPanel()">✕</button>
+    </div>
+    <div class="pb-preset-save">
+      <input id="pbPresetNameInput" type="text" placeholder="Nombre preset usuario..." maxlength="48">
+      <button onclick="pbSavePresetFromPanel()">Guardar</button>
+    </div>
+    <div class="pb-preset-browser-tools">
+      <input id="pbPresetSearchInput" type="text" placeholder="Buscar por nombre, tag o descripción..." oninput="pbRefreshPresetBrowser()">
+      <label><input id="pbPresetFavOnly" type="checkbox" onchange="pbRefreshPresetBrowser()">⭐ Favoritos</label>
+    </div>
+    <div class="pb-preset-sections">
+      <section>
+        <h3>Fábrica</h3>
+        <div id="pbFactoryPresetList" class="pb-preset-list"></div>
+      </section>
+      <section>
+        <h3>Usuario</h3>
+        <div id="pbUserPresetList" class="pb-preset-list"></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- FX Debug Tester Panel -->
+  <div id="pbFxTester" class="hidden">
+    <div class="pb-tester-head">
+      <span>🔬 FX DEBUG TESTER</span>
+      <button onclick="pbCloseFxTester()">✕</button>
+    </div>
+    <div class="pb-tester-body">
+      <div class="pb-tester-row">
+        <label>TRACK</label>
+        <select id="pbTestTrack"></select>
+        <button id="pbTestAllTracksBtn" onclick="pbTestToggleAllTracks()" style="font-size:11px;padding:4px 10px;border:1px solid rgba(255,255,255,0.2);border-radius:6px;background:rgba(255,255,255,0.08);color:#dff7ff;cursor:pointer">ALL</button>
+      </div>
+      <div class="pb-tester-row">
+        <label>FX TYPE</label>
+        <select id="pbTestFxType" onchange="pbTestBuildParams()"></select>
+      </div>
+      <div id="pbTestParams" class="pb-tester-params"></div>
+      <div class="pb-tester-actions">
+        <button class="pb-tester-send" onclick="pbTestSend()">⚡ SEND TO FIRMWARE</button>
+        <button class="pb-tester-clear" onclick="pbTestClear()">🗑 CLEAR FX</button>
+        <button class="pb-tester-clearall" onclick="pbTestClearAll()">💣 CLEAR ALL</button>
+      </div>
+      <div id="pbTestLog" class="pb-tester-log"></div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer id="pbFooter">
+    <span class="pb-status-dot" id="pbWsStatus"></span>
+    <span>NODES: <b id="pbNodeCount">0</b></span>
+    <span>—</span>
+    <span>CABLES: <b id="pbCableCount">0</b></span>
+    <span>—</span>
+    <span id="pbFxStatus" style="color:#69f0ae">FX: <b id="pbFxActive">0</b></span>
+    <span class="pb-footer-brand">RED808 / PATCHBAY v1.0</span>
+  </footer>
+</div>
+<script src="patchbay.js"></script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>RED808 · MULTIVIEW</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="theme-vars.css">
+  <link rel="stylesheet" href="multiview.css">
+</head>
+<body>
+<div id="mvApp">
+
+  <!-- ── TOOLBAR ── -->
+  <div id="mvToolbar">
+    <a href="/" class="mv-back-btn" title="Volver al RED808">
+      <span class="mv-back-logo">RED<span>808</span></span>
+    </a>
+    <span class="mv-title">MULTIVIEW</span>
+
+    <div class="mv-layouts" id="mvLayouts">
+      <!-- Rendered by JS -->
+    </div>
+
+    <div class="mv-toolbar-right">
+      <button class="mv-icon-btn" id="mvEditModeBtn" title="Editar disposición" onclick="mvToggleEditMode()">✎</button>
+      <button class="mv-icon-btn" id="mvFullscreenBtn" title="Pantalla completa" onclick="mvToggleFullscreen()">⛶</button>
+    </div>
+  </div>
+
+  <!-- ── GRID ── -->
+  <div id="mvGrid"></div>
+
+  <!-- ── PANEL PICKER OVERLAY ── -->
+  <div id="mvPicker" class="mv-picker hidden" aria-modal="true" role="dialog">
+    <div class="mv-picker-box">
+      <div class="mv-picker-head">
+        <span class="mv-picker-title">SELECCIONA PANEL</span>
+        <button class="mv-picker-close" onclick="mvClosePicker()">✕</button>
+      </div>
+      <div class="mv-picker-grid" id="mvPickerGrid">
+        <!-- Rendered by JS -->
+      </div>
+    </div>
+  </div>
+
+</div>
+<script src="multiview.js"></script>
+</body>
+</html>

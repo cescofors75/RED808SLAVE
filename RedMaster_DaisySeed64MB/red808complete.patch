@@ -1,0 +1,125 @@
+diff --git a/DaisySeed/main.cpp b/DaisySeed/main.cpp
+index 010961a..942cc2e 100644
+--- a/DaisySeed/main.cpp
++++ b/DaisySeed/main.cpp
+@@ -1754,6 +1754,13 @@ static inline void Synth808TriggerByPad(uint8_t padIdx, float velocity)
+         synth808.Trigger(TR808::INST_KICK, velocity); /* fallback */
+ }
+ 
++/* Headroom de los engines de bateria (808/909/505) antes del bus master.
++ * Cada Kit ya limita internamente a ~0.98, pero se sumaban a nivel completo
++ * mientras los synths melodicos llevan -4 dB (*0.63). Con master hasta 150%
++ * eso saturaba el soft-clip de salida. ~-3 dB deja headroom sin restarles
++ * protagonismo frente a los melodicos. */
++static constexpr float kDrumBusHeadroom = 0.70f;
++
+ /* Bitmask: qué engines están activos */
+ static uint16_t synthActiveMask = 0x01FF;  /* all 9 engines active */
+ static uint8_t pianoSelectedEngine = SYNTH_ENGINE_303;
+@@ -3782,6 +3789,26 @@ static void RunStartupStressReport(uint32_t nowMs)
+     }
+ }
+ 
++/* ── Reporte periódico del profiler DSP durante uso normal ──
++ * Solo activo con RED808_DSP_BLOCK_PROFILE=1; coste cero en producción.
++ * Emite por serial cada kDspLiveProfileMs los ciclos/% por engine y FX,
++ * medidos con los patrones reales (a diferencia del stress de arranque,
++ * que usa patrones sintéticos). Util para decidir qué optimizar. */
++#if RED808_DSP_BLOCK_PROFILE
++static constexpr uint32_t kDspLiveProfileMs = 3000;
++static uint32_t liveDspProfileNextMs = 0;
++static void RunLiveDspProfileReport(uint32_t nowMs)
++{
++    if(!kEnableStartLog)          return;
++    if(startupStressReportActive) return;  /* no pisar el stress de arranque */
++    if((int32_t)(nowMs - liveDspProfileNextMs) < 0) return;
++    liveDspProfileNextMs = nowMs + kDspLiveProfileMs;
++    PrintDspProfileReport(nowMs, "live");
++}
++#else
++static inline void RunLiveDspProfileReport(uint32_t) {}
++#endif
++
+ static void SilenceVoicesInPadRange(uint8_t startPad, uint8_t endPad)
+ {
+     if(endPad > MAX_PADS)
+@@ -4459,7 +4486,7 @@ void AudioCallback(AudioHandle::InputBuffer  /*in*/,
+ 
+         if ((synthActiveMask & (1 << SYNTH_ENGINE_808)) && synth808.ActiveCount() > 0){
+             DSP_PROF_SCOPE(SYNTH_808);
+-            float s = sanitizeF(synth808.Process());
++            float s = sanitizeF(synth808.Process()) * kDrumBusHeadroom;
+             DSP_PROF_END(SYNTH_808);
+             DSP_PROF_SCOPE(SYNTH_ROUTING);
+             synthTobus(s, engTrk[SYNTH_ENGINE_808]);
+@@ -4467,7 +4494,7 @@ void AudioCallback(AudioHandle::InputBuffer  /*in*/,
+         }
+         if ((synthActiveMask & (1 << SYNTH_ENGINE_909)) && synth909.ActiveCount() > 0){
+             DSP_PROF_SCOPE(SYNTH_909);
+-            float s = sanitizeF(synth909.Process());
++            float s = sanitizeF(synth909.Process()) * kDrumBusHeadroom;
+             DSP_PROF_END(SYNTH_909);
+             DSP_PROF_SCOPE(SYNTH_ROUTING);
+             synthTobus(s, engTrk[SYNTH_ENGINE_909]);
+@@ -4475,7 +4502,7 @@ void AudioCallback(AudioHandle::InputBuffer  /*in*/,
+         }
+         if (kEnableSynth505 && (synthActiveMask & (1 << SYNTH_ENGINE_505)) && synth505.ActiveCount() > 0){
+             DSP_PROF_SCOPE(SYNTH_505);
+-            float s = sanitizeF(synth505.Process());
++            float s = sanitizeF(synth505.Process()) * kDrumBusHeadroom;
+             DSP_PROF_END(SYNTH_505);
+             DSP_PROF_SCOPE(SYNTH_ROUTING);
+             synthTobus(s, engTrk[SYNTH_ENGINE_505]);
+@@ -8330,6 +8357,7 @@ int main()
+         RunStartup808SelfTest(now);
+         RunStartupStressReport(now);
+         RunPerformanceStressMode(now);
++        RunLiveDspProfileReport(now);
+         if(kStartupToneTest)
+             hw.SetLed(((now / 125u) & 1u) != 0u);
+         else
+diff --git a/DaisySeed/synth/tr505.h b/DaisySeed/synth/tr505.h
+index 746ace1..520ad43 100644
+--- a/DaisySeed/synth/tr505.h
++++ b/DaisySeed/synth/tr505.h
+@@ -72,6 +72,10 @@ static inline float Clamp(float v, float lo, float hi) {
+ 
+ /* tanh(x) Pade 3/3: error < 0.4% en [-4,4]  ~3x mas rapido */
+ static inline float FastTanh(float x) {
++    /* El Pade 3/3 solo satura en [-3,3]; fuera de ese rango vuelve a crecer
++     * (no es un limitador real). Acotamos la entrada para que tope en +-1.0
++     * (f(3)=1.0 exacto) y no genere transientes asperos en golpes fuertes. */
++    x = Clamp(x, -3.0f, 3.0f);
+     const float x2 = x * x;
+     return x * (27.0f + x2) / (27.0f + 9.0f * x2);
+ }
+diff --git a/DaisySeed/synth/tr808.h b/DaisySeed/synth/tr808.h
+index cd92735..3d259dc 100644
+--- a/DaisySeed/synth/tr808.h
++++ b/DaisySeed/synth/tr808.h
+@@ -60,6 +60,10 @@ static inline float Clamp(float v, float lo, float hi) {
+ /* tanh(x) aproximacion racional Pade 3/3
+  * Error < 0.4% en [-4,4]  ~3x mas rapido que tanhf() en Cortex-M */
+ static inline float FastTanh(float x) {
++    /* El Pade 3/3 solo satura en [-3,3]; fuera de ese rango vuelve a crecer
++     * (no es un limitador real). Acotamos la entrada para que tope en +-1.0
++     * (f(3)=1.0 exacto) y no genere transientes asperos en golpes fuertes. */
++    x = Clamp(x, -3.0f, 3.0f);
+     const float x2 = x * x;
+     return x * (27.0f + x2) / (27.0f + 9.0f * x2);
+ }
+diff --git a/DaisySeed/synth/tr909.h b/DaisySeed/synth/tr909.h
+index 0157677..f2374c6 100644
+--- a/DaisySeed/synth/tr909.h
++++ b/DaisySeed/synth/tr909.h
+@@ -72,6 +72,10 @@ static inline float Clamp(float v, float lo, float hi) {
+ /* tanh(x) Pade 3/3: error < 0.4% en [-4,4]
+  * ~3x mas rapido que tanhf() en Cortex-M7 sin FPU tanh nativa */
+ static inline float FastTanh(float x) {
++    /* El Pade 3/3 solo satura en [-3,3]; fuera de ese rango vuelve a crecer
++     * (no es un limitador real). Acotamos la entrada para que tope en +-1.0
++     * (f(3)=1.0 exacto) y no genere transientes asperos en golpes fuertes. */
++    x = Clamp(x, -3.0f, 3.0f);
+     const float x2 = x * x;
+     return x * (27.0f + x2) / (27.0f + 9.0f * x2);
+ }

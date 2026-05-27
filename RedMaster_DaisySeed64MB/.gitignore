@@ -1,0 +1,13 @@
+# Build output
+DaisySeed/build/
+
+
+# Logs y archivos de flash (generados por scripts)
+*.log
+build_log*.txt
+build_daisy*.txt
+build_esp32*.txt
+flash_*.txt
+dfu_list.txt
+DaisySeed/build_log*.txt
+DaisySeed/flash_daisy_script_log.txt

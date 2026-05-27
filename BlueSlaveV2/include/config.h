@@ -29,7 +29,7 @@
 
 // Portrait mode: 0 = landscape (1024x600), 1 = portrait (600x1024 via SW rotation)
 #ifndef PORTRAIT_MODE
-#define PORTRAIT_MODE  1
+#define PORTRAIT_MODE  0
 #endif
 
 #if PORTRAIT_MODE
@@ -118,81 +118,36 @@
 // ON-BOARD I2C DEVICES
 // =============================================================================
 #define IO_EXT_ADDR    0x24   // CH32V003 IO Expander
-#define GT911_ADDR     0x5D   // Touch controller (alt: 0x14)
-#define GT911_INT_PIN  GPIO_NUM_4
 
 // CH32V003 IO Expander Pin Assignments
-#define EXIO_GP        0  // General purpose
-#define EXIO_TP_RST    1  // Touch reset
 #define EXIO_BL        2  // LCD backlight
 #define EXIO_LCD_RST   3  // LCD reset
-#define EXIO_SD_CS     4  // SD card CS
-#define EXIO_IF_SEL    5  // Interface select (CAN/USB)
 
 // =============================================================================
 // EXTERNAL I2C DEVICES (via PCA9548A hub)
 // =============================================================================
 #define I2C_HUB_ADDR   0x70  // PCA9548A / TCA9548A
 
-// Known-device bitmask per PCA9548A channel for the STATUS screen.
-#define I2C_DEVBIT_M5_ROTATE8   0x01
-#define I2C_DEVBIT_BYTEBUTTON   0x02
-#define I2C_DEVBIT_DFROBOT_ENC  0x04
-#define I2C_DEVBIT_POT_ADC      0x08
-
 // M5 ROTATE8 Modules (2x)
 #define M5_ENCODER_MODULES     2
 #define ENCODERS_PER_MODULE    8
 #define M5_ENCODER_ADDR        0x41  // Both modules, separated by hub
-#define M5_ENCODER1_HUB_CH     2     // preferred channel for module #1
-#define M5_ENCODER2_HUB_CH     6     // preferred channel for module #2
-
-// DFRobot SEN0502 Visual Rotary Encoders (4x)
-#define DFROBOT_ENCODER_COUNT  4    // 4 DFRobot ring-LED rotaries via PCA9548A
-#define DFROBOT_ENCODER_ADDR   0x54  // All encoders same addr, separated by hub
-// DFRobot #1 (CH2): BPM coarse      (button = reset to default BPM)
-// DFRobot #2 (CH3): FX Flanger      (button = mute/unmute Flanger)
-// DFRobot #3 (CH4): FX Delay        (button = mute/unmute Delay)
-// DFRobot #4 (CH5): FX Reverb       (button = mute/unmute Reverb)
+#define M5_ENCODER1_CHANNEL    1
+#define M5_ENCODER2_CHANNEL    2
 
 // M5 Unit ByteButton (up to 2x via hub channels)
 #define BYTEBUTTON_COUNT       2
 #define BYTEBUTTON_ADDR        0x47
 #define BYTEBUTTON_BUTTONS     8
 #define BYTEBUTTON_TOTAL_BUTTONS (BYTEBUTTON_COUNT * BYTEBUTTON_BUTTONS)
-#define BYTEBUTTON1_HUB_CH     4
-#define BYTEBUTTON2_HUB_CH     5
-
-// DFRobot 4x analog pot hub via I2C ADC converter (ADS1115-compatible)
-#define DFROBOT_POT_COUNT      4
-#define DFROBOT_POT_ADC_ADDR   0x48
-#define DFROBOT_POT_ADC_ADDR_ALT 0x49
-
-// =============================================================================
-// SD CARD (SDMMC 1-bit mode, CS via CH32V003 EXIO4)
-// GPIO 11=CLK, 12=CMD, 13=D0 (confirmed free pins on Waveshare ESP32-S3-7B)
-// =============================================================================
-#define SD_CLK_PIN     12  // GPIO12 = SCK  (confirmed from schematic)
-#define SD_CMD_PIN     11  // GPIO11 = MOSI (confirmed from schematic)
-#define SD_D0_PIN      13  // GPIO13 = MISO (confirmed from schematic)
-// D3/CS via EXIO4 — must be HIGH before SD_MMC.begin() so card enters SDMMC mode
-// Mount point for SD_MMC
-#define SD_MOUNT_POINT "/sdcard"
+#define BYTEBUTTON1_CHANNEL    3
+#define BYTEBUTTON2_CHANNEL    4
 
 // =============================================================================
 // WiFi / UDP — S3 connects to Master directly (set to 0 when P4 handles WiFi)
 // =============================================================================
 #ifndef S3_WIFI_ENABLED
-#define S3_WIFI_ENABLED  0   // 0 = S3 is UART-only slave to P4, 1 = S3 has own WiFi
-#endif
-
-// =============================================================================
-// P4 bridge transport: 0 = UART1/Serial1 (RS485 connector), 1 = USB-C (Serial/HWCDC)
-// When USB bridge is enabled, binary protocol goes through the native USB-C port.
-// The P4 acts as USB Host on its OTG port and reads S3 as a CDC-ACM device.
-// =============================================================================
-#ifndef P4_USB_BRIDGE
-#define P4_USB_BRIDGE  1
+#define S3_WIFI_ENABLED  1   // 0 = S3 is UART-only slave to P4, 1 = S3 has own WiFi
 #endif
 
 namespace WiFiConfig {
@@ -200,92 +155,5 @@ namespace WiFiConfig {
     constexpr const char* PASSWORD = "red808esp32";
     constexpr const char* MASTER_IP = "192.168.4.1";
     constexpr uint16_t UDP_PORT    = 8888;
-    constexpr uint32_t TIMEOUT_MS  = 3000;
     constexpr uint32_t RECONNECT_INTERVAL_MS       = 1500;
-    constexpr uint32_t RECONNECT_ATTEMPT_TIMEOUT_MS = 5000;
-    constexpr uint32_t DISCONNECT_GRACE_MS = 1500;
-    constexpr uint32_t MASTER_HELLO_RETRY_MS = 300;
-    constexpr uint32_t UDP_RECEIVE_MS = 20;  // relaxed — JSON parse is expensive
-}
-
-// =============================================================================
-// SEQUENCER
-// =============================================================================
-namespace Config {
-    constexpr int MAX_STEPS     = 64;  // max steps per pattern (4 bars × 16 steps)
-    constexpr int STEPS_PER_BANK = 16; // steps visible in the UI at once (1 bar)
-    constexpr int MAX_TRACKS    = 16;
-    constexpr int TRACKS_PER_PAGE = 8;
-    constexpr int MAX_PATTERNS  = 16;
-    constexpr int MAX_KITS      = 3;
-
-    constexpr int MIN_BPM       = 40;
-    constexpr int MAX_BPM       = 240;
-    constexpr int DEFAULT_BPM   = 120;
-
-    constexpr int DEFAULT_VOLUME = 75;
-    constexpr int MAX_VOLUME    = 150;
-    constexpr int MAX_SAMPLES   = 16;
-    constexpr int DEFAULT_TRACK_VOLUME = 75;
-
-    // Timing
-    constexpr uint32_t ENCODER_READ_MS    = 5;   // 200Hz polling — fast encoder response
-    constexpr uint32_t BUTTON_DEBOUNCE_MS = 25;
-    constexpr uint32_t LED_FLASH_MS       = 100;
-    constexpr uint32_t SCREEN_UPDATE_MS   = 12;  // ~83fps UI update — smoother step animation
-    constexpr uint32_t UDP_CHECK_MS       = 30000;
-    constexpr uint32_t TOUCH_ENCODER_READ_MS = 20;  // slower encoder poll in touch-heavy screens to free I2C bus
-    constexpr bool ENABLE_MICROTIMING = false;      // disable random jitter for tighter live/demo response
-
-    // Touch tuning (Waveshare 7B). Fine tune offsets if hitboxes feel shifted.
-    constexpr bool TOUCH_SWAP_XY = false;
-    constexpr bool TOUCH_INVERT_X = false;
-    constexpr bool TOUCH_INVERT_Y = false;
-    constexpr int TOUCH_X_OFFSET = 0;
-    constexpr int TOUCH_Y_OFFSET = 0;
-    constexpr int TOUCH_X_SCALE_PCT = 100;
-    constexpr int TOUCH_Y_SCALE_PCT = 100;
-    constexpr int TOUCH_JITTER_PX = 3;
-    constexpr uint8_t LIVE_PAD_HIT_MARGIN_PCT = 10;   // adaptive pad hit expansion
-    constexpr uint8_t LIVE_PAD_HIT_MARGIN_MIN = 6;
-    constexpr uint8_t LIVE_PAD_HIT_MARGIN_MAX = 24;
-    constexpr uint8_t TOUCH_MAX_POINTS = 5;
-    // Raw touch range calibration (GT911 reported range before transform)
-    constexpr int TOUCH_RAW_MIN_X = 0;
-    constexpr int TOUCH_RAW_MAX_X = 1023;
-    constexpr int TOUCH_RAW_MIN_Y = 0;
-    constexpr int TOUCH_RAW_MAX_Y = 599;
-
-    // DFRobot rotary tuning
-    constexpr int DF_DELTA_CLAMP = 16;
-    constexpr int DF_GLITCH_THRESHOLD = 64;
-    constexpr int DF_COUNTS_PER_STEP = 2;
-    constexpr int DF_VOLUME_STEP = 3;   // Master volume change per encoder step
-    constexpr int DF_BPM_STEP = 1;      // BPM change per encoder step
-    constexpr int DF_FX_STEP_FINE = 4;  // DF1-DF3 sensitivity (fine)
-    constexpr int DF_FX_STEP_AGGR = 8;  // DF1-DF3 sensitivity (aggressive)
-    constexpr int DF_FX_STEP = 2;       // ~10 per click (gain10/2=5 logical × 2), ~13 clicks full range
-    constexpr uint32_t DF_BUTTON_GUARD_MS = 250;
-    constexpr uint32_t DF_POT_READ_MS = 10;           // 100Hz poll for fast live response
-    constexpr uint8_t DF_POT_MIDI_DEADBAND = 2;       // ignore ±1 MIDI noise, send on ±2 change
-    constexpr uint8_t DF_POT_STABLE_READS = 1;        // no extra hold before applying change
-    constexpr uint16_t DF_POT_MIN_SPAN = 8;           // lower threshold so narrow-range pots work sooner
-    constexpr uint16_t DF_POT_RAW_IDLE_DB = 12;       // tighter response, still filters idle noise
-    constexpr uint8_t DF_POT_HYST_NUM = 35;           // detent hysteresis numerator (~0.35 step)
-    constexpr uint8_t DF_POT_HYST_DEN = 100;          // detent hysteresis denominator
-    constexpr int DF_IDLE_DELTA_DB = 0;               // pass all non-zero deltas (gain=10 gives clean steps)
-    constexpr int DF_NEAR_ZERO_REPEAT = 2;            // light jitter filter (require 2 same-direction reads)
-
-    // M5 Unit Fader on analog pin (replaces old analog rotary)
-    constexpr int UNIT_FADER_PIN = 6;        // GPIO6 signal pin
-    constexpr int UNIT_FADER_DEADBAND = 1;   // finer response for 0.1 BPM tuning
-    constexpr uint32_t UNIT_FADER_READ_MS = 12;
-    constexpr int UNIT_FADER_COUNTS_PER_TENTH = 12;
-
-    // UART bridge to ESP32-P4 Visual Beast
-    constexpr int UART_P4_TX_PIN = 16;       // S3 TX → P4 RX
-    constexpr int UART_P4_RX_PIN = 15;       // S3 RX ← P4 TX
-
-    // Menu
-    constexpr int MENU_ITEMS = 6;
 }

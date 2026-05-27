@@ -33,6 +33,22 @@
 			"group": "build"
 		},
 		{
+			"label": "PlatformIO: Upload Slave S3",
+			"type": "shell",
+			"command": "pwsh.exe",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-File", "${workspaceFolder}/.vscode/upload_device.ps1",
+				"-Device", "s3",
+				"-Target", "upload",
+				"-ProjectDir", "${workspaceFolder}/BlueSlaveV2",
+				"-Environment", "esp32s3"
+			],
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
 			"label": "PlatformIO: Upload Filesystem S3",
 			"type": "shell",
 			"command": "pwsh.exe",
@@ -74,6 +90,41 @@
 				"-ExecutionPolicy", "Bypass",
 				"-File", "${workspaceFolder}/RedMaster_DaisySeed64MB/flash_daisy.ps1",
 				"-SkipSamples"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true
+			}
+		},
+		{
+			"label": "PlatformIO: Build Daisy",
+			"type": "shell",
+			"command": "pwsh.exe",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-File", "${workspaceFolder}/RedMaster_DaisySeed64MB/build_daisy.ps1"
+			],
+			"problemMatcher": [],
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true
+			}
+		},
+		{
+			"label": "PlatformIO: Build Daisy (Clean)",
+			"type": "shell",
+			"command": "pwsh.exe",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy", "Bypass",
+				"-Command",
+				"Remove-Item -Recurse -Force '${workspaceFolder}/RedMaster_DaisySeed64MB/DaisySeed/build' -ErrorAction SilentlyContinue; & '${workspaceFolder}/RedMaster_DaisySeed64MB/build_daisy.ps1'"
 			],
 			"problemMatcher": [],
 			"group": "build",
@@ -193,6 +244,23 @@
 			}
 		},
 		{
+			"label": "PlatformIO: Monitor Slave S3",
+			"type": "shell",
+			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe",
+			"args": [
+				"device", "monitor",
+				"--project-dir", "${workspaceFolder}/BlueSlaveV2",
+				"--environment", "esp32s3"
+			],
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true,
+				"focus": true
+			}
+		},
+		{
 			"label": "PlatformIO: Build SlavePico",
 			"type": "shell",
 			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe run --project-dir ${workspaceFolder}/SlavePico --environment slavepico-p4",
@@ -232,6 +300,25 @@
 				"reveal": "always",
 				"panel": "dedicated",
 				"clear": true
+			}
+		},
+		{
+			"label": "PlatformIO: Monitor Daisy",
+			"type": "shell",
+			"command": "${userHome}/.platformio/penv/Scripts/platformio.exe",
+			"args": [
+				"device", "monitor",
+				"--baud", "115200"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/RedMaster_DaisySeed64MB/DaisySeed"
+			},
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true,
+				"focus": true
 			}
 		},
 		{

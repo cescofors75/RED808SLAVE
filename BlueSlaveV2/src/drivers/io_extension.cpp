@@ -32,16 +32,6 @@ void io_ext_output(uint8_t pin, uint8_t value) {
     i2c_write_byte(IO_EXT_ADDR, CH32V003_OUTPUT_REG, output_state);
 }
 
-void io_ext_backlight_on() {
-    // PWM 0 = max brightness (inverted logic on CH32V003)
-    i2c_write_byte(IO_EXT_ADDR, CH32V003_PWM_REG, 0);
-    io_ext_output(EXIO_BL, 1);
-}
-
-void io_ext_backlight_off() {
-    io_ext_output(EXIO_BL, 0);
-}
-
 void io_ext_backlight_set(uint8_t brightness) {
     // CH32V003 PWM is inverted: 0=max bright, 247=min bright, >247=off
     // brightness input: 0=off, 100=max
@@ -57,24 +47,9 @@ void io_ext_backlight_set(uint8_t brightness) {
     io_ext_output(EXIO_BL, 1);
 }
 
-void io_ext_touch_reset() {
-    io_ext_output(EXIO_TP_RST, 0);
-    delay(10);
-    io_ext_output(EXIO_TP_RST, 1);
-    delay(50);
-}
-
 void io_ext_lcd_reset() {
     io_ext_output(EXIO_LCD_RST, 0);
     delay(10);
     io_ext_output(EXIO_LCD_RST, 1);
     delay(50);
-}
-
-void io_ext_sd_enable() {
-    io_ext_output(EXIO_SD_CS, 0);  // CS low = selected
-}
-
-void io_ext_sd_disable() {
-    io_ext_output(EXIO_SD_CS, 1);  // CS high = deselected
 }
