@@ -200,8 +200,13 @@ public:
                 value_ = sustain;
                 break;
             case ENV_RELEASE: {
-                float releaseCoef = expf(-1.0f / (release_s * sr_));
-                value_ *= releaseCoef;
+                /* Coef de release cacheado: solo recalcula el expf si cambia
+                 * release_s, en vez de cada sample durante toda la cola. */
+                if (release_s != relCached_) {
+                    relCached_ = release_s;
+                    relCoef_   = expf(-1.0f / (release_s * sr_));
+                }
+                value_ *= relCoef_;
                 if (value_ < 1e-5f) { value_ = 0.0f; stage_ = ENV_IDLE; }
                 break;
             }
@@ -220,6 +225,8 @@ private:
     float    sr_    = 48000.0f;
     float    value_ = 0.0f;
     EnvStage stage_ = ENV_IDLE;
+    float    relCached_ = -1.0f;  /* release_s del ultimo recalculo de coef */
+    float    relCoef_   = 0.0f;
 };
 
 /* ═══════════════════════════════════════════════════════════════
@@ -249,6 +256,7 @@ public:
     void Reset() {
         memset(z_, 0, sizeof(z_));
         memset(s_, 0, sizeof(s_));
+        coefCtr_ = 0;  /* fuerza recalculo de coefs en el proximo sample */
     }
 
     /**
@@ -258,16 +266,25 @@ public:
      * @return        señal filtrada (LP 24dB/oct)
      */
     float Process(float input, float fc, float res) {
-        /* ── Pre-warping bilineal ── */
-        float wd = TB303_TWOPI * fc;
-        float wa = sr2_ * tanf(wd / sr2_);
-        float g  = wa / sr2_;
+        /* ── Coeficientes a control-rate (cada kCoefInterval samples) ──
+         * El pre-warping bilineal usa tanf(), caro en el hot path. fc/res
+         * vienen de envelopes que se mueven muy lento respecto a 48 kHz, asi
+         * que recalcular cada 8 samples (~6 kHz) es inaudible y quita el
+         * tanf de 7 de cada 8 samples. */
+        if (coefCtr_ == 0) {
+            coefCtr_ = kCoefInterval;
+            float wd = TB303_TWOPI * fc;
+            float wa = sr2_ * tanf(wd / sr2_);
+            float g  = wa / sr2_;
+            G_  = g / (1.0f + g);
+            k_  = res * 3.88f;
+            Gp_ = G_ * G_ * G_ * G_;
+        }
+        coefCtr_--;
 
-        float G  = g / (1.0f + g);
-        float k  = res * 3.88f;
+        const float G = G_, k = k_, Gp = Gp_;
 
         /* Estado global estimado con todos los stages */
-        float Gp = G * G * G * G;
         float SG = G*G*G*s_[0] + G*G*s_[1] + G*s_[2] + s_[3];
         float S  = SG / (1.0f + k * Gp);
 
@@ -284,10 +301,16 @@ public:
     }
 
 private:
+    static constexpr int kCoefInterval = 8;  /* recalc de coefs cada N samples */
     float sr_  = 48000.0f;
     float sr2_ = 96000.0f;
     float z_[4] = {};  /* salidas de cada stage */
     float s_[4] = {};  /* estados (integradores) */
+    /* Coefs cacheados (recalculados a control-rate) */
+    int   coefCtr_ = 0;
+    float G_  = 0.0f;
+    float k_  = 0.0f;
+    float Gp_ = 0.0f;
 };
 
 /* ═══════════════════════════════════════════════════════════════

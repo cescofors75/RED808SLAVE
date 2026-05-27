@@ -8,6 +8,8 @@
 #define SEQUENCER_H
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #define MAX_PATTERNS 128
 #define STEPS_PER_PATTERN 64
@@ -204,6 +206,12 @@ public:
 private:
   // Pattern data: all stored in PSRAM (PatternData* pd)
   PatternData* pd;
+
+  // Protege pd[] entre la tarea de audio/secuencia (loop → processStep)
+  // y la tarea AsyncTCP (callbacks WebSocket que editan patrones).
+  SemaphoreHandle_t patternMutex = nullptr;
+  inline void lockPattern()   { if (patternMutex) xSemaphoreTake(patternMutex, portMAX_DELAY); }
+  inline void unlockPattern() { if (patternMutex) xSemaphoreGive(patternMutex); }
   
   bool playing;
   int patternLength;  // Active step count: 16, 32, or 64

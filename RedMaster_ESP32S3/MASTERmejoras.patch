@@ -1,0 +1,233 @@
+diff --git a/src/Sequencer.cpp b/src/Sequencer.cpp
+index 7d69c27..eb47982 100644
+--- a/src/Sequencer.cpp
++++ b/src/Sequencer.cpp
+@@ -30,6 +30,8 @@ Sequencer::Sequencer() :
+ 
+   memset(songChain, 0, sizeof(songChain));
+ 
++  patternMutex = xSemaphoreCreateMutex();
++
+   // ── Allocate pattern storage in PSRAM. Internal DRAM is too small for this
+   // block plus AsyncTCP/WebSocket/JSON, so PSRAM is a hard requirement.
+   pd = (PatternData*)ps_calloc(1, sizeof(PatternData));
+@@ -182,12 +184,48 @@ void Sequencer::update() {
+ void Sequencer::processStep() {
+   // First: Process looped tracks
+   processLoops();
+-  
+-  // Trigger all active tracks at current step
++
++  // Snapshot del step que va a disparar, bajo lock. Asi una edicion
++  // concurrente del patron (setPatternBulk/clearPattern desde la tarea
++  // WebSocket) no puede "romper" los datos que estamos a punto de disparar.
++  // Los callbacks (que hacen SPI) se ejecutan FUERA del lock.
++  struct StepSnap {
++    bool     active;
++    uint8_t  velocity;
++    uint8_t  div;
++    uint8_t  ratchet;
++    uint8_t  probability;
++    bool     volLockEn;
++    uint8_t  volLockVal;
++    bool     cutoffEn;
++    uint16_t cutoffHz;
++    bool     revEn;
++    uint8_t  revVal;
++  } snap[MAX_TRACKS];
++
++  lockPattern();
++  const int pat = currentPattern;
++  const int st  = currentStep;
++  for (int track = 0; track < MAX_TRACKS; track++) {
++    snap[track].active      = pd->steps[pat][track][st];
++    snap[track].velocity    = pd->velocities[pat][track][st];
++    snap[track].div         = pd->noteLenDivs[pat][track][st];
++    snap[track].ratchet     = pd->ratchets[pat][track][st];
++    snap[track].probability = pd->probabilities[pat][track][st];
++    snap[track].volLockEn   = pd->stepVolumeLockEnabled[pat][track][st];
++    snap[track].volLockVal  = pd->stepVolumeLockValue[pat][track][st];
++    snap[track].cutoffEn    = pd->stepCutoffLockEnabled[pat][track][st];
++    snap[track].cutoffHz    = pd->stepCutoffLockHz[pat][track][st];
++    snap[track].revEn       = pd->stepReverbSendLockEnabled[pat][track][st];
++    snap[track].revVal      = pd->stepReverbSendLockValue[pat][track][st];
++  }
++  unlockPattern();
++
++  // Trigger all active tracks at current step (desde el snapshot)
+   for (int track = 0; track < MAX_TRACKS; track++) {
+     // Check sequencer steps
+-    if (pd->steps[currentPattern][track][currentStep] && !trackMuted[track]) {
+-      uint8_t probability = pd->probabilities[currentPattern][track][currentStep];
++    if (snap[track].active && !trackMuted[track]) {
++      uint8_t probability = snap[track].probability;
+       if (probability < 100) {
+         long roll = random(0, 100);
+         if (roll >= probability) {
+@@ -195,28 +233,28 @@ void Sequencer::processStep() {
+         }
+       }
+ 
+-      uint8_t velocity = pd->velocities[currentPattern][track][currentStep];
+-      uint8_t div = pd->noteLenDivs[currentPattern][track][currentStep];
+-      uint8_t ratchet = pd->ratchets[currentPattern][track][currentStep];
++      uint8_t velocity = snap[track].velocity;
++      uint8_t div = snap[track].div;
++      uint8_t ratchet = snap[track].ratchet;
+       if (ratchet < 1) ratchet = 1;
+       if (ratchet > 4) ratchet = 4;
+-      uint8_t outTrackVolume = pd->stepVolumeLockEnabled[currentPattern][track][currentStep]
+-                ? pd->stepVolumeLockValue[currentPattern][track][currentStep]
++      uint8_t outTrackVolume = snap[track].volLockEn
++                ? snap[track].volLockVal
+                 : trackVolume[track];
+ 
+       if (stepAutomationCallback != nullptr) {
+         stepAutomationCallback(
+           track,
+-          currentStep,
+-          pd->stepCutoffLockEnabled[currentPattern][track][currentStep],
+-          pd->stepCutoffLockHz[currentPattern][track][currentStep],
+-          pd->stepReverbSendLockEnabled[currentPattern][track][currentStep],
+-          pd->stepReverbSendLockValue[currentPattern][track][currentStep],
+-          pd->stepVolumeLockEnabled[currentPattern][track][currentStep],
++          st,
++          snap[track].cutoffEn,
++          snap[track].cutoffHz,
++          snap[track].revEn,
++          snap[track].revVal,
++          snap[track].volLockEn,
+           outTrackVolume
+         );
+       }
+-      
++
+       // Compute max samples for note length (0 = full sample)
+       uint32_t noteLenSamples = 0;
+       if (div > 1) {
+@@ -252,9 +290,11 @@ void Sequencer::processStep() {
+ void Sequencer::setStep(int track, int step, bool active, uint8_t velocity) {
+   if (track < 0 || track >= MAX_TRACKS) return;
+   if (step < 0 || step >= STEPS_PER_PATTERN) return;
+-  
++
++  lockPattern();
+   pd->steps[currentPattern][track][step] = active;
+   pd->velocities[currentPattern][track][step] = velocity;
++  unlockPattern();
+ }
+ 
+ bool Sequencer::getStep(int track, int step) {
+@@ -274,7 +314,8 @@ bool Sequencer::getStep(int pattern, int track, int step) {
+ 
+ void Sequencer::clearPattern(int pattern) {
+   if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+-  
++
++  lockPattern();
+   // Bulk memset — orders of magnitude faster than element-by-element on PSRAM
+   memset(pd->steps[pattern],                  0, sizeof(pd->steps[pattern]));           // false
+   memset(pd->velocities[pattern],           127, sizeof(pd->velocities[pattern]));      // 127
+@@ -295,6 +336,7 @@ void Sequencer::clearPattern(int pattern) {
+       pd->stepCutoffLockHz[pattern][t][s] = 1000;
+     }
+   }
++  unlockPattern();
+ }
+ 
+ void Sequencer::clearPattern() {
+@@ -303,11 +345,12 @@ void Sequencer::clearPattern() {
+ 
+ void Sequencer::clearTrack(int track) {
+   if (track < 0 || track >= MAX_TRACKS) return;
+-  
++
++  lockPattern();
+   for (int s = 0; s < STEPS_PER_PATTERN; s++) {
+     pd->steps[currentPattern][track][s] = false;
+   }
+-  
++  unlockPattern();
+ }
+ 
+ // ============= VELOCITY EDITING =============
+@@ -455,7 +498,8 @@ uint8_t Sequencer::getStepFlags(int pattern, int track, int step) {
+ 
+ void Sequencer::setPatternBulk(int pattern, const bool stepsData[MAX_TRACKS][STEPS_PER_PATTERN], const uint8_t velsData[MAX_TRACKS][STEPS_PER_PATTERN]) {
+   if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+-  
++
++  lockPattern();
+   for (int t = 0; t < MAX_TRACKS; t++) {
+     for (int s = 0; s < STEPS_PER_PATTERN; s++) {
+       pd->steps[pattern][t][s] = stepsData[t][s];
+@@ -470,12 +514,15 @@ void Sequencer::setPatternBulk(int pattern, const bool stepsData[MAX_TRACKS][STE
+       pd->stepReverbSendLockValue[pattern][t][s] = 0;
+     }
+   }
++  unlockPattern();
+ }
+ 
+ void Sequencer::selectPattern(int pattern) {
+   if (pattern < 0 || pattern >= MAX_PATTERNS) return;
+-  
++
++  lockPattern();
+   currentPattern = pattern;
++  unlockPattern();
+ }
+ 
+ void Sequencer::muteTrack(int track, bool muted) {
+diff --git a/src/Sequencer.h b/src/Sequencer.h
+index cbe8c0f..769c9d3 100644
+--- a/src/Sequencer.h
++++ b/src/Sequencer.h
+@@ -8,6 +8,8 @@
+ #define SEQUENCER_H
+ 
+ #include <Arduino.h>
++#include <freertos/FreeRTOS.h>
++#include <freertos/semphr.h>
+ 
+ #define MAX_PATTERNS 128
+ #define STEPS_PER_PATTERN 64
+@@ -204,6 +206,12 @@ public:
+ private:
+   // Pattern data: all stored in PSRAM (PatternData* pd)
+   PatternData* pd;
++
++  // Protege pd[] entre la tarea de audio/secuencia (loop → processStep)
++  // y la tarea AsyncTCP (callbacks WebSocket que editan patrones).
++  SemaphoreHandle_t patternMutex = nullptr;
++  inline void lockPattern()   { if (patternMutex) xSemaphoreTake(patternMutex, portMAX_DELAY); }
++  inline void unlockPattern() { if (patternMutex) xSemaphoreGive(patternMutex); }
+   
+   bool playing;
+   int patternLength;  // Active step count: 16, 32, or 64
+diff --git a/src/WebInterface.cpp b/src/WebInterface.cpp
+index 4a53df0..8ec2ad9 100644
+--- a/src/WebInterface.cpp
++++ b/src/WebInterface.cpp
+@@ -1285,6 +1285,10 @@ bool WebInterface::begin(const char* apSsid, const char* apPassword,
+     }
+     String err;
+     String file = request->getParam("file")->value();
++    if (file.indexOf("..") >= 0) {  // higiene de ruta: rechazar traversal
++      request->send(400, "application/json", "{\"error\":\"bad_path\"}");
++      return;
++    }
+     if (!loadPatternBankFromFs(file, &err)) {
+       String out = String("{\"error\":\"") + err + "\"}";
+       request->send(400, "application/json", out);
+@@ -1734,6 +1738,11 @@ refresh();if(auto_)startAuto();
+     // === MODE 2: From file path (for preview before loading) ===
+     if (request->hasParam("file")) {
+       String filePath = request->getParam("file")->value();
++      // Higiene de ruta: rechazar traversal y rutas vacias (lectura solo dentro de LittleFS)
++      if (filePath.length() == 0 || filePath.indexOf("..") >= 0) {
++        request->send(400, "application/json", "{\"error\":\"bad_path\"}");
++        return;
++      }
+       if (!filePath.startsWith("/")) filePath = "/" + filePath;
+       
+       File file = LittleFS.open(filePath, "r");

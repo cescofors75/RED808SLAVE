@@ -1795,6 +1795,11 @@ refresh();if(auto_)startAuto();
     // === MODE 2: From file path (for preview before loading) ===
     if (request->hasParam("file")) {
       String filePath = request->getParam("file")->value();
+      // Higiene de ruta: rechazar traversal y rutas vacias (lectura solo dentro de LittleFS)
+      if (filePath.length() == 0 || filePath.indexOf("..") >= 0) {
+        request->send(400, "application/json", "{\"error\":\"bad_path\"}");
+        return;
+      }
       if (!filePath.startsWith("/")) filePath = "/" + filePath;
       
       File file = LittleFS.open(filePath, "r");

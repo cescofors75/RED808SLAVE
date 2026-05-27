@@ -30,6 +30,8 @@ Sequencer::Sequencer() :
 
   memset(songChain, 0, sizeof(songChain));
 
+  patternMutex = xSemaphoreCreateMutex();
+
   // ── Allocate pattern storage in PSRAM. Internal DRAM is too small for this
   // block plus AsyncTCP/WebSocket/JSON, so PSRAM is a hard requirement.
   pd = (PatternData*)ps_calloc(1, sizeof(PatternData));
@@ -182,12 +184,48 @@ void Sequencer::update() {
 void Sequencer::processStep() {
   // First: Process looped tracks
   processLoops();
-  
-  // Trigger all active tracks at current step
+
+  // Snapshot del step que va a disparar, bajo lock. Asi una edicion
+  // concurrente del patron (setPatternBulk/clearPattern desde la tarea
+  // WebSocket) no puede "romper" los datos que estamos a punto de disparar.
+  // Los callbacks (que hacen SPI) se ejecutan FUERA del lock.
+  struct StepSnap {
+    bool     active;
+    uint8_t  velocity;
+    uint8_t  div;
+    uint8_t  ratchet;
+    uint8_t  probability;
+    bool     volLockEn;
+    uint8_t  volLockVal;
+    bool     cutoffEn;
+    uint16_t cutoffHz;
+    bool     revEn;
+    uint8_t  revVal;
+  } snap[MAX_TRACKS];
+
+  lockPattern();
+  const int pat = currentPattern;
+  const int st  = currentStep;
+  for (int track = 0; track < MAX_TRACKS; track++) {
+    snap[track].active      = pd->steps[pat][track][st];
+    snap[track].velocity    = pd->velocities[pat][track][st];
+    snap[track].div         = pd->noteLenDivs[pat][track][st];
+    snap[track].ratchet     = pd->ratchets[pat][track][st];
+    snap[track].probability = pd->probabilities[pat][track][st];
+    snap[track].volLockEn   = pd->stepVolumeLockEnabled[pat][track][st];
+    snap[track].volLockVal  = pd->stepVolumeLockValue[pat][track][st];
+    snap[track].cutoffEn    = pd->stepCutoffLockEnabled[pat][track][st];
+    snap[track].cutoffHz    = pd->stepCutoffLockHz[pat][track][st];
+    snap[track].revEn       = pd->stepReverbSendLockEnabled[pat][track][st];
+    snap[track].revVal      = pd->stepReverbSendLockValue[pat][track][st];
+  }
+  unlockPattern();
+
+  // Trigger all active tracks at current step (desde el snapshot)
   for (int track = 0; track < MAX_TRACKS; track++) {
     // Check sequencer steps
-    if (pd->steps[currentPattern][track][currentStep] && !trackMuted[track]) {
-      uint8_t probability = pd->probabilities[currentPattern][track][currentStep];
+    if (snap[track].active && !trackMuted[track]) {
+      uint8_t probability = snap[track].probability;
       if (probability < 100) {
         long roll = random(0, 100);
         if (roll >= probability) {
@@ -195,28 +233,28 @@ void Sequencer::processStep() {
         }
       }
 
-      uint8_t velocity = pd->velocities[currentPattern][track][currentStep];
-      uint8_t div = pd->noteLenDivs[currentPattern][track][currentStep];
-      uint8_t ratchet = pd->ratchets[currentPattern][track][currentStep];
+      uint8_t velocity = snap[track].velocity;
+      uint8_t div = snap[track].div;
+      uint8_t ratchet = snap[track].ratchet;
       if (ratchet < 1) ratchet = 1;
       if (ratchet > 4) ratchet = 4;
-      uint8_t outTrackVolume = pd->stepVolumeLockEnabled[currentPattern][track][currentStep]
-                ? pd->stepVolumeLockValue[currentPattern][track][currentStep]
+      uint8_t outTrackVolume = snap[track].volLockEn
+                ? snap[track].volLockVal
                 : trackVolume[track];
 
       if (stepAutomationCallback != nullptr) {
         stepAutomationCallback(
           track,
-          currentStep,
-          pd->stepCutoffLockEnabled[currentPattern][track][currentStep],
-          pd->stepCutoffLockHz[currentPattern][track][currentStep],
-          pd->stepReverbSendLockEnabled[currentPattern][track][currentStep],
-          pd->stepReverbSendLockValue[currentPattern][track][currentStep],
-          pd->stepVolumeLockEnabled[currentPattern][track][currentStep],
+          st,
+          snap[track].cutoffEn,
+          snap[track].cutoffHz,
+          snap[track].revEn,
+          snap[track].revVal,
+          snap[track].volLockEn,
           outTrackVolume
         );
       }
-      
+
       // Compute max samples for note length (0 = full sample)
       uint32_t noteLenSamples = 0;
       if (div > 1) {
@@ -252,9 +290,11 @@ void Sequencer::processStep() {
 void Sequencer::setStep(int track, int step, bool active, uint8_t velocity) {
   if (track < 0 || track >= MAX_TRACKS) return;
   if (step < 0 || step >= STEPS_PER_PATTERN) return;
-  
+
+  lockPattern();
   pd->steps[currentPattern][track][step] = active;
   pd->velocities[currentPattern][track][step] = velocity;
+  unlockPattern();
 }
 
 bool Sequencer::getStep(int track, int step) {
@@ -274,7 +314,8 @@ bool Sequencer::getStep(int pattern, int track, int step) {
 
 void Sequencer::clearPattern(int pattern) {
   if (pattern < 0 || pattern >= MAX_PATTERNS) return;
-  
+
+  lockPattern();
   // Bulk memset — orders of magnitude faster than element-by-element on PSRAM
   memset(pd->steps[pattern],                  0, sizeof(pd->steps[pattern]));           // false
   memset(pd->velocities[pattern],           127, sizeof(pd->velocities[pattern]));      // 127
@@ -295,6 +336,7 @@ void Sequencer::clearPattern(int pattern) {
       pd->stepCutoffLockHz[pattern][t][s] = 1000;
     }
   }
+  unlockPattern();
 }
 
 void Sequencer::clearPattern() {
@@ -303,11 +345,12 @@ void Sequencer::clearPattern() {
 
 void Sequencer::clearTrack(int track) {
   if (track < 0 || track >= MAX_TRACKS) return;
-  
+
+  lockPattern();
   for (int s = 0; s < STEPS_PER_PATTERN; s++) {
     pd->steps[currentPattern][track][s] = false;
   }
-  
+  unlockPattern();
 }
 
 // ============= VELOCITY EDITING =============
@@ -455,7 +498,8 @@ uint8_t Sequencer::getStepFlags(int pattern, int track, int step) {
 
 void Sequencer::setPatternBulk(int pattern, const bool stepsData[MAX_TRACKS][STEPS_PER_PATTERN], const uint8_t velsData[MAX_TRACKS][STEPS_PER_PATTERN]) {
   if (pattern < 0 || pattern >= MAX_PATTERNS) return;
-  
+
+  lockPattern();
   for (int t = 0; t < MAX_TRACKS; t++) {
     for (int s = 0; s < STEPS_PER_PATTERN; s++) {
       pd->steps[pattern][t][s] = stepsData[t][s];
@@ -470,12 +514,15 @@ void Sequencer::setPatternBulk(int pattern, const bool stepsData[MAX_TRACKS][STE
       pd->stepReverbSendLockValue[pattern][t][s] = 0;
     }
   }
+  unlockPattern();
 }
 
 void Sequencer::selectPattern(int pattern) {
   if (pattern < 0 || pattern >= MAX_PATTERNS) return;
-  
+
+  lockPattern();
   currentPattern = pattern;
+  unlockPattern();
 }
 
 void Sequencer::muteTrack(int track, bool muted) {

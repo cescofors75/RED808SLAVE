@@ -6425,21 +6425,16 @@ static void ProcessCommand()
             float val; memcpy(&val, p + 3, 4);
             /* paramId: 0=decay, 1=pitch, 2=tone, 3=volume, 4=snappy */
             switch(engine){
-                case SYNTH_ENGINE_808: {
-                    uint8_t inst = (instrument < 16) ? padTo808[instrument] : (uint8_t)(instrument % TR808::INST_COUNT);
-                    ApplyDrumSynthParam(SYNTH_ENGINE_808, inst, paramId, val);
+                /* El byte 'instrument' de CMD_SYNTH_PARAM YA llega como id nativo
+                 * del enum: la UI web lo remapea con padToInstrument() antes de
+                 * enviarlo. Por eso aqui se pasa DIRECTO, sin volver a remapear.
+                 * (CMD_SYNTH_TRIGGER si remapea con padTo*, porque alli el byte
+                 *  llega como indice de pad.) */
+                case SYNTH_ENGINE_808:
+                case SYNTH_ENGINE_909:
+                case SYNTH_ENGINE_505:
+                    ApplyDrumSynthParam(engine, instrument, paramId, val);
                     break;
-                }
-                case SYNTH_ENGINE_909: {
-                    uint8_t inst = (instrument < 16) ? padTo909[instrument] : (uint8_t)(instrument % TR909::INST_COUNT);
-                    ApplyDrumSynthParam(SYNTH_ENGINE_909, inst, paramId, val);
-                    break;
-                }
-                case SYNTH_ENGINE_505: {
-                    uint8_t inst = (instrument < 16) ? padTo505[instrument] : (uint8_t)(instrument % TR505::INST_COUNT);
-                    ApplyDrumSynthParam(SYNTH_ENGINE_505, inst, paramId, val);
-                    break;
-                }
                 case SYNTH_ENGINE_303:
                     switch(paramId){
                         case 0: acid303.SetCutoff(val);    break;
